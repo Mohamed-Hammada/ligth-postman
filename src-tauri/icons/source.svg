@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2b2219"/>
+      <stop offset="1" stop-color="#1a140f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="512" cy="440" r="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f2a682" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#f2a682" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="dome" x1="512" y1="292" x2="512" y2="470" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#efa578"/>
+      <stop offset="1" stop-color="#c1603f"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#tile)"/>
+
+  <circle cx="512" cy="440" r="255" fill="url(#glow)"/>
+
+  <line x1="628" y1="350" x2="678" y2="266" stroke="#e2835f" stroke-width="30" stroke-linecap="round" opacity="0.95"/>
+  <line x1="672" y1="398" x2="790" y2="342" stroke="#e2835f" stroke-width="30" stroke-linecap="round" opacity="0.5"/>
+
+  <rect x="447" y="788" width="130" height="30" rx="15" fill="#a3907a"/>
+  <rect x="472" y="500" width="80" height="292" rx="24" fill="#c9b89e"/>
+
+  <path d="M 364 470 A 148 148 0 0 1 660 470 Z" fill="url(#dome)"/>
+  <rect x="360" y="462" width="304" height="40" rx="18" fill="#984c32"/>
+</svg>

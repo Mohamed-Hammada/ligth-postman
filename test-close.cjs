@@ -1,0 +1,12478 @@
+<script lang="ts">
+  import { onMount, tick } from "svelte";
+  import { translate, RTL_LOCALES, type Locale } from "$lib/i18n";
+  import {
+    api,
+    describeError,
+    isAppError,
+    type Auth,
+    type CollectionImportReport,
+    type Environment,
+    type EnvironmentWithProject,
+    type EnvironmentImportReport,
+    type Folder,
+    type GeneratedApiDefinition,
+    type FormDataPart,
+    type HeaderEntry,
+    type LocalWorkspaceImportReport,
+    type Project,
+    type QueryParam,
+    type UrlEncodedItem,
+    type RequestFull,
+    type RequestDiagnostics,
+    type RequestSettings,
+    type RequestSummary,
+    type RequestSearchResult,
+    type ResolvedTemplate,
+    type ResponseMeta,
+    type ResponseSummary,
+    type SnippetMode,
+    type SnippetTarget,
+    type VariableView,
+    type ConsoleEvent,
+    type ConsoleLevel,
+    type GitStatus,
+    type GitCommit,
+    type WorkspaceGitSettings,
+    type LegacyGitSettingsCandidate,
+    type WorkspaceImportReport,
+    type GitHubUser,
+    type GitHubRepoInfo,
+    type AiSettings,
+    type AiProviderKind,
+    type DiscoveredEndpoint,
+    type GeneratedTestsAndDocs,
+    type SampleResponse,
+    type SourceProjectReport,
+    type UpdateAiSettingsInput,
+    type SystemDiagnostics,
+    type Workspace,
+    type ProjectHistoryEntry,
+    type ConflictVersions,
+  } from "$lib/api";
+
+  // Svelte action: focuses an element as soon as it mounts (e.g. an inline-rename input that
+  // just appeared). Same effect as the `autofocus` attribute, without the a11y lint warning
+  // that attribute triggers — this is the accessible-equivalent pattern.
+  function focusOnMount(node: HTMLElement) {
+    node.focus();
+    // Select any placeholder/existing text (e.g. "New Project") so typing replaces it outright —
+    // the whole point of dropping straight into rename mode is writing the name in one go.
+    if (node instanceof HTMLInputElement) {
+      node.select();
+    }
+  }
+
+  // Workspaces group projects — one level above Project (Workspace -> Project -> Folder/Request).
+  // There's always at least one (the backend seeds/protects a 'default' workspace), so
+  // activeWorkspaceId only stays null for the instant before the first load resolves.
+  let workspaces = $state<Workspace[]>([]);
+  let activeWorkspaceId = $state<string | null>(null);
+  let workspacePickerOpen = $state(false);
+  async function loadWorkspaces() {
+    try {
+      workspaces = await api.listWorkspaces();
+      if (!activeWorkspaceId || !workspaces.some((w) => w.id === activeWorkspaceId)) {
+        const saved = (() => {
+          try {
+            return localStorage.getItem("lp-active-workspace");
+          } catch {
+            return null;
+          }
+        })();
+        const restored = saved && workspaces.some((w) => w.id === saved) ? saved : null;
+        activeWorkspaceId = restored ?? workspaces[0]?.id ?? null;
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+  async function selectWorkspace(id: string) {
+    if (id === activeWorkspaceId) {
+      workspacePickerOpen = false;
+      return;
+    }
+    activeWorkspaceId = id;
+    workspacePickerOpen = false;
+    try {
+      localStorage.setItem("lp-active-workspace", id);
+    } catch {
+      // workspace choice just won't persist across restarts
+    }
+    selectedProjectId = null;
+    selectedRequest = null;
+    openTabs = [];
+    tabDrafts.clear();
+    await loadProjects();
+    await loadGitSettings();
+  }
+  let renamingWorkspaceId = $state<string | null>(null);
+  let renameWorkspaceValue = $state("");
+  function startRenameWorkspace(ws: Workspace) {
+    renamingWorkspaceId = ws.id;
+    renameWorkspaceValue = ws.name;
+  }
+  async function submitRenameWorkspace(e: Event) {
+    e.preventDefault();
+    const id = renamingWorkspaceId;
+    renamingWorkspaceId = null;
+    if (!id) return;
+    const name = renameWorkspaceValue.trim();
+    if (!name) return;
+    try {
+      const updated = await api.updateWorkspace(id, name);
+      workspaces = workspaces.map((w) => (w.id === id ? updated : w)).sort((a, b) => a.name.localeCompare(b.name));
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+  // Same "create with a placeholder name, then drop straight into inline-rename" pattern as
+  // quickCreateProject — except the picker menu has to stay open so the rename form (which
+  // lives inside it) is actually visible.
+  async function quickCreateWorkspace() {
+    try {
+      const workspace = await api.createWorkspace(t("workspace.defaultName"));
+      workspaces = [...workspaces, workspace].sort((a, b) => a.name.localeCompare(b.name));
+      activeWorkspaceId = workspace.id;
+      try {
+        localStorage.setItem("lp-active-workspace", workspace.id);
+      } catch {
+        // workspace choice just won't persist across restarts
+      }
+      selectedProjectId = null;
+      selectedRequest = null;
+      openTabs = [];
+      tabDrafts.clear();
+      await loadProjects();
+      await loadGitSettings();
+      startRenameWorkspace(workspace);
+      workspacePickerOpen = true;
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  let projects = $state<Project[]>([]);
+  let selectedProjectId = $state<string | null>(null);
+
+  let requests = $state<RequestSummary[]>([]);
+  let selectedRequest = $state<RequestFull | null>(null);
+
+  // Flat (non-nested) folders — a request either sits directly under its project or under one
+  // folder in that project (see models::Folder on the backend).
+  let folders = $state<Folder[]>([]);
+  let expandedFolderIds = $state<Set<string>>(new Set());
+  let renamingFolderId = $state<string | null>(null);
+  let renameFolderValue = $state("");
+
+  // Global — every project's environment picker offers every environment from every project
+  // (not just its own), so this loads once and isn't re-scoped per selected project.
+  let allEnvironments = $state<EnvironmentWithProject[]>([]);
+  async function loadAllEnvironments() {
+    try {
+      allEnvironments = await api.listAllEnvironments();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+  // Grouped for display (the picker shows every environment from every project, so a heading
+  // per source project keeps a 77+-entry list navigable) — already ordered by the backend query.
+  let environmentsByProject = $derived.by(() => {
+    const map = new Map<string, EnvironmentWithProject[]>();
+    for (const env of allEnvironments) {
+      const list = map.get(env.project_name) ?? [];
+      list.push(env);
+      map.set(env.project_name, list);
+    }
+    return map;
+  });
+  // Environments screen search (LP redesign: this screen had no filtering at all, unlike the
+  // request sidebar — a gap on the same "large workspace" scale the rest of the app targets).
+  let envSearchQuery = $state("");
+  let filteredEnvironmentsByProject = $derived.by(() => {
+    const q = envSearchQuery.trim().toLowerCase();
+    if (!q) return environmentsByProject;
+    const filtered = new Map<string, EnvironmentWithProject[]>();
+    for (const [projectName, envs] of environmentsByProject) {
+      const matches = envs.filter((e) => e.name.toLowerCase().includes(q));
+      if (matches.length) filtered.set(projectName, matches);
+    }
+    return filtered;
+  });
+  let selectedEnvironmentId = $state<string | null>(null);
+  // Topbar environment picker — its own open/search state, separate from the Environments
+  // screen's envSearchQuery, so typing here doesn't leave a stale filter behind on that screen.
+  let envPickerOpen = $state(false);
+  let envPickerQuery = $state("");
+  let envPickerFilteredByProject = $derived.by(() => {
+    const q = envPickerQuery.trim().toLowerCase();
+    if (!q) return environmentsByProject;
+    const filtered = new Map<string, EnvironmentWithProject[]>();
+    for (const [projectName, envs] of environmentsByProject) {
+      const matches = envs.filter((e) => e.name.toLowerCase().includes(q));
+      if (matches.length) filtered.set(projectName, matches);
+    }
+    return filtered;
+  });
+  function openEnvPicker() {
+    envPickerQuery = "";
+    envPickerOpen = true;
+  }
+  function pickEnvironment(id: string | null) {
+    selectedEnvironmentId = id;
+    envPickerOpen = false;
+    loadVariables();
+  }
+  let renamingEnvironmentId = $state<string | null>(null);
+  let renameEnvironmentValue = $state("");
+  let urlPreview = $state<ResolvedTemplate | null>(null);
+
+  let projectVariables = $state<VariableView[]>([]);
+  let environmentVariables = $state<VariableView[]>([]);
+  let envVarSearchQuery = $state("");
+  let filteredProjectVariables = $derived.by(() => {
+    const q = envVarSearchQuery.trim().toLowerCase();
+    return q ? projectVariables.filter((v) => v.key.toLowerCase().includes(q)) : projectVariables;
+  });
+  let filteredEnvironmentVariables = $derived.by(() => {
+    const q = envVarSearchQuery.trim().toLowerCase();
+    return q ? environmentVariables.filter((v) => v.key.toLowerCase().includes(q)) : environmentVariables;
+  });
+  // Trailing draft rows for the Global/Environment variable tables — same "always one empty
+  // row, commits when you're done with it" pattern as Params/Headers, just committing to a
+  // real backend variable (createVariable) instead of a client-side array, since each row here
+  // is its own persisted entity rather than a field on the currently-open request.
+  function emptyVarDraft() {
+    return { key: "", value: "", isSecret: false, isLocal: false };
+  }
+  let newGlobalVarDraft = $state(emptyVarDraft());
+  let newEnvVarDraft = $state(emptyVarDraft());
+  let revealedSecrets = $state<Record<string, string>>({});
+  let requestDiagnostics = $state<RequestDiagnostics | null>(null);
+  let copyFeedback = $state("");
+
+  // Draft values typed into the hover-to-add popover on an "Unresolved variable" chip.
+  let missingVarDrafts = $state<Record<string, string>>({});
+
+  let renamingProjectId = $state<string | null>(null);
+  let renameProjectValue = $state("");
+
+  let renamingRequestId = $state<string | null>(null);
+  let renameRequestValue = $state("");
+  function startRenameRequest(id: string, currentName: string) {
+    renamingRequestId = id;
+    renameRequestValue = currentName;
+  }
+  async function submitRenameRequest() {
+    const id = renamingRequestId;
+    const value = renameRequestValue.trim();
+    renamingRequestId = null;
+    if (!id || !value) return;
+    try {
+      const updated = await api.updateRequest({ id, name: value });
+      requests = requests.map((r) => (r.id === updated.id ? { ...r, name: updated.name } : r));
+      openTabs = openTabs.map((t) => (t.id === updated.id ? { ...t, name: updated.name } : t));
+      if (selectedRequest?.id === updated.id) {
+        selectedRequest = { ...selectedRequest, name: updated.name };
+        editName = updated.name;
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Editor tab selection (LP-0406)
+  let activeEditorTab = $state<"params" | "headers" | "auth" | "body" | "scripts" | "settings" | "docs" | "code">("params");
+  let activeScriptTab = $state<"pre" | "post">("pre");
+
+  // Mirrors the active request while it's being edited; reset whenever a
+  // different request is opened (README §5 "editor state" step).
+  let editName = $state("");
+  let editMethod = $state("GET");
+  let editUrl = $state("");
+  let editHeaders = $state<HeaderEntry[]>([]);
+  let editQueryParams = $state<QueryParam[]>([]);
+  let editBody = $state("");
+  let editDescription = $state("");
+  let editAuthType = $state<Auth["type"]>("none");
+  let editAuthBearerToken = $state("");
+  let editAuthBasicUsername = $state("");
+  let editAuthBasicPassword = $state("");
+  let editAuthApiKeyKey = $state("");
+  let editAuthApiKeyValue = $state("");
+  let editAuthApiKeyLocation = $state<"header" | "query">("header");
+
+  // Scripts (LP-0115, LP-0116)
+  let editPreScript = $state("");
+  let editPostScript = $state("");
+
+  // Settings (LP-0114)
+  let editTimeoutMs = $state<number | null>(null);
+  let editFollowRedirects = $state(true);
+  let editMaxRedirects = $state(10);
+  let editVerifySsl = $state(true);
+  let editProxyUrl = $state("");
+  let editHttpVersion = $state("");
+
+  // Body format helpers (LP-0110, LP-0111, LP-0112)
+  let editBodyType = $state<"raw" | "form-data" | "x-www-form-urlencoded" | "binary" | "graphql">("raw");
+  let editGraphqlQuery = $state("");
+  let editGraphqlVariables = $state("");
+  let editFormDataItems = $state<FormDataPart[]>([]);
+  let editUrlEncodedItems = $state<UrlEncodedItem[]>([]);
+  let editBinaryFilePath = $state("");
+
+  // Raw-body content type (LP-0113) — not stored separately: it's read from/written to the
+  // Content-Type header itself, same as Postman's own raw-type picker under the hood, so
+  // switching it doesn't need a new backend column.
+  const RAW_CONTENT_TYPES: { id: string; mime: string; label: string }[] = [
+    { id: "text", mime: "text/plain", label: "body.rawTypeText" },
+    { id: "javascript", mime: "application/javascript", label: "body.rawTypeJavascript" },
+    { id: "json", mime: "application/json", label: "body.rawTypeJson" },
+    { id: "html", mime: "text/html", label: "body.rawTypeHtml" },
+    { id: "xml", mime: "application/xml", label: "body.rawTypeXml" },
+  ];
+  let rawContentType = $derived.by(() => {
+    const header = editHeaders.find((h) => h.key.trim().toLowerCase() === "content-type" && h.enabled);
+    const value = header?.value.trim().toLowerCase() ?? "";
+    return RAW_CONTENT_TYPES.find((t) => value.startsWith(t.mime))?.id ?? "text";
+  });
+  function setRawContentType(id: string) {
+    const type = RAW_CONTENT_TYPES.find((t) => t.id === id);
+    if (!type) return;
+    const idx = editHeaders.findIndex((h) => h.key.trim().toLowerCase() === "content-type");
+    if (idx >= 0) {
+      editHeaders[idx] = { ...editHeaders[idx], value: type.mime, enabled: true };
+      editHeaders = [...editHeaders];
+    } else {
+      editHeaders = withTrailingEmptyRow(
+        [
+          ...editHeaders.filter((h) => h.key.trim() !== ""),
+          { key: "Content-Type", value: type.mime, enabled: true, description: "" },
+        ],
+        () => ({ key: "", value: "", enabled: true, description: "" }),
+      );
+    }
+    scheduleAutoSave();
+  }
+
+  let bodyPrettifyFeedback = $state("");
+
+  /** Simple tag-indenter shared by XML and HTML — inserts a newline between adjacent tags, then
+   * indents each line by nesting depth (closing tags dedent before printing, opening tags indent
+   * after). Not a full formatter (doesn't special-case comments/CDATA/`<pre>` content), but that
+   * matches what "Prettify" buttons in most lightweight tools actually do — good enough for
+   * skimming an API body without reformatting its content in a surprising way. */
+  const HTML_VOID_TAGS = new Set([
+    "br", "hr", "img", "input", "meta", "link", "area", "base", "col", "embed", "source", "track", "wbr",
+  ]);
+
+  function indentTags(input: string): string {
+    // Break only at tag-to-tag boundaries (a ">" immediately followed by a "<") — mixed content
+    // like `<p>Hello <b>world</b>` stays on one line, same as text nodes should.
+    const withBreaks = input.replace(/>\s*</g, ">\n<").trim();
+    let depth = 0;
+    const tagRe = /<(\/?)([a-zA-Z][\w:-]*)\b[^>]*?(\/?)>/g;
+    return withBreaks
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => {
+        const trimmed = line.trim();
+        const startsWithClosing = /^<\//.test(trimmed);
+        // A "line" here can carry more than one tag (an opening tag plus a fully inline pair,
+        // e.g. the `<b>world</b>` above) — net depth change for the line is opens minus closes
+        // minus void/self-closing tags, not just a guess from how the line starts or ends.
+        let netDepthChange = 0;
+        let match: RegExpExecArray | null;
+        tagRe.lastIndex = 0;
+        while ((match = tagRe.exec(trimmed))) {
+          const isClosing = match[1] === "/";
+          const isSelfClosing = match[3] === "/" || HTML_VOID_TAGS.has(match[2].toLowerCase());
+          if (isClosing) netDepthChange -= 1;
+          else if (!isSelfClosing) netDepthChange += 1;
+        }
+        const printDepth = startsWithClosing ? Math.max(depth - 1, 0) : depth;
+        const indented = "  ".repeat(printDepth) + trimmed;
+        depth = Math.max(depth + netDepthChange, 0);
+        return indented;
+      })
+      .join("\n");
+  }
+
+  function isWellFormedXml(input: string): boolean {
+    try {
+      const doc = new DOMParser().parseFromString(input, "application/xml");
+      return doc.getElementsByTagName("parsererror").length === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  function prettifyBody() {
+    if (editBodyType === "graphql") {
+      try {
+        if (editGraphqlVariables && editGraphqlVariables.trim() !== "") {
+          editGraphqlVariables = JSON.stringify(JSON.parse(editGraphqlVariables), null, 2);
+        }
+        bodyPrettifyFeedback = "";
+        scheduleAutoSave();
+      } catch {
+        bodyPrettifyFeedback = "Invalid JSON in Variables";
+        setTimeout(() => (bodyPrettifyFeedback = ""), 2500);
+      }
+      return;
+    }
+    if (rawContentType === "json") {
+      try {
+        editBody = JSON.stringify(JSON.parse(editBody), null, 2);
+        bodyPrettifyFeedback = "";
+        scheduleAutoSave();
+      } catch {
+        bodyPrettifyFeedback = t("body.prettifyInvalidJson");
+        setTimeout(() => (bodyPrettifyFeedback = ""), 2500);
+      }
+      return;
+    }
+    if (rawContentType === "xml") {
+      if (!isWellFormedXml(editBody)) {
+        bodyPrettifyFeedback = t("body.prettifyInvalidXml");
+        setTimeout(() => (bodyPrettifyFeedback = ""), 2500);
+        return;
+      }
+      editBody = indentTags(editBody);
+      bodyPrettifyFeedback = "";
+      scheduleAutoSave();
+      return;
+    }
+    if (rawContentType === "html") {
+      editBody = indentTags(editBody);
+      bodyPrettifyFeedback = "";
+      scheduleAutoSave();
+    }
+  }
+
+  /** Reads the stored `body` string into the editor's per-type state. Mirrors the shapes Rust's
+   * `RequestBody` (tagged `type`) and the frontend's own GraphQL editor (untagged
+   * `{query, variables}`) can produce — anything else is treated as plain "raw" text, which
+   * covers JSON API bodies, AI-generated bodies, and cURL/Postman-imported raw bodies alike. */
+  function parseBodyForEditing(body: string | null | undefined): {
+    bodyType: typeof editBodyType;
+    rawBody: string;
+    graphqlQuery: string;
+    graphqlVariables: string;
+    formDataItems: FormDataPart[];
+    urlEncodedItems: UrlEncodedItem[];
+    binaryFilePath: string;
+  } {
+    const empty = { bodyType: "raw" as const, rawBody: body ?? "", graphqlQuery: "", graphqlVariables: "", formDataItems: [], urlEncodedItems: [], binaryFilePath: "" };
+    if (!body || !body.trim()) return empty;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return empty;
+    }
+    if (typeof parsed !== "object" || parsed === null) return empty;
+    const obj = parsed as Record<string, unknown>;
+
+    if (obj.type === "form_data" && Array.isArray(obj.items)) {
+      return { ...empty, bodyType: "form-data", formDataItems: obj.items as FormDataPart[] };
+    }
+    if (obj.type === "url_encoded" && Array.isArray(obj.items)) {
+      return { ...empty, bodyType: "x-www-form-urlencoded", urlEncodedItems: obj.items as UrlEncodedItem[] };
+    }
+    if (obj.type === "binary") {
+      return { ...empty, bodyType: "binary", binaryFilePath: (obj.file_path as string | null) ?? "" };
+    }
+    if (obj.type === "raw" && typeof obj.data === "string") {
+      return { ...empty, bodyType: "raw", rawBody: obj.data };
+    }
+    if (obj.type === "graphql" || (typeof obj.query === "string" && !("type" in obj))) {
+      const query = typeof obj.query === "string" ? obj.query : "";
+      const variables = obj.variables !== undefined ? JSON.stringify(obj.variables, null, 2) : "";
+      return { ...empty, bodyType: "graphql", graphqlQuery: query, graphqlVariables: variables };
+    }
+    return empty;
+  }
+
+  /** Inverse of `parseBodyForEditing` — builds the exact string the backend's canonical
+   * request model expects for the current `editBodyType`. Raw/GraphQL are sent as plain text
+   * (unchanged, already-working behavior); form-data/urlencoded/binary are wrapped in the
+   * tagged shape `canonical_request::resolve_body` parses into structured, correctly-encoded
+   * bodies (real multipart with a boundary, real percent-encoding, etc.) instead of raw text. */
+  function serializeBodyForStorage(): string {
+    switch (editBodyType) {
+      case "form-data":
+        return JSON.stringify({ type: "form_data", items: withoutEmptyKeyRows(editFormDataItems) });
+      case "x-www-form-urlencoded":
+        return JSON.stringify({ type: "url_encoded", items: withoutEmptyKeyRows(editUrlEncodedItems) });
+      case "binary":
+        return JSON.stringify({ type: "binary", file_path: editBinaryFilePath || null });
+      case "raw":
+      case "graphql":
+      default:
+        return editBody;
+    }
+  }
+
+  // Auto-expanding rows (Params/Headers/Form Data/URL Encoded): the table always keeps exactly
+  // one empty trailing row, so typing a key into it is the "add row" action — no separate
+  // Add-row button needed. Rows with an empty key are stripped again before saving.
+  function withTrailingEmptyRow<T extends { key: string }>(items: T[], makeEmpty: () => T): T[] {
+    const last = items[items.length - 1];
+    if (!last || last.key.trim() !== "") {
+      return [...items, makeEmpty()];
+    }
+    return items;
+  }
+  function withoutEmptyKeyRows<T extends { key: string }>(items: T[]): T[] {
+    return items.filter((item) => item.key.trim() !== "");
+  }
+
+  function growFormDataItems() {
+    editFormDataItems = withTrailingEmptyRow(editFormDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
+  }
+  function removeFormDataItem(index: number) {
+    editFormDataItems = withTrailingEmptyRow(editFormDataItems.filter((_, i) => i !== index), () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
+  }
+  function growUrlEncodedItems() {
+    editUrlEncodedItems = withTrailingEmptyRow(editUrlEncodedItems, () => ({ key: "", value: "", enabled: true }));
+  }
+  function removeUrlEncodedItem(index: number) {
+    editUrlEncodedItems = withTrailingEmptyRow(editUrlEncodedItems.filter((_, i) => i !== index), () => ({ key: "", value: "", enabled: true }));
+  }
+
+  // cURL importer (LP-0608, LP-0609)
+  let curlImportText = $state("");
+  let curlImportName = $state("");
+  let curlImportError = $state("");
+
+  // Import screen tab (collection / environment / cURL) — the full-page Import screen.
+  let importActiveTab = $state<"collection" | "environment" | "curl" | "localWorkspace">("collection");
+
+  // Local Postman "local files" workspace import (a directory tree, not a single JSON blob).
+  let localWorkspacePathInput = $state("");
+  let localWorkspaceImportLoading = $state(false);
+  let localWorkspaceImportError = $state("");
+  let localWorkspaceImportReport = $state<LocalWorkspaceImportReport | null>(null);
+
+  async function importLocalWorkspaceAction() {
+    if (!localWorkspacePathInput.trim() || !activeWorkspaceId) return;
+    localWorkspaceImportLoading = true;
+    localWorkspaceImportError = "";
+    localWorkspaceImportReport = null;
+    try {
+      const report = await api.importLocalPostmanWorkspace(localWorkspacePathInput.trim(), activeWorkspaceId);
+      localWorkspaceImportReport = report;
+      await loadProjects();
+      await loadAllEnvironments();
+      await syncNewProjectIntoWorkspaceRepo();
+    } catch (err) {
+      localWorkspaceImportError = describeError(err);
+    } finally {
+      localWorkspaceImportLoading = false;
+    }
+  }
+
+  // Postman compatibility import/export (LP-0501 - LP-0507, LP-0212)
+  let collectionImportText = $state("");
+  let collectionImportTarget = $state<"new" | "current">("new");
+  let collectionImportLoading = $state(false);
+  let collectionImportError = $state("");
+  let collectionImportReport = $state<CollectionImportReport | null>(null);
+
+  let environmentImportText = $state("");
+  let environmentImportLoading = $state(false);
+  let environmentImportError = $state("");
+  let environmentImportReport = $state<EnvironmentImportReport | null>(null);
+
+  let exportFeedback = $state("");
+
+  let snippetMode = $state<SnippetMode>("placeholder");
+  // Windows CMD curl by default — this app's dev/target environment is Windows; anything else
+  // is one click away in the same dropdown.
+  let snippetTarget = $state<SnippetTarget>("windows_cmd");
+  let snippet = $state("");
+  let snippetError = $state("");
+  let snippetLoading = $state(false);
+
+  let errorMessage = $state("");
+  let loadingRequests = $state(false);
+
+  let sending = $state(false);
+  // A user-initiated cancel is not a failure — it gets a neutral, self-clearing notice next to
+  // Send/Cancel instead of the red error banner every other failed send produces.
+  let sendCancelledNotice = $state("");
+  let sendCancelledNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  let activeResponse = $state<ResponseMeta | null>(null);
+  let activeResponseBody = $state("");
+  let activeResponseTruncated = $state(false);
+  let responseHistory = $state<ResponseSummary[]>([]);
+
+  // Response Pretty / Raw viewer (LP-0403)
+  let responseViewMode = $state<"pretty" | "raw" | "preview">("pretty");
+  // Preview is only offered for responses that actually look like a renderable HTML document —
+  // Content-Type wins when present, a doctype/html-tag sniff covers servers that mislabel it.
+  let responseBodyIsHtml = $derived.by(() => {
+    if (!activeResponseBody) return false;
+    const contentType = activeResponse?.headers?.find((h) => h.key.toLowerCase() === "content-type")?.value.toLowerCase() ?? "";
+    if (contentType.includes("text/html")) return true;
+    if (contentType) return false;
+    return /^\s*<(!doctype html|html)/i.test(activeResponseBody);
+  });
+  let prettyResponseBody = $derived.by(() => {
+    if (!activeResponseBody) return "";
+    if (responseViewMode === "raw") return activeResponseBody;
+    try {
+      const parsed = JSON.parse(activeResponseBody);
+      return JSON.stringify(parsed, null, 2);
+    } catch {
+      return activeResponseBody;
+    }
+  });
+
+  function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+  }
+
+  // Matches exactly the tokens JSON.stringify's own output can contain. Safe to run only on
+  // that output (never on arbitrary/raw response text): well-formed JSON syntax cannot place a
+  // literal <, >, &, or quote character anywhere except inside a string literal, so escaping the
+  // captured string tokens below covers every unsafe character the input could contain.
+  const JSON_TOKEN_RE = /"(?:\\.|[^"\\])*"(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+
+  function highlightJson(source: string): string {
+    return source.replace(JSON_TOKEN_RE, (match, colon: string | undefined) => {
+      if (match[0] === '"') {
+        const str = colon ? match.slice(0, match.length - colon.length) : match;
+        const cls = colon ? "json-key" : "json-string";
+        return `<span class="${cls}">${escapeHtml(str)}</span>${colon ?? ""}`;
+      }
+      if (match === "true" || match === "false") return `<span class="json-boolean">${match}</span>`;
+      if (match === "null") return `<span class="json-null">${match}</span>`;
+      return `<span class="json-number">${match}</span>`;
+    });
+  }
+
+  let responseBodyIsJson = $derived.by(() => {
+    if (!activeResponseBody || responseViewMode === "raw") return false;
+    try {
+      JSON.parse(activeResponseBody);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  let highlightedResponseBody = $derived.by(() => {
+    if (!responseBodyIsJson) return "";
+    return highlightJson(prettyResponseBody);
+  });
+
+  // Response area sub-tabs (Body / Headers / Cookies / Tests) — replaces the old flat stacked layout.
+  let responseSubTab = $state<"body" | "headers" | "cookies" | "tests" | "history">("body");
+
+  function formatByteSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  // Real test-assertion results for the active request's most recent send, sourced from the
+  // console event log (script_engine already emits pass/fail per pm.test() call there) — not
+  // a separate/fake data source.
+  let activeResponseTests = $derived.by(() => {
+    if (!selectedRequest) return [];
+    const evts = consoleEvents.filter(
+      (e) => e.event_type === "test_assertion" && e.request_id === selectedRequest!.id,
+    );
+    if (!evts.length) return [];
+    const latestCorrelationId = evts[evts.length - 1].correlation_id;
+    return evts
+      .filter((e) => e.correlation_id === latestCorrelationId)
+      .map((e) => ({
+        name: (e.details?.name as string | undefined) ?? e.message,
+        passed: Boolean(e.details?.passed),
+        error: (e.details?.error as string | null | undefined) ?? null,
+      }));
+  });
+
+  // Resizable sidebar (drag handle between the project tree and the main workspace). Its default
+  // width scales with the window instead of staying pinned at one small fixed value — otherwise
+  // a maximized/fullscreen or ultrawide window leaves project and request names truncated behind
+  // the same narrow default a small laptop window would use. Once the user drags the handle
+  // themselves, their choice sticks and window resizes stop overriding it.
+  function adaptiveSidebarWidth(): number {
+    return Math.min(420, Math.max(260, Math.round(window.innerWidth * 0.18)));
+  }
+  let sidebarWidth = $state(300);
+  let sidebarResizing = $state(false);
+  let sidebarManuallyResized = false;
+
+  function startSidebarResize(e: MouseEvent) {
+    e.preventDefault();
+    sidebarResizing = true;
+    sidebarManuallyResized = true;
+    const onMove = (ev: MouseEvent) => {
+      sidebarWidth = Math.min(600, Math.max(200, ev.clientX));
+    };
+    const onUp = () => {
+      sidebarResizing = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  // Resizable response pane (drag handle between the request editor and the docked response
+  // panel — same pattern as the sidebar handle above). Defaults to roughly 42% of the window's
+  // height so the response gets real room on first launch instead of a small fixed guess, same
+  // reasoning as adaptiveSidebarWidth.
+  function adaptiveResponsePaneHeight(): number {
+    return Math.min(560, Math.max(220, Math.round(window.innerHeight * 0.42)));
+  }
+  let responsePaneHeight = $state(320);
+  let responsePaneResizing = $state(false);
+  let responsePaneManuallyResized = false;
+  // Minimized down to a thin status bar (not the same as a small resized height — collapse
+  // remembers the full height underneath and restores it exactly on expand).
+  let responsePaneCollapsed = $state(false);
+  function setResponsePaneCollapsed(value: boolean) {
+    responsePaneCollapsed = value;
+    try {
+      localStorage.setItem("lp-response-pane-collapsed", String(value));
+    } catch {
+      // collapsed state just won't persist across restarts
+    }
+  }
+
+  function startResponsePaneResize(e: MouseEvent) {
+    e.preventDefault();
+    responsePaneResizing = true;
+    responsePaneManuallyResized = true;
+    const startY = e.clientY;
+    const startHeight = responsePaneHeight;
+    const onMove = (ev: MouseEvent) => {
+      responsePaneHeight = Math.min(window.innerHeight - 220, Math.max(160, startHeight - (ev.clientY - startY)));
+    };
+    const onUp = () => {
+      responsePaneResizing = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  // Resizable console drawer (drag handle along its top edge) — same pattern as the response
+  // pane above, since it's the same job (a docked panel you drag taller to read more of).
+  let consoleHeight = $state(260);
+  let consoleResizing = $state(false);
+
+  function startConsoleResize(e: MouseEvent) {
+    e.preventDefault();
+    consoleResizing = true;
+    const startY = e.clientY;
+    const startHeight = consoleHeight;
+    const onMove = (ev: MouseEvent) => {
+      consoleHeight = Math.min(window.innerHeight - 160, Math.max(120, startHeight - (ev.clientY - startY)));
+    };
+    const onUp = () => {
+      consoleResizing = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  // Screen navigation shell — a real left-rail switcher between full-page screens. Each
+  // screen reuses the exact same state/functions the old modal-based UI used; nothing here
+  // introduces a second source of truth for projects/requests/environments/git/etc.
+  type ScreenId = "workspace" | "environments" | "git" | "import" | "launcher" | "history" | "settings";
+  let activeScreen = $state<ScreenId>("workspace");
+  // `label` stores an i18n key (see SHORTCUT_DEFS above for why) — resolve via t(s.label).
+  const SCREENS: { id: ScreenId; label: string }[] = [
+    { id: "workspace", label: "rail.workspace" },
+    { id: "environments", label: "rail.environments" },
+    { id: "git", label: "rail.git" },
+    { id: "import", label: "rail.import" },
+    { id: "launcher", label: "rail.launcher" },
+    { id: "history", label: "rail.history" },
+    { id: "settings", label: "rail.settings" },
+  ];
+
+  // Sidebar show/hide, for the Workspace screen's project/request explorer. Persisted —
+  // collapsed/expanded is a deliberate choice that should stick until the user changes it
+  // again, not reset back to a default every launch.
+  let sidebarVisible = $state(true);
+  // Icon-only by default (VS Code/IntelliJ activity-bar convention) — the labeled 220px rail
+  // was previously the default, costing real width for a 7-item nav a user checks in at a
+  // glance. Each rail button already carries a `title` tooltip, so nothing is lost by
+  // collapsing; a user who expands it gets that choice remembered via lp-rail-visible below.
+  let screensRailVisible = $state(false);
+  let rightSidebarVisible = $state(true);
+
+  function setSidebarVisible(v: boolean) {
+    sidebarVisible = v;
+    try { localStorage.setItem("lp-sidebar-visible", String(v)); } catch {}
+  }
+  function setScreensRailVisible(v: boolean) {
+    screensRailVisible = v;
+    try { localStorage.setItem("lp-rail-visible", String(v)); } catch {}
+  }
+  function setRightSidebarVisible(v: boolean) {
+    rightSidebarVisible = v;
+    try { localStorage.setItem("lp-right-sidebar-visible", String(v)); } catch {}
+  }
+  // The full-detail response view (stat sidebar, tests, bigger body) used to be its own rail
+  // screen, but it's meaningless without Workspace's request context — it's now an expand
+  // mode reached from the inline response panel instead of a peer top-level destination.
+  let responseExpanded = $state(false);
+
+  // Real, persisted theme toggle — light is this design system's own default; dark, terminal and
+  // blueprint are genuine alternate palettes (see the matching [data-theme="..."] blocks), not
+  // static mockups. `label` is an i18n key, same convention as SCREENS above.
+  type ThemeMode = "light" | "dark" | "terminal" | "blueprint";
+  const THEME_OPTIONS: { id: ThemeMode; label: string }[] = [
+    { id: "light", label: "settings.light" },
+    { id: "dark", label: "settings.dark" },
+    { id: "terminal", label: "theme.terminal" },
+    { id: "blueprint", label: "theme.blueprint" },
+  ];
+  let themeMode = $state<ThemeMode>("light");
+
+  // Real, user-adjustable auto-sync interval (Settings screen) — previously a hardcoded 60000ms
+  // literal with no way to change it. Persisted so it survives a restart.
+  let autoSyncIntervalMs = $state(60000);
+  function setAutoSyncIntervalMs(ms: number) {
+    autoSyncIntervalMs = ms;
+    try {
+      localStorage.setItem("lp-auto-sync-interval-ms", String(ms));
+    } catch {
+      // interval just won't persist across restarts
+    }
+  }
+  function setThemeMode(mode: ThemeMode) {
+    themeMode = mode;
+    try {
+      localStorage.setItem("lp-theme", mode);
+    } catch {
+      // localStorage can throw in a locked-down webview profile — theme just won't persist.
+    }
+  }
+
+  // Accent color override, independent of the theme — `null` means "use the active theme's own
+  // built-in accent" (terracotta / lifted terracotta / teal / blue, per [data-theme]). Presets
+  // are drawn from the app's existing --method-* hues so every option is already a color proven
+  // legible elsewhere in the UI, not invented fresh.
+  const ACCENT_PRESETS: { id: string; hex: string }[] = [
+    { id: "terracotta", hex: "#c1603f" },
+    { id: "teal", hex: "#0f7d8a" },
+    { id: "blue", hex: "#1c5fa8" },
+    { id: "violet", hex: "#6b3fa0" },
+    { id: "rose", hex: "#d1174a" },
+    { id: "amber", hex: "#9a6b00" },
+    { id: "green", hex: "#1a7f37" },
+    { id: "slate", hex: "#57606a" },
+  ];
+  let accentColor = $state<string | null>(null);
+  function setAccentColor(hex: string | null) {
+    accentColor = hex;
+    try {
+      if (hex) localStorage.setItem("lp-accent-color", hex);
+      else localStorage.removeItem("lp-accent-color");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  /** WCAG relative-luminance pick between the app's own light-cream and dark-ink text colors —
+   * covers any custom accent a user picks, not just the theme's own pre-tuned contrast pairs. */
+  function contrastTextFor(hex: string): string {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+    if (!m) return "#fff9f0";
+    const n = parseInt(m[1], 16);
+    const lin = (v: number) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+    const r = lin(((n >> 16) & 255) / 255);
+    const g = lin(((n >> 8) & 255) / 255);
+    const b = lin((n & 255) / 255);
+    const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return luminance > 0.4 ? "#201a14" : "#fff9f0";
+  }
+  /** Inline custom-property overrides for `.app-shell`, layered on top of whatever the active
+   * theme already sets — only present once the user picks a color away from the theme default. */
+  function accentStyleOverride(hex: string | null): string {
+    if (!hex) return "";
+    const contrast = contrastTextFor(hex);
+    const hover = `color-mix(in srgb, ${hex} 80%, black)`;
+    return (
+      `--color-accent: ${hex}; --color-accent-hover: ${hover}; --color-accent-contrast: ${contrast}; ` +
+      `--color-primary: ${hex}; --color-primary-hover: ${hover}; --color-primary-contrast: ${contrast}; ` +
+      `--color-focus: ${hex};`
+    );
+  }
+
+  // Main surface-color (background/panel) presets — a level beyond just the accent, but
+  // deliberately scoped to the light/dark Softline pair only: terminal and blueprint are
+  // complete, fixed aesthetic packages the same way method colors are fixed, not something a
+  // tint knob should reach into. Each preset is a hand-picked full set (not derived at runtime
+  // from one hex) so contrast against the theme's own unchanged text color stays safe — every
+  // value sits at roughly the same lightness as the token it replaces, only the hue shifts.
+  const SURFACE_TINTS: {
+    id: string;
+    light: { bg: string; bgSecondary: string; bgTertiary: string; panelBg: string; sidebarBg: string; border: string };
+    dark: { bg: string; bgSecondary: string; bgTertiary: string; panelBg: string; sidebarBg: string; border: string };
+  }[] = [
+    {
+      id: "coolGray",
+      light: { bg: "#eef1f4", bgSecondary: "#f7f9fb", bgTertiary: "#e4e9ee", panelBg: "#f7f9fb", sidebarBg: "#f7f9fb", border: "#dbe2e8" },
+      dark: { bg: "#14171c", bgSecondary: "#1b1f26", bgTertiary: "#232830", panelBg: "#1b1f26", sidebarBg: "#14171c", border: "#2c323b" },
+    },
+    {
+      id: "warmSand",
+      light: { bg: "#faf3e8", bgSecondary: "#fffaf1", bgTertiary: "#f3e6d0", panelBg: "#fffaf1", sidebarBg: "#fffaf1", border: "#ecdcc0" },
+      dark: { bg: "#211a10", bgSecondary: "#2b2116", bgTertiary: "#35291b", panelBg: "#2b2116", sidebarBg: "#211a10", border: "#453626" },
+    },
+    {
+      id: "rose",
+      light: { bg: "#fdf1f0", bgSecondary: "#fff8f7", bgTertiary: "#fbe3e1", panelBg: "#fff8f7", sidebarBg: "#fff8f7", border: "#f2d4d1" },
+      dark: { bg: "#201314", bgSecondary: "#2b1a1c", bgTertiary: "#362124", panelBg: "#2b1a1c", sidebarBg: "#201314", border: "#45282b" },
+    },
+    {
+      id: "sage",
+      light: { bg: "#f1f6ee", bgSecondary: "#f9fcf7", bgTertiary: "#e5edde", panelBg: "#f9fcf7", sidebarBg: "#f9fcf7", border: "#d7e4cd" },
+      dark: { bg: "#161c13", bgSecondary: "#1e261a", bgTertiary: "#26301b", panelBg: "#1e261a", sidebarBg: "#161c13", border: "#34412c" },
+    },
+  ];
+  let surfaceTint = $state<string | null>(null);
+  function setSurfaceTint(id: string | null) {
+    surfaceTint = id;
+    try {
+      if (id) localStorage.setItem("lp-surface-tint", id);
+      else localStorage.removeItem("lp-surface-tint");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  let surfaceTintAvailable = $derived(themeMode === "light" || themeMode === "dark");
+  function isCustomSurfaceTint(id: string | null): id is string {
+    return !!id && id.startsWith("#");
+  }
+  /** A custom color has no hand-picked full set, so the rest of the surfaces are derived from
+   * it via color-mix — following the same lighten/darken direction the built-in light and dark
+   * tokens already use for their own secondary/tertiary steps (dark surfaces get lighter as they
+   * layer up; light surfaces get a touch darker/more tinted), rather than one formula for both. */
+  function customSurfaceStyleOverride(hex: string, mode: "light" | "dark"): string {
+    if (mode === "dark") {
+      return (
+        `--color-bg: ${hex}; --color-bg-secondary: color-mix(in srgb, ${hex} 85%, white); ` +
+        `--color-bg-tertiary: color-mix(in srgb, ${hex} 75%, white); --color-panel-bg: color-mix(in srgb, ${hex} 85%, white); ` +
+        `--color-sidebar-bg: ${hex}; --color-border: color-mix(in srgb, ${hex} 60%, white);`
+      );
+    }
+    return (
+      `--color-bg: ${hex}; --color-bg-secondary: color-mix(in srgb, ${hex} 90%, white); ` +
+      `--color-bg-tertiary: color-mix(in srgb, ${hex} 85%, black); --color-panel-bg: color-mix(in srgb, ${hex} 90%, white); ` +
+      `--color-sidebar-bg: color-mix(in srgb, ${hex} 90%, white); --color-border: color-mix(in srgb, ${hex} 70%, black);`
+    );
+  }
+  function surfaceStyleOverride(id: string | null, mode: ThemeMode): string {
+    if (!id || (mode !== "light" && mode !== "dark")) return "";
+    if (isCustomSurfaceTint(id)) return customSurfaceStyleOverride(id, mode);
+    const tint = SURFACE_TINTS.find((t) => t.id === id);
+    if (!tint) return "";
+    const v = mode === "dark" ? tint.dark : tint.light;
+    return (
+      `--color-bg: ${v.bg}; --color-bg-secondary: ${v.bgSecondary}; --color-bg-tertiary: ${v.bgTertiary}; ` +
+      `--color-panel-bg: ${v.panelBg}; --color-sidebar-bg: ${v.sidebarBg}; --color-border: ${v.border};`
+    );
+  }
+
+  // Advanced appearance (LP-1405): font family and text color, one layer further than the
+  // accent/tint controls above — same override-on-top-of-the-active-theme approach, same
+  // localStorage persistence, same "empty = theme's own default, untouched" convention.
+  const THEME_FONT_OPTIONS: { id: string; label: string; family: string }[] = [
+    { id: "newsreader", label: "Newsreader", family: '"Newsreader", Georgia, serif' },
+    { id: "work-sans", label: "Work Sans", family: '"Work Sans", system-ui, sans-serif' },
+    { id: "space-grotesk", label: "Space Grotesk", family: '"Space Grotesk", system-ui, sans-serif' },
+    { id: "jetbrains-mono", label: "JetBrains Mono", family: '"JetBrains Mono", ui-monospace, monospace' },
+    { id: "space-mono", label: "Space Mono", family: '"Space Mono", ui-monospace, monospace' },
+  ];
+  let headingFontOverride = $state<string | null>(null);
+  let bodyFontOverride = $state<string | null>(null);
+  function setHeadingFontOverride(id: string | null) {
+    headingFontOverride = id;
+    try {
+      if (id) localStorage.setItem("lp-heading-font", id);
+      else localStorage.removeItem("lp-heading-font");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  function setBodyFontOverride(id: string | null) {
+    bodyFontOverride = id;
+    try {
+      if (id) localStorage.setItem("lp-body-font", id);
+      else localStorage.removeItem("lp-body-font");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  function fontStyleOverride(headingId: string | null, bodyId: string | null): string {
+    const heading = THEME_FONT_OPTIONS.find((f) => f.id === headingId);
+    const body = THEME_FONT_OPTIONS.find((f) => f.id === bodyId);
+    let css = "";
+    if (heading) css += `--font-heading: ${heading.family}; `;
+    if (body) css += `--font-sans: ${body.family}; `;
+    return css;
+  }
+
+  let textColorOverride = $state<string | null>(null);
+  function setTextColorOverride(hex: string | null) {
+    textColorOverride = hex;
+    try {
+      if (hex) localStorage.setItem("lp-text-color", hex);
+      else localStorage.removeItem("lp-text-color");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  /** Secondary/tertiary text steps are derived by mixing toward transparent (not toward a fixed
+   * black/white) — the same trick `--color-bg-hover` already uses elsewhere in this file — so
+   * they dim consistently against whatever background (including a custom surface tint) the
+   * text actually sits on, rather than assuming a light or dark ground. */
+  function textColorStyleOverride(hex: string | null): string {
+    if (!hex) return "";
+    return (
+      `--color-text: ${hex}; ` +
+      `--color-text-secondary: color-mix(in srgb, ${hex} 75%, transparent); ` +
+      `--color-text-tertiary: color-mix(in srgb, ${hex} 55%, transparent);`
+    );
+  }
+  /** Live WCAG contrast readout for the custom text-color picker — reuses the exact relative
+   * luminance formula `contrastTextFor` above already implements, just returning the ratio
+   * instead of picking a side, so the UI can warn before the user saves an unreadable color. */
+  function contrastRatio(hexA: string, hexB: string): number | null {
+    const parse = (h: string) => {
+      const m = /^#?([0-9a-f]{6})$/i.exec(h.trim());
+      if (!m) return null;
+      const n = parseInt(m[1], 16);
+      const lin = (v: number) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * lin(((n >> 16) & 255) / 255) + 0.7152 * lin(((n >> 8) & 255) / 255) + 0.0722 * lin((n & 255) / 255);
+    };
+    const la = parse(hexA);
+    const lb = parse(hexB);
+    if (la === null || lb === null) return null;
+    const [hi, lo] = la > lb ? [la, lb] : [lb, la];
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  /** The background the custom text color would actually sit on right now — reads the live
+   * computed value rather than re-deriving it from theme/tint state, since a tint can itself be
+   * a hand-picked preset or an arbitrary custom color. */
+  function currentComputedBg(): string | null {
+    const shell = document.querySelector(".app-shell");
+    if (!shell) return null;
+    const v = getComputedStyle(shell).getPropertyValue("--color-bg").trim();
+    return /^#[0-9a-f]{6}$/i.test(v) ? v : null;
+  }
+  let textColorContrastWarning = $derived.by(() => {
+    if (!textColorOverride) return "";
+    const bg = currentComputedBg();
+    if (!bg) return "";
+    const ratio = contrastRatio(textColorOverride, bg);
+    if (ratio === null || ratio >= 4.5) return "";
+    return t("settings.textColorLowContrast", { ratio: ratio.toFixed(1) });
+  });
+
+  // i18n: locale drives both the string dictionary (t()) and the document's real text
+  // direction — Arabic runs right-to-left, and dir="rtl" on <html> is what makes flexbox's
+  // "row" axis (used throughout this stylesheet) actually mirror instead of just the text.
+  let locale = $state<Locale>("en");
+  function t(key: string, params?: Record<string, string | number>): string {
+    return translate(locale, key, params);
+  }
+  function applyLocale(l: Locale) {
+    try {
+      document.documentElement.lang = l;
+      document.documentElement.dir = RTL_LOCALES.includes(l) ? "rtl" : "ltr";
+    } catch {
+      // SSR-safe no-op; onMount always runs in the browser so this only matters for symmetry.
+    }
+  }
+  function setLocale(l: Locale) {
+    locale = l;
+    applyLocale(l);
+    try {
+      localStorage.setItem("lp-locale", l);
+    } catch {
+      // won't persist across restarts — not fatal.
+    }
+  }
+
+  // Icon & text size: every size in this stylesheet is in rem, which is relative to the root
+  // <html> element's font-size specifically (not the nearest ancestor's) — so scaling that one
+  // root value scales every rem-sized icon and text label app-wide with no per-element changes.
+  let uiScale = $state(100);
+  function setUiScale(pct: number) {
+    uiScale = pct;
+    try {
+      document.documentElement.style.fontSize = `${pct}%`;
+      localStorage.setItem("lp-ui-scale", String(pct));
+    } catch {
+      // won't persist across restarts, and this one load won't be scaled — not fatal.
+    }
+  }
+
+  // Real system diagnostics (RSS via sysinfo, SQLite/WAL size, entity counts) for the
+  // resource-budget widget — never a placeholder number.
+  let systemDiagnostics = $state<SystemDiagnostics | null>(null);
+  async function refreshSystemDiagnostics() {
+    try {
+      systemDiagnostics = await api.getSystemDiagnostics();
+    } catch {
+      // Diagnostics are informational — a failure here shouldn't surface as an app error.
+    }
+  }
+
+  // Real per-project request counts for the Launcher screen (one query for every project).
+  let projectRequestCounts = $state<Record<string, number>>({});
+  async function refreshProjectRequestCounts() {
+    try {
+      projectRequestCounts = await api.getProjectRequestCounts();
+    } catch {
+      // Informational only.
+    }
+  }
+
+  // Real project-wide History screen state.
+  let projectHistory = $state<ProjectHistoryEntry[]>([]);
+  let historyLoading = $state(false);
+  let historySearchQuery = $state("");
+  let historyShowFailuresOnly = $state(false);
+  async function refreshProjectHistory() {
+    if (!selectedProjectId) {
+      projectHistory = [];
+      return;
+    }
+    historyLoading = true;
+    try {
+      projectHistory = await api.listProjectHistory(selectedProjectId, 200);
+    } catch (err) {
+      errorMessage = describeError(err);
+    } finally {
+      historyLoading = false;
+    }
+  }
+  let filteredProjectHistory = $derived.by(() => {
+    const q = historySearchQuery.trim().toLowerCase();
+    return projectHistory.filter((h) => {
+      if (historyShowFailuresOnly && h.status < 400) return false;
+      if (!q) return true;
+      return (
+        h.request_name.toLowerCase().includes(q) ||
+        h.method.toLowerCase().includes(q) ||
+        h.url.toLowerCase().includes(q) ||
+        String(h.status).includes(q)
+      );
+    });
+  });
+
+  // Command palette — real fuzzy-ish search over actual projects/requests, real actions only
+  // (open the project, open the request). No fabricated "commands".
+  let paletteOpen = $state(false);
+  let paletteQuery = $state("");
+  let paletteInputEl = $state<HTMLInputElement | null>(null);
+  function openPalette() {
+    paletteOpen = true;
+    paletteQuery = "";
+  }
+  function closePalette() {
+    paletteOpen = false;
+  }
+
+  // Keyboard shortcuts — each one maps to a real, already-existing action (nothing fabricated
+  // for the sake of having a shortcuts list). Individually toggleable from Settings, persisted
+  // to localStorage the same way theme/auto-sync-interval already are.
+  type ShortcutId = "commandPalette" | "sendRequest" | "saveRequest" | "newRequest" | "nextTab" | "prevTab" | "closeTab";
+  // `label` stores an i18n key, not literal text — SHORTCUT_DEFS is a plain const (evaluated
+  // once), so resolving the string at definition time would freeze it in whatever locale was
+  // active then. Resolve it at render time instead: t(def.label).
+  const SHORTCUT_DEFS: { id: ShortcutId; label: string; keys: string }[] = [
+    { id: "commandPalette", label: "shortcut.commandPalette", keys: "Ctrl/⌘ K" },
+    { id: "sendRequest", label: "shortcut.sendRequest", keys: "Ctrl/⌘ Enter" },
+    { id: "saveRequest", label: "shortcut.saveRequest", keys: "Ctrl/⌘ S" },
+    { id: "newRequest", label: "shortcut.newRequest", keys: "Ctrl/⌘ N" },
+    { id: "nextTab", label: "shortcut.nextTab", keys: "Ctrl/⌘ Tab" },
+    { id: "prevTab", label: "shortcut.prevTab", keys: "Ctrl/⌘ Shift Tab" },
+    { id: "closeTab", label: "shortcut.closeTab", keys: "Ctrl/⌘ W" },
+  ];
+  let shortcutsEnabled = $state<Record<ShortcutId, boolean>>({
+    commandPalette: true,
+    sendRequest: true,
+    saveRequest: true,
+    newRequest: true,
+    nextTab: true,
+    prevTab: true,
+    closeTab: true,
+  });
+  function setShortcutEnabled(id: ShortcutId, enabled: boolean) {
+    shortcutsEnabled = { ...shortcutsEnabled, [id]: enabled };
+    try {
+      localStorage.setItem("lp-shortcuts-enabled", JSON.stringify(shortcutsEnabled));
+    } catch {
+      // shortcut prefs just won't persist across restarts
+    }
+  }
+  $effect(() => {
+    if (paletteOpen) paletteInputEl?.focus();
+  });
+  // Cross-project search (LP-1404): the palette's own project/request loop below only ever
+  // covers the CURRENTLY open project, since that's all `requests` holds — everything else in
+  // the workspace has to come from the backend. Debounced so switching-workspace-wide search
+  // doesn't fire a query per keystroke; a token guards against a slow, stale response overwriting
+  // a newer one that already landed.
+  let paletteCrossProjectResults = $state<RequestSearchResult[]>([]);
+  let paletteCrossProjectToken = 0;
+  $effect(() => {
+    const q = paletteQuery.trim();
+    if (!paletteOpen || q.length < 2 || !activeWorkspaceId) {
+      paletteCrossProjectResults = [];
+      return;
+    }
+    const token = ++paletteCrossProjectToken;
+    const workspaceId = activeWorkspaceId;
+    const timer = setTimeout(async () => {
+      try {
+        const results = await api.searchRequestsInWorkspace(workspaceId, q);
+        if (token === paletteCrossProjectToken) paletteCrossProjectResults = results;
+      } catch {
+        // The palette's in-project results still work regardless — this is a pure enhancement.
+      }
+    }, 150);
+    return () => clearTimeout(timer);
+  });
+
+  type PaletteItem = { kind: "project" | "request"; label: string; method?: string; hint: string; onSelect: () => void };
+  let paletteItems = $derived.by((): PaletteItem[] => {
+    const q = paletteQuery.trim().toLowerCase();
+    const items: PaletteItem[] = [];
+    for (const p of projects) {
+      if (!q || p.name.toLowerCase().includes(q)) {
+        items.push({
+          kind: "project",
+          label: p.name,
+          hint: "project",
+          onSelect: () => {
+            selectProject(p.id);
+            activeScreen = "workspace";
+            closePalette();
+          },
+        });
+      }
+    }
+    const localRequestIds = new Set<string>();
+    if (selectedProjectId) {
+      for (const r of requests) {
+        if (!q || r.name.toLowerCase().includes(q) || r.url.toLowerCase().includes(q)) {
+          localRequestIds.add(r.id);
+          items.push({
+            kind: "request",
+            label: r.name,
+            method: r.method,
+            hint: r.url,
+            onSelect: () => {
+              openRequest(r.id);
+              activeScreen = "workspace";
+              closePalette();
+            },
+          });
+        }
+      }
+    }
+    for (const r of paletteCrossProjectResults) {
+      if (localRequestIds.has(r.id)) continue; // already listed above, from the active project
+      items.push({
+        kind: "request",
+        label: r.name,
+        method: r.method,
+        hint: `${r.project_name} — ${r.url}`,
+        onSelect: async () => {
+          await selectProject(r.project_id);
+          openRequest(r.id);
+          activeScreen = "workspace";
+          closePalette();
+        },
+      });
+    }
+    return items.slice(0, 30);
+  });
+
+  let aiConfigured = $state(false);
+  let showAiPanel = $state(false);
+  let rightPanel = $state<"code" | "info" | null>(null);
+  let aiActiveTab = $state<"generate" | "source" | "settings">("generate");
+  let aiPrompt = $state("");
+  let aiGenerating = $state(false);
+  let aiPreview = $state<GeneratedApiDefinition | null>(null);
+
+  // Project context toggles (LP-0807, LP-0808, LP-0809)
+  let aiIncludeExistingRequests = $state(true);
+  let aiIncludeVariables = $state(true);
+
+  // AI Settings (LP-0803, LP-0822 — multi-provider)
+  let aiSettings = $state<AiSettings | null>(null);
+  let aiProviderInput = $state<AiProviderKind>("anthropic");
+  let aiApiKeyInput = $state("");
+  let aiModelInput = $state("claude-sonnet-5");
+  let aiBaseUrlInput = $state("");
+
+  const AI_PROVIDERS: { id: AiProviderKind; labelKey: string }[] = [
+    { id: "anthropic", labelKey: "ai.providerAnthropic" },
+    { id: "openai", labelKey: "ai.providerOpenAi" },
+    { id: "google", labelKey: "ai.providerGoogle" },
+    { id: "custom", labelKey: "ai.providerCustom" },
+  ];
+
+  // Suggestions only — the model field is free text, never a locked list, so a new model
+  // release never requires an app update to become selectable.
+  const AI_MODEL_SUGGESTIONS: Record<AiProviderKind, string[]> = {
+    anthropic: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+    openai: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+    google: ["gemini-1.5-pro", "gemini-1.5-flash"],
+    custom: [],
+  };
+
+  const AI_API_KEY_PLACEHOLDER: Record<AiProviderKind, string> = {
+    anthropic: "sk-ant-api03-...",
+    openai: "sk-...",
+    google: "AIza...",
+    custom: "",
+  };
+
+  function aiProviderDefaultModel(provider: AiProviderKind): string {
+    return AI_MODEL_SUGGESTIONS[provider][0] ?? "";
+  }
+
+  function onAiProviderChange() {
+    aiModelInput = aiProviderDefaultModel(aiProviderInput);
+    aiBaseUrlInput = "";
+  }
+  let aiShowKey = $state(false);
+  let aiTesting = $state(false);
+  let aiTestFeedback = $state("");
+  let aiTestError = $state("");
+  let aiSettingsFeedback = $state("");
+
+  // Source Project Analyzer state (LP-0810 - LP-0821)
+  let sourceDirectoryInput = $state("");
+  let sourceScanning = $state(false);
+  let sourceReport = $state<SourceProjectReport | null>(null);
+  let sourceFilter = $state("");
+  let filteredSourceEndpoints = $derived.by(() => {
+    if (!sourceReport) return [];
+    const q = sourceFilter.trim().toLowerCase();
+    if (!q) return sourceReport.endpoints;
+    return sourceReport.endpoints.filter(
+      (e) =>
+        e.path.toLowerCase().includes(q) ||
+        e.method.toLowerCase().includes(q) ||
+        e.source_file.toLowerCase().includes(q),
+    );
+  });
+  let sourceActionFeedback = $state("");
+
+  // Request-level AI generation state (LP-0806, LP-0819)
+  let generatingSample = $state(false);
+  let sampleFeedback = $state("");
+  // Keyed by request id so the project tree can show/lazy-load any request's saved samples,
+  // not just the one currently open in the editor (which reads its own entry via `sampleResponses` below).
+  let sampleResponsesByRequestId = $state<Map<string, SampleResponse[]>>(new Map());
+  let sampleResponses = $derived(selectedRequest ? (sampleResponsesByRequestId.get(selectedRequest.id) ?? []) : []);
+  let generatingTestsDocs = $state(false);
+  let testsDocsFeedback = $state("");
+
+  // Tree nesting: expand a request row to lazy-load and show its saved sample responses.
+  let expandedTreeRequestIds = $state<Set<string>>(new Set());
+  let renamingSampleResponseId = $state<string | null>(null);
+  let renameSampleResponseValue = $state("");
+
+  // Tab management (LP-0407, LP-0408, LP-0411)
+  interface RequestTab {
+    id: string;
+    name: string;
+    method: string;
+  }
+
+  interface RequestDraft {
+    editName: string;
+    editMethod: string;
+    editUrl: string;
+    editHeaders: HeaderEntry[];
+    editQueryParams: QueryParam[];
+    editBody: string;
+    editDescription: string;
+    editAuthType: Auth["type"];
+    editAuthBearerToken: string;
+    editAuthBasicUsername: string;
+    editAuthBasicPassword: string;
+    editAuthApiKeyKey: string;
+    editAuthApiKeyValue: string;
+    editAuthApiKeyLocation: "header" | "query";
+    editPreScript: string;
+    editPostScript: string;
+    editTimeoutMs: number | null;
+    editFollowRedirects: boolean;
+    editMaxRedirects: number;
+    editVerifySsl: boolean;
+    editProxyUrl: string;
+    editHttpVersion: string;
+    editBodyType: "raw" | "form-data" | "x-www-form-urlencoded" | "binary" | "graphql";
+    editGraphqlQuery: string;
+    editGraphqlVariables: string;
+    editFormDataItems: FormDataPart[];
+    editUrlEncodedItems: UrlEncodedItem[];
+    editBinaryFilePath: string;
+    activeEditorTab: "params" | "headers" | "auth" | "body" | "scripts" | "settings" | "docs" | "code";
+    activeResponse: ResponseMeta | null;
+    activeResponseBody: string;
+    activeResponseTruncated: boolean;
+  }
+
+  let openTabs = $state<RequestTab[]>([]);
+  const tabDrafts = new Map<string, RequestDraft>();
+
+  $effect(() => {
+    if (selectedProjectId) {
+      try {
+        localStorage.setItem(`lp-open-tabs-${selectedProjectId}`, JSON.stringify(openTabs));
+        if (selectedRequest) {
+          localStorage.setItem(`lp-selected-request-${selectedProjectId}`, selectedRequest.id);
+        } else {
+          localStorage.removeItem(`lp-selected-request-${selectedProjectId}`);
+        }
+      } catch {}
+    }
+  });
+
+  // Project search — filters the sidebar's project list by name.
+  let projectSearchQuery = $state("");
+
+  // Advanced sort: projects list + requests/folders within a project. Persisted so the chosen
+  // order survives a reload, same as the other small UI prefs (uiScale, locale, theme).
+  type ProjectSortField = "name" | "created" | "updated";
+  type RequestSortField = "name" | "method" | "created" | "updated";
+  type SortDir = "asc" | "desc";
+  let projectSortField = $state<ProjectSortField>("name");
+  let projectSortDir = $state<SortDir>("asc");
+  let requestSortField = $state<RequestSortField>("name");
+  let requestSortDir = $state<SortDir>("asc");
+
+  function setProjectSortField(field: ProjectSortField) {
+    projectSortField = field;
+    try { localStorage.setItem("lp-project-sort", JSON.stringify({ field: projectSortField, dir: projectSortDir })); } catch {}
+  }
+  function toggleProjectSortDir() {
+    projectSortDir = projectSortDir === "asc" ? "desc" : "asc";
+    try { localStorage.setItem("lp-project-sort", JSON.stringify({ field: projectSortField, dir: projectSortDir })); } catch {}
+  }
+  function setRequestSortField(field: RequestSortField) {
+    requestSortField = field;
+    try { localStorage.setItem("lp-request-sort", JSON.stringify({ field: requestSortField, dir: requestSortDir })); } catch {}
+  }
+  function toggleRequestSortDir() {
+    requestSortDir = requestSortDir === "asc" ? "desc" : "asc";
+    try { localStorage.setItem("lp-request-sort", JSON.stringify({ field: requestSortField, dir: requestSortDir })); } catch {}
+  }
+
+  // A field already selected toggles direction on click; a different field switches to it (ascending).
+  function pickProjectSortField(field: ProjectSortField) {
+    if (projectSortField === field) toggleProjectSortDir();
+    else setProjectSortField(field);
+  }
+  function pickRequestSortField(field: RequestSortField) {
+    if (requestSortField === field) toggleRequestSortDir();
+    else setRequestSortField(field);
+  }
+
+  const PROJECT_SORT_FIELDS: { field: ProjectSortField; label: string }[] = [
+    { field: "name", label: "sidebar.sortByName" },
+    { field: "created", label: "sidebar.sortByCreated" },
+    { field: "updated", label: "sidebar.sortByUpdated" },
+  ];
+  const REQUEST_SORT_FIELDS: { field: RequestSortField; label: string }[] = [
+    { field: "name", label: "sidebar.sortByName" },
+    { field: "method", label: "sidebar.sortByMethod" },
+    { field: "created", label: "sidebar.sortByCreated" },
+    { field: "updated", label: "sidebar.sortByUpdated" },
+  ];
+  let projectSortMenuOpen = $state(false);
+  let requestSortMenuOpen = $state(false);
+
+  // Only one project's "more actions" overflow menu is open at a time.
+  let openProjectMenuId = $state<string | null>(null);
+
+  function sortProjectList(list: Project[]): Project[] {
+    const dir = projectSortDir === "asc" ? 1 : -1;
+    return [...list].sort((a, b) => {
+      if (projectSortField === "name") return a.name.localeCompare(b.name) * dir;
+      if (projectSortField === "created") return a.created_at.localeCompare(b.created_at) * dir;
+      return a.updated_at.localeCompare(b.updated_at) * dir;
+    });
+  }
+  function sortRequestList(list: RequestSummary[]): RequestSummary[] {
+    const dir = requestSortDir === "asc" ? 1 : -1;
+    return [...list].sort((a, b) => {
+      if (requestSortField === "name") return a.name.localeCompare(b.name) * dir;
+      if (requestSortField === "method") return a.method.localeCompare(b.method) * dir;
+      if (requestSortField === "created") return a.created_at.localeCompare(b.created_at) * dir;
+      return a.updated_at.localeCompare(b.updated_at) * dir;
+    });
+  }
+
+  let filteredProjects = $derived.by(() => {
+    const q = projectSearchQuery.trim().toLowerCase();
+    const base = q ? projects.filter((p) => p.name.toLowerCase().includes(q)) : projects;
+    return sortProjectList(base);
+  });
+
+  // Request search & windowing (LP-0409, LP-0410)
+  let requestSearchQuery = $state("");
+  let filteredRequests = $derived.by(() => {
+    const q = requestSearchQuery.trim().toLowerCase();
+    const base = q
+      ? requests.filter(
+          (r) =>
+            r.name.toLowerCase().includes(q) ||
+            r.method.toLowerCase().includes(q) ||
+            r.url.toLowerCase().includes(q),
+        )
+      : requests;
+    return sortRequestList(base);
+  });
+  let requestPageSize = $state(50);
+  let requestPage = $state(0);
+  let visibleRequests = $derived.by(() => {
+    if (filteredRequests.length <= 100) return filteredRequests;
+    const start = requestPage * requestPageSize;
+    return filteredRequests.slice(start, start + requestPageSize);
+  });
+  let totalRequestPages = $derived(Math.ceil(filteredRequests.length / requestPageSize));
+
+  // Folder-grouped tree (used when not actively searching — a search flattens across folders,
+  // same as it already flattens everything else).
+  let rootRequests = $derived(sortRequestList(requests.filter((r) => !r.folder_id)));
+  let requestsByFolderId = $derived.by(() => {
+    const map = new Map<string, RequestSummary[]>();
+    for (const r of requests) {
+      if (r.folder_id) {
+        const list = map.get(r.folder_id) ?? [];
+        list.push(r);
+        map.set(r.folder_id, list);
+      }
+    }
+    for (const [key, list] of map) {
+      map.set(key, sortRequestList(list));
+    }
+    return map;
+  });
+
+  // Folders don't have a "method" field, so that sort criterion falls back to name for them.
+  // Grouped by parent so the sidebar can render them as a tree — folders can nest inside other
+  // folders now, not just sit directly under the project (see models::Folder on the backend).
+  const ROOT_FOLDER_KEY = "";
+  let foldersByParentId = $derived.by(() => {
+    const dir = requestSortDir === "asc" ? 1 : -1;
+    const sorted = [...folders].sort((a, b) => {
+      if (requestSortField === "updated") return a.updated_at.localeCompare(b.updated_at) * dir;
+      return a.name.localeCompare(b.name) * dir;
+    });
+    const map = new Map<string, Folder[]>();
+    for (const f of sorted) {
+      const key = f.parent_folder_id ?? ROOT_FOLDER_KEY;
+      const list = map.get(key) ?? [];
+      list.push(f);
+      map.set(key, list);
+    }
+    return map;
+  });
+  let rootFolders = $derived(foldersByParentId.get(ROOT_FOLDER_KEY) ?? []);
+
+  // Expand/collapse every folder in the current project's tree at once.
+  function toggleExpandAllFolders() {
+    if (expandedFolderIds.size < folders.length) {
+      expandedFolderIds = new Set(folders.map((f) => f.id));
+    } else {
+      expandedFolderIds = new Set();
+    }
+  }
+
+  // Developer Console state (LP-0412 - LP-0421)
+  let showConsole = $state(false);
+  let consoleEvents = $state<ConsoleEvent[]>([]);
+  let consoleLevelFilter = $state<string>("all");
+  let consoleActiveRequestOnly = $state(false);
+  let consoleSearchFilter = $state("");
+  let expandedEventIds = $state<Set<string>>(new Set());
+
+  let filteredConsoleEvents = $derived.by(() => {
+    return consoleEvents.filter((e) => {
+      if (consoleLevelFilter !== "all" && e.level !== consoleLevelFilter) {
+        return false;
+      }
+      if (consoleActiveRequestOnly && selectedRequest && e.request_id !== selectedRequest.id) {
+        return false;
+      }
+      if (consoleSearchFilter.trim()) {
+        const q = consoleSearchFilter.toLowerCase();
+        const inMsg = e.message.toLowerCase().includes(q);
+        const inType = e.event_type.toLowerCase().includes(q);
+        const inCid = e.correlation_id.toLowerCase().includes(q);
+        const inDetails = e.details ? JSON.stringify(e.details).toLowerCase().includes(q) : false;
+        if (!inMsg && !inType && !inCid && !inDetails) return false;
+      }
+      return true;
+    });
+  });
+
+  let consoleErrorCount = $derived(
+    consoleEvents.filter((e) => e.level === "error").length,
+  );
+  let consoleWarnCount = $derived(
+    consoleEvents.filter((e) => e.level === "warn").length,
+  );
+
+  // Structured Developer Console detail rendering (LP-1402) — every field rendered below is a
+  // real field execution.rs's c.log(...) calls actually attach to that event_type (see
+  // execution.rs's request_start/response_received/cookie_injected/request_error/test_assertion
+  // sites); anything not recognized still falls through to the raw-JSON view further down so no
+  // detail is ever silently dropped.
+  let rawDetailsVisible = $state<Set<string>>(new Set());
+  function toggleRawDetails(id: string) {
+    const next = new Set(rawDetailsVisible);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    rawDetailsVisible = next;
+  }
+
+  interface DetailHeaderRow {
+    key: string;
+    value: string;
+    enabled?: boolean;
+  }
+  function asHeaderRows(value: unknown): DetailHeaderRow[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((h): h is Record<string, unknown> => typeof h === "object" && h !== null)
+      .map((h) => ({
+        key: typeof h.key === "string" ? h.key : "",
+        value: typeof h.value === "string" ? h.value : "",
+        enabled: typeof h.enabled === "boolean" ? h.enabled : undefined,
+      }));
+  }
+
+  interface DetailCookieRow {
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    http_only: boolean;
+    secure: boolean;
+  }
+  function asCookieRows(value: unknown): DetailCookieRow[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((c): c is Record<string, unknown> => typeof c === "object" && c !== null)
+      .map((c) => ({
+        name: typeof c.name === "string" ? c.name : "",
+        value: typeof c.value === "string" ? c.value : "",
+        domain: typeof c.domain === "string" ? c.domain : "",
+        path: typeof c.path === "string" ? c.path : "",
+        http_only: Boolean(c.http_only),
+        secure: Boolean(c.secure),
+      }));
+  }
+
+  function detailStr(details: Record<string, unknown> | null | undefined, field: string): string | null {
+    const v = details?.[field];
+    return v === undefined || v === null ? null : String(v);
+  }
+
+  // Git & Collaboration state (LP-0701 - LP-0713)
+  let showDiffModal = $state(false);
+  let showHistoryModal = $state(false);
+  let gitActiveTab = $state<"sync" | "conflicts" | "github" | "projectfile">("sync");
+
+  let gitSettings = $state<WorkspaceGitSettings | null>(null);
+  // Leftover per-project git configs (from before Git sync was workspace-level), offered as
+  // options when this workspace has no settings of its own yet — never applied automatically.
+  let legacyGitCandidates = $state<LegacyGitSettingsCandidate[]>([]);
+  let gitStatus = $state<GitStatus | null>(null);
+  let gitHistory = $state<GitCommit[]>([]);
+  let gitDiffContent = $state("");
+  let gitCommitMessage = $state("");
+  let gitLoading = $state(false);
+  let gitStatusLoading = $state(false);
+  let gitActionFeedback = $state("");
+  let gitActionError = $state("");
+
+  // Real 3-way conflict view (LP-0711 follow-up) — base/local/remote content read straight
+  // from Git's index stages, not a fabricated diff.
+  let selectedConflictFile = $state<string | null>(null);
+  let conflictVersions = $state<ConflictVersions | null>(null);
+  let conflictVersionsLoading = $state(false);
+  async function loadConflictVersions(file: string) {
+    if (!gitRepoPathInput.trim()) return;
+    selectedConflictFile = file;
+    conflictVersionsLoading = true;
+    try {
+      conflictVersions = await api.gitGetConflictVersions(gitRepoPathInput.trim(), file);
+    } catch (err) {
+      gitActionError = describeError(err);
+    } finally {
+      conflictVersionsLoading = false;
+    }
+  }
+
+  let gitRepoPathInput = $state("");
+  let gitRemoteUrlInput = $state("");
+  let gitBranchInput = $state("main");
+  let gitAutoSyncInput = $state(false);
+  let githubTokenInput = $state("");
+  let githubShowToken = $state(false);
+  let githubUser = $state<GitHubUser | null>(null);
+  let githubRepoInfo = $state<GitHubRepoInfo | null>(null);
+  let githubValidating = $state(false);
+
+  let projectFileJson = $state("");
+  let projectFileMaskSecrets = $state(true);
+  let projectFileStatus = $state("");
+
+  let autoSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+  // Guards the hydration effect below so it only re-populates the editor from `selectedRequest`
+  // when the SELECTION actually changes to a different request. `selectedRequest` is also
+  // reassigned in place for the same request (autosave's `selectedRequest = updated`, a rename's
+  // optimistic `{...selectedRequest, name}`) — without this guard, each of those would re-run
+  // the hydration and clobber whatever the user had typed into some other field since the last
+  // hydration, since it always reads from the (possibly slightly stale) object being assigned.
+  let hydratedRequestId: string | null = null;
+
+  $effect(() => {
+    if (selectedRequest && selectedRequest.id !== hydratedRequestId) {
+      hydratedRequestId = selectedRequest.id;
+      if (!tabDrafts.has(selectedRequest.id)) {
+        editName = selectedRequest.name;
+        editMethod = selectedRequest.method;
+        editUrl = selectedRequest.url;
+        editHeaders = withTrailingEmptyRow(selectedRequest.headers.map((h) => ({ ...h })), () => ({ key: "", value: "", enabled: true, description: "" }));
+        editQueryParams = withTrailingEmptyRow(selectedRequest.query_params.map((p) => ({ ...p })), () => ({ key: "", value: "", enabled: true }));
+        const parsedBody = parseBodyForEditing(selectedRequest.body);
+        editBodyType = parsedBody.bodyType;
+        editBody = parsedBody.rawBody;
+        editGraphqlQuery = parsedBody.graphqlQuery;
+        editGraphqlVariables = parsedBody.graphqlVariables;
+        editFormDataItems = withTrailingEmptyRow(parsedBody.formDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
+        editUrlEncodedItems = withTrailingEmptyRow(parsedBody.urlEncodedItems, () => ({ key: "", value: "", enabled: true }));
+        editBinaryFilePath = parsedBody.binaryFilePath;
+        editDescription = selectedRequest.description ?? "";
+
+        // A request with a body someone actually filled in opens straight to Body — better
+        // than always landing on Params and making the user go find it every time.
+        const bodyHasContent =
+          (parsedBody.bodyType === "raw" && parsedBody.rawBody.trim().length > 0) ||
+          (parsedBody.bodyType === "graphql" && parsedBody.graphqlQuery.trim().length > 0) ||
+          (parsedBody.bodyType === "form-data" && parsedBody.formDataItems.some((i) => i.key.trim())) ||
+          (parsedBody.bodyType === "x-www-form-urlencoded" && parsedBody.urlEncodedItems.some((i) => i.key.trim())) ||
+          (parsedBody.bodyType === "binary" && parsedBody.binaryFilePath.trim().length > 0);
+        activeEditorTab = bodyHasContent ? "body" : "params";
+
+        const auth = selectedRequest.auth;
+        editAuthType = auth.type;
+        editAuthBearerToken = auth.type === "bearer" ? auth.token : "";
+        editAuthBasicUsername = auth.type === "basic" ? auth.username : "";
+        editAuthBasicPassword = auth.type === "basic" ? auth.password : "";
+        editAuthApiKeyKey = auth.type === "api_key" ? auth.key : "";
+        editAuthApiKeyValue = auth.type === "api_key" ? auth.value : "";
+        editAuthApiKeyLocation = auth.type === "api_key" ? auth.location : "header";
+
+        // Scripts
+        editPreScript = selectedRequest.pre_request_script ?? "";
+        editPostScript = selectedRequest.post_request_script ?? "";
+
+        // Settings
+        const settings = selectedRequest.settings;
+        editTimeoutMs = settings?.timeout_ms ?? null;
+        editFollowRedirects = settings?.follow_redirects ?? true;
+        editMaxRedirects = settings?.max_redirects ?? 10;
+        editVerifySsl = settings?.verify_ssl ?? true;
+        editProxyUrl = settings?.proxy_url ?? "";
+        editHttpVersion = settings?.http_version ?? "";
+
+        snippet = "";
+        snippetError = "";
+        autoSaveStatus = "saved";
+        curlDetectedFeedback = "";
+      }
+    } else if (!selectedRequest) {
+      // Nothing open — clear the guard so reopening this same request later (e.g. after
+      // closing its tab) is treated as a fresh selection and hydrates from the server again.
+      hydratedRequestId = null;
+    }
+  });
+
+  function buildAuthFromEditFields(): Auth {
+    switch (editAuthType) {
+      case "bearer":
+        return { type: "bearer", token: editAuthBearerToken };
+      case "basic":
+        return { type: "basic", username: editAuthBasicUsername, password: editAuthBasicPassword };
+      case "api_key":
+        return { type: "api_key", key: editAuthApiKeyKey, value: editAuthApiKeyValue, location: editAuthApiKeyLocation };
+      default:
+        return { type: "none" };
+    }
+  }
+
+  async function copyAsCurl() {
+    if (!selectedRequest) return;
+    snippetError = "";
+    snippetLoading = true;
+    try {
+      snippet = await api.generateCurlSnippet(selectedRequest.id, selectedEnvironmentId, snippetMode, snippetTarget);
+    } catch (err) {
+      snippetError = describeError(err);
+    } finally {
+      snippetLoading = false;
+    }
+  }
+
+  // Regenerates automatically — the Code Snippet panel has no "Generate" button; it just always
+  // shows the snippet for whatever's currently selected (target/mode/request/environment).
+  // Code is the right sidebar's default view (rightPanel starts null, not "code" — see the
+  // template's `{:else}` fallback), so this fires whenever the panel is visible and isn't Info,
+  // not just when it's explicitly "code" — but never while the sidebar itself is hidden, since
+  // a hidden panel isn't "in use" (matches the app's lazy-everything rule: no request costs
+  // CPU/network for a view the user isn't looking at).
+  $effect(() => {
+    const visible = rightSidebarVisible;
+    const panel = rightPanel;
+    const req = selectedRequest;
+    const target = snippetTarget;
+    const mode = snippetMode;
+    const envId = selectedEnvironmentId;
+    if (visible && panel !== "info" && req) {
+      copyAsCurl();
+    }
+  });
+
+  async function copySnippetToClipboard() {
+    if (!snippet) return;
+    try {
+      await navigator.clipboard.writeText(snippet);
+    } catch (err) {
+      snippetError = describeError(err);
+    }
+  }
+
+  // Live preview of what {{vars}} in the URL resolve to for the currently selected
+  // environment — same resolver code path the HTTP engine will use to build the real
+  // request (README §14 "Stored Request -> ... -> Final HTTP Request").
+  async function refreshUrlPreview() {
+    const projectId = selectedProjectId;
+    const requestId = selectedRequest?.id ?? null;
+    const template = editUrl;
+    if (!projectId || !template) {
+      urlPreview = null;
+      return;
+    }
+    try {
+      urlPreview = await api.resolvePreview(projectId, selectedEnvironmentId, requestId, template);
+    } catch {
+      urlPreview = null;
+    }
+  }
+
+  $effect(() => {
+    // Re-run whenever any of these change — reading them here (rather than inside
+    // refreshUrlPreview) is what makes them tracked dependencies of this effect.
+    void selectedProjectId;
+    void selectedRequest?.id;
+    void selectedEnvironmentId;
+    void editUrl;
+    refreshUrlPreview();
+  });
+
+  // Splits the raw URL template into plain-text runs and {{variable}} references, so the URL
+  // bar can render each variable as its own highlighted, hoverable token directly in place —
+  // matching where the user is actually looking, instead of only in the warning banner below.
+  type UrlToken = { type: "text"; text: string } | { type: "var"; name: string; raw: string };
+  function parseUrlTokens(url: string): UrlToken[] {
+    const tokens: UrlToken[] = [];
+    const re = /\{\{([^{}]+)\}\}/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(url))) {
+      if (match.index > lastIndex) tokens.push({ type: "text", text: url.slice(lastIndex, match.index) });
+      tokens.push({ type: "var", name: match[1].trim(), raw: match[0] });
+      lastIndex = match.index + match[0].length;
+    }
+    if (lastIndex < url.length) tokens.push({ type: "text", text: url.slice(lastIndex) });
+    return tokens;
+  }
+  let urlTokens = $derived(parseUrlTokens(editUrl));
+
+  // Keeps the highlight overlay's horizontal scroll glued to the real (invisible-text) input
+  // underneath it, so long URLs that scroll internally don't desync the two layers.
+  function syncUrlOverlayScroll(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const overlay = input.previousElementSibling as HTMLElement | null;
+    if (overlay) overlay.scrollLeft = input.scrollLeft;
+  }
+
+  onMount(() => {
+    loadWorkspaces().then(() => Promise.all([loadProjects(), loadGitSettings()]));
+    loadAllEnvironments();
+    loadAiSettings();
+    api.isAiConfigured().then((configured) => (aiConfigured = configured)).catch((err) => console.error("Failed to check AI configuration", err));
+    refreshConsoleEvents();
+    refreshSystemDiagnostics();
+    try {
+      const saved = localStorage.getItem("lp-theme");
+      if (saved === "dark" || saved === "light" || saved === "terminal" || saved === "blueprint") themeMode = saved;
+      const savedAccent = localStorage.getItem("lp-accent-color");
+      if (savedAccent && /^#[0-9a-f]{6}$/i.test(savedAccent)) accentColor = savedAccent;
+      const savedTint = localStorage.getItem("lp-surface-tint");
+      if (savedTint && (SURFACE_TINTS.some((t) => t.id === savedTint) || /^#[0-9a-f]{6}$/i.test(savedTint))) {
+        surfaceTint = savedTint;
+      }
+      const savedHeadingFont = localStorage.getItem("lp-heading-font");
+      if (savedHeadingFont && THEME_FONT_OPTIONS.some((f) => f.id === savedHeadingFont)) headingFontOverride = savedHeadingFont;
+      const savedBodyFont = localStorage.getItem("lp-body-font");
+      if (savedBodyFont && THEME_FONT_OPTIONS.some((f) => f.id === savedBodyFont)) bodyFontOverride = savedBodyFont;
+      const savedTextColor = localStorage.getItem("lp-text-color");
+      if (savedTextColor && /^#[0-9a-f]{6}$/i.test(savedTextColor)) textColorOverride = savedTextColor;
+      const savedCollapsed = localStorage.getItem("lp-response-pane-collapsed");
+      if (savedCollapsed === "true" || savedCollapsed === "false") responsePaneCollapsed = savedCollapsed === "true";
+      const savedInterval = localStorage.getItem("lp-auto-sync-interval-ms");
+      if (savedInterval && Number(savedInterval) > 0) autoSyncIntervalMs = Number(savedInterval);
+      const savedShortcuts = localStorage.getItem("lp-shortcuts-enabled");
+      if (savedShortcuts) {
+        shortcutsEnabled = { ...shortcutsEnabled, ...JSON.parse(savedShortcuts) };
+      }
+      const savedScale = localStorage.getItem("lp-ui-scale");
+      if (savedScale && Number(savedScale) > 0) {
+        uiScale = Number(savedScale);
+        document.documentElement.style.fontSize = `${uiScale}%`;
+      }
+      const savedLocale = localStorage.getItem("lp-locale");
+      if (savedLocale === "en" || savedLocale === "ar") {
+        locale = savedLocale;
+      }
+      applyLocale(locale);
+      const savedProjectSort = localStorage.getItem("lp-project-sort");
+      if (savedProjectSort) {
+        const parsed = JSON.parse(savedProjectSort);
+        if (parsed.field === "name" || parsed.field === "created" || parsed.field === "updated") projectSortField = parsed.field;
+        if (parsed.dir === "asc" || parsed.dir === "desc") projectSortDir = parsed.dir;
+      }
+      const savedRequestSort = localStorage.getItem("lp-request-sort");
+      if (savedRequestSort) {
+        const parsed = JSON.parse(savedRequestSort);
+        if (parsed.field === "name" || parsed.field === "method" || parsed.field === "created" || parsed.field === "updated") requestSortField = parsed.field;
+        if (parsed.dir === "asc" || parsed.dir === "desc") requestSortDir = parsed.dir;
+      }
+      const savedSidebarVisible = localStorage.getItem("lp-sidebar-visible");
+      if (savedSidebarVisible === "true" || savedSidebarVisible === "false") sidebarVisible = savedSidebarVisible === "true";
+      const savedRailVisible = localStorage.getItem("lp-rail-visible");
+      if (savedRailVisible === "true" || savedRailVisible === "false") screensRailVisible = savedRailVisible === "true";
+      const savedRightSidebarVisible = localStorage.getItem("lp-right-sidebar-visible");
+      if (savedRightSidebarVisible === "true" || savedRightSidebarVisible === "false") rightSidebarVisible = savedRightSidebarVisible === "true";
+    } catch {
+      // ignore — settings just stay at their defaults
+    }
+
+    sidebarWidth = adaptiveSidebarWidth();
+    responsePaneHeight = adaptiveResponsePaneHeight();
+    const onWindowResize = () => {
+      if (!sidebarManuallyResized) sidebarWidth = adaptiveSidebarWidth();
+      if (!responsePaneManuallyResized) responsePaneHeight = adaptiveResponsePaneHeight();
+    };
+    window.addEventListener("resize", onWindowResize);
+
+    const onGlobalKeydown = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === "k" && shortcutsEnabled.commandPalette) {
+        e.preventDefault();
+        openPalette();
+      } else if (e.key === "Enter" && shortcutsEnabled.sendRequest) {
+        if (selectedRequest && !sending) {
+          e.preventDefault();
+          sendCurrentRequest();
+        }
+      } else if (key === "s" && shortcutsEnabled.saveRequest) {
+        if (selectedRequest) {
+          e.preventDefault();
+          saveRequest();
+        }
+      } else if (key === "n" && shortcutsEnabled.newRequest) {
+        if (selectedProjectId) {
+          e.preventDefault();
+          quickCreateRequest(selectedProjectId);
+        }
+      } else if (key === "tab" && shortcutsEnabled.nextTab && !e.shiftKey) {
+        e.preventDefault();
+        cycleTab(1);
+      } else if (key === "tab" && shortcutsEnabled.prevTab && e.shiftKey) {
+        e.preventDefault();
+        cycleTab(-1);
+      } else if (key === "w" && shortcutsEnabled.closeTab) {
+        if (selectedRequest) {
+          e.preventDefault();
+          closeTab(selectedRequest.id);
+        }
+      }
+    };
+    window.addEventListener("keydown", onGlobalKeydown);
+    return () => {
+      window.removeEventListener("resize", onWindowResize);
+      window.removeEventListener("keydown", onGlobalKeydown);
+    };
+  });
+
+  // Keep each screen's real data fresh only while it's actually visible, without polling when
+  // nobody can see it.
+  $effect(() => {
+    if (activeScreen === "workspace" || activeScreen === "settings") {
+      refreshSystemDiagnostics();
+    }
+    if (activeScreen === "launcher" || activeScreen === "workspace") {
+      refreshProjectRequestCounts();
+    }
+    if (activeScreen === "history") {
+      refreshProjectHistory();
+    }
+    if (activeScreen !== "workspace") {
+      responseExpanded = false;
+    }
+  });
+
+  function saveCurrentDraft() {
+    if (!selectedRequest) return;
+    const draft: RequestDraft = {
+      editName,
+      editMethod,
+      editUrl,
+      editHeaders: editHeaders.map((h) => ({ ...h })),
+      editQueryParams: editQueryParams.map((p) => ({ ...p })),
+      editBody,
+      editDescription,
+      editAuthType,
+      editAuthBearerToken,
+      editAuthBasicUsername,
+      editAuthBasicPassword,
+      editAuthApiKeyKey,
+      editAuthApiKeyValue,
+      editAuthApiKeyLocation,
+      editPreScript,
+      editPostScript,
+      editTimeoutMs,
+      editFollowRedirects,
+      editMaxRedirects,
+      editVerifySsl,
+      editProxyUrl,
+      editHttpVersion,
+      editBodyType,
+      editGraphqlQuery,
+      editGraphqlVariables,
+      editFormDataItems,
+      editUrlEncodedItems,
+      editBinaryFilePath,
+      activeEditorTab,
+      activeResponse,
+      activeResponseBody,
+      activeResponseTruncated,
+    };
+    tabDrafts.set(selectedRequest.id, draft);
+    // Bounded cache (LP-0411): evict oldest entry if exceeding 50 entries
+    if (tabDrafts.size > 50) {
+      const oldestKey = tabDrafts.keys().next().value;
+      if (oldestKey && oldestKey !== selectedRequest.id) {
+        tabDrafts.delete(oldestKey);
+      }
+    }
+  }
+
+  function restoreDraft(draft: RequestDraft) {
+    editName = draft.editName;
+    editMethod = draft.editMethod;
+    editUrl = draft.editUrl;
+    editHeaders = draft.editHeaders.map((h) => ({ ...h }));
+    editQueryParams = draft.editQueryParams.map((p) => ({ ...p }));
+    editBody = draft.editBody;
+    editDescription = draft.editDescription;
+    editAuthType = draft.editAuthType;
+    editAuthBearerToken = draft.editAuthBearerToken;
+    editAuthBasicUsername = draft.editAuthBasicUsername;
+    editAuthBasicPassword = draft.editAuthBasicPassword;
+    editAuthApiKeyKey = draft.editAuthApiKeyKey;
+    editAuthApiKeyValue = draft.editAuthApiKeyValue;
+    editAuthApiKeyLocation = draft.editAuthApiKeyLocation;
+    editPreScript = draft.editPreScript;
+    editPostScript = draft.editPostScript;
+    editTimeoutMs = draft.editTimeoutMs;
+    editFollowRedirects = draft.editFollowRedirects;
+    editMaxRedirects = draft.editMaxRedirects;
+    editVerifySsl = draft.editVerifySsl;
+    editProxyUrl = draft.editProxyUrl;
+    editHttpVersion = draft.editHttpVersion;
+    editBodyType = draft.editBodyType;
+    editGraphqlQuery = draft.editGraphqlQuery;
+    editGraphqlVariables = draft.editGraphqlVariables;
+    editFormDataItems = draft.editFormDataItems.map((i) => ({ ...i }));
+    editUrlEncodedItems = draft.editUrlEncodedItems.map((i) => ({ ...i }));
+    editBinaryFilePath = draft.editBinaryFilePath;
+    activeEditorTab = draft.activeEditorTab;
+    activeResponse = draft.activeResponse;
+    activeResponseBody = draft.activeResponseBody;
+    activeResponseTruncated = draft.activeResponseTruncated;
+    // A surviving draft means the autosave debounce didn't get to fire before the user tabbed
+    // away — pick up where it left off instead of leaving those edits stuck unsaved.
+    scheduleAutoSave();
+  }
+
+  function isTabDirty(tabId: string): boolean {
+    if (tabId === selectedRequest?.id) {
+      return (
+        editName !== selectedRequest.name ||
+        editMethod !== selectedRequest.method ||
+        editUrl !== selectedRequest.url ||
+        editBody !== (selectedRequest.body ?? "") ||
+        editDescription !== (selectedRequest.description ?? "") ||
+        editPreScript !== (selectedRequest.pre_request_script ?? "") ||
+        editPostScript !== (selectedRequest.post_request_script ?? "")
+      );
+    }
+    return tabDrafts.has(tabId);
+  }
+
+  // Ctrl/Cmd+Tab / Ctrl/Cmd+Shift+Tab — cycles through open tabs in their current order,
+  // wrapping around at either end. A no-op with 0-1 tabs open.
+  function cycleTab(direction: 1 | -1) {
+    if (openTabs.length < 2 || !selectedRequest) return;
+    const idx = openTabs.findIndex((t) => t.id === selectedRequest!.id);
+    if (idx === -1) return;
+    const nextIdx = (idx + direction + openTabs.length) % openTabs.length;
+    openRequest(openTabs[nextIdx].id);
+  }
+
+  function closeTabAction(id: string) {
+    if (isTabDirty(id)) {
+      showConfirm(t("common.confirm"), t("error.confirmCloseDirtyTab") || "You have unsaved changes. Are you sure you want to close this tab without saving?", () => {
+        // Discard draft
+        if (id === selectedRequest?.id) {
+           // It's the active tab, we need to revert it so it doesn't auto-save on switch
+           if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
+           // Revert the currently bound fields so they don't get saved by any other path
+           editName = selectedRequest.name;
+           editMethod = selectedRequest.method;
+           editUrl = selectedRequest.url;
+           editBody = selectedRequest.body ?? "";
+           // etc... wait, it's easier to just skip saving. 
+           // But saveRequest is called in closeTab. We can pass a flag.
+        }
+        closeTab(id, true);
+      });
+    } else {
+      closeTab(id, false);
+    }
+  }
+
+  async function closeTab(id: string, skipSave: boolean = false) {
+    tabDrafts.delete(id);
+    const idx = openTabs.findIndex((t) => t.id === id);
+    if (idx === -1) return;
+    const wasActive = selectedRequest?.id === id;
+    openTabs = openTabs.filter((t) => t.id !== id);
+
+    if (wasActive) {
+      if (openTabs.length > 0) {
+        const nextTab = openTabs[Math.max(0, idx - 1)];
+        openRequest(nextTab.id);
+      } else {
+        // Same flush openRequest does — closing the last tab must not silently drop a pending
+        // debounced edit (see openRequest's comment for the full failure mode).
+        if (!skipSave) await saveRequest();
+        selectedRequest = null;
+        activeResponse = null;
+        activeResponseBody = "";
+        responseHistory = [];
+      }
+    }
+  }
+
+  async function refreshConsoleEvents() {
+    try {
+      consoleEvents = await api.getConsoleEvents(200);
+    } catch (err) {
+      console.error("Failed to load console events:", err);
+    }
+  }
+
+  async function clearConsole() {
+    try {
+      await api.clearConsoleEvents();
+      consoleEvents = [];
+      expandedEventIds.clear();
+    } catch (err) {
+      console.error("Failed to clear console:", err);
+    }
+  }
+
+  async function copyConsoleLog() {
+    try {
+      const lines = filteredConsoleEvents.map(
+        (e) =>
+          `[${e.timestamp}] [${e.level.toUpperCase()}] [${e.event_type}] [#${e.correlation_id.slice(0, 8)}] ${e.message}`,
+      );
+      await navigator.clipboard.writeText(lines.join("\n"));
+      copyFeedback = "Console log copied!";
+      setTimeout(() => (copyFeedback = ""), 2000);
+    } catch (err) {
+      console.error("Failed to copy console log:", err);
+    }
+  }
+
+  async function exportConsoleJson() {
+    try {
+      const jsonStr = await api.exportConsoleEvents();
+      const blob = new Blob([jsonStr], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `light-postman-console-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Failed to export console events:", err);
+    }
+  }
+
+  function toggleEventExpanded(eventId: string) {
+    const updated = new Set(expandedEventIds);
+    if (updated.has(eventId)) {
+      updated.delete(eventId);
+    } else {
+      updated.add(eventId);
+    }
+    expandedEventIds = updated;
+  }
+
+  async function copyEventDetails(evt: ConsoleEvent) {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(evt, null, 2));
+      copyFeedback = "Event JSON copied!";
+      setTimeout(() => (copyFeedback = ""), 2000);
+    } catch (err) {
+      console.error("Failed to copy event details:", err);
+    }
+  }
+
+  function formatConsoleTime(iso: string): string {
+    try {
+      const d = new Date(iso);
+      return d.toTimeString().split(" ")[0] + "." + String(d.getMilliseconds()).padStart(3, "0");
+    } catch {
+      return iso;
+    }
+  }
+
+  async function loadProjects() {
+    if (!activeWorkspaceId) return;
+    try {
+      projects = await api.listProjects(activeWorkspaceId);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function loadAiSettings() {
+    try {
+      const s = await api.getAiSettings();
+      aiSettings = s;
+      aiConfigured = s.is_configured;
+      aiProviderInput = s.provider;
+      aiApiKeyInput = s.api_key ?? "";
+      aiModelInput = s.model || aiProviderDefaultModel(s.provider);
+      aiBaseUrlInput = s.base_url ?? "";
+    } catch (err) {
+      console.error("Failed to load AI settings", err);
+    }
+  }
+
+  async function saveAiSettingsAction() {
+    aiTestError = "";
+    aiTestFeedback = "";
+    aiSettingsFeedback = "";
+    if (aiProviderInput === "custom" && !aiBaseUrlInput.trim()) {
+      aiTestError = t("ai.customRequiresBaseUrl");
+      return;
+    }
+    try {
+      await api.saveAiSettings({
+        provider: aiProviderInput,
+        api_key: aiApiKeyInput.trim() || null,
+        model: aiModelInput.trim() || null,
+        base_url: aiBaseUrlInput.trim() || null,
+      });
+      await loadAiSettings();
+      aiSettingsFeedback = t("ai.settingsSaved");
+      setTimeout(() => (aiSettingsFeedback = ""), 3000);
+    } catch (err) {
+      aiTestError = describeError(err);
+    }
+  }
+
+  async function testAiConnectionAction() {
+    aiTesting = true;
+    aiTestFeedback = "";
+    aiTestError = "";
+    try {
+      const res = await api.testAiConnection();
+      aiTestFeedback = res;
+      aiConfigured = true;
+    } catch (err) {
+      aiTestError = `AI Connection Failed: ${describeError(err)}`;
+    } finally {
+      aiTesting = false;
+    }
+  }
+
+  async function generateWithAi(event: Event) {
+    event.preventDefault();
+    if (!aiPrompt.trim() || aiGenerating) return;
+    aiGenerating = true;
+    aiPreview = null;
+    try {
+      if (selectedProjectId) {
+        aiPreview = await api.generateApiWithProjectContext(
+          selectedProjectId,
+          aiPrompt.trim(),
+          aiIncludeExistingRequests,
+          aiIncludeVariables,
+        );
+      } else {
+        aiPreview = await api.generateApiWithAi(aiPrompt.trim());
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    } finally {
+      aiGenerating = false;
+    }
+  }
+
+  async function saveCurrentResponse() {
+    if (!selectedRequest || !activeResponse || !activeResponseBody) return;
+    const defaultName = `Example - ${activeResponse.status}`;
+    try {
+      const created = await api.createSampleResponse({
+        request_id: selectedRequest.id,
+        name: defaultName,
+        status: activeResponse.status,
+        status_text: activeResponse.status_text || "",
+        headers: activeResponse.headers ?? [],
+        body: activeResponseBody,
+        content_type: activeResponse.content_type || null
+      });
+      await loadSampleResponses(selectedRequest.id);
+      
+      // Auto-trigger rename and open docs pane
+      startRenameSampleResponse(created);
+      setRightSidebarVisible(true);
+      rightPanel = "docs";
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function loadSampleResponses(requestId: string) {
+    try {
+      const list = await api.listSampleResponses(requestId);
+      const next = new Map(sampleResponsesByRequestId);
+      next.set(requestId, list);
+      sampleResponsesByRequestId = next;
+    } catch (err) {
+      console.error("Failed to load sample responses", err);
+    }
+  }
+
+  function deleteSampleResponseAction(requestId: string, id: string) {
+    showConfirm(t("common.confirm"), t("error.confirmDeleteSampleResponse"), async () => {
+      try {
+      await api.deleteSampleResponse(id);
+      await loadSampleResponses(requestId);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+    });
+  }
+
+  function startRenameSampleResponse(sr: SampleResponse) {
+    renamingSampleResponseId = sr.id;
+    renameSampleResponseValue = sr.name;
+  }
+
+  async function submitRenameSampleResponse(requestId: string) {
+    if (!renamingSampleResponseId) return;
+    const id = renamingSampleResponseId;
+    const name = renameSampleResponseValue.trim();
+    renamingSampleResponseId = null;
+    if (!name) return;
+    try {
+      await api.updateSampleResponse({ id, name });
+      await loadSampleResponses(requestId);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Expanding a request row in the tree lazy-loads its samples the first time — same
+  // lazy-loading discipline as the rest of the app (README §4/§20).
+  async function toggleTreeRequestExpanded(requestId: string) {
+    const next = new Set(expandedTreeRequestIds);
+    if (next.has(requestId)) {
+      next.delete(requestId);
+    } else {
+      next.add(requestId);
+      if (!sampleResponsesByRequestId.has(requestId)) {
+        await loadSampleResponses(requestId);
+      }
+    }
+    expandedTreeRequestIds = next;
+  }
+
+  async function generateSampleResponseWithAiAction() {
+    if (!selectedRequest) return;
+    generatingSample = true;
+    sampleFeedback = "";
+    try {
+      const sample = await api.generateSampleResponseWithAi(selectedRequest.id);
+      await loadSampleResponses(selectedRequest.id);
+      sampleFeedback = `Sample response (${sample.status}) generated!`;
+      setTimeout(() => (sampleFeedback = ""), 3000);
+    } catch (err) {
+      errorMessage = describeError(err);
+    } finally {
+      generatingSample = false;
+    }
+  }
+
+  async function generateTestsAndDocsWithAiAction(target: "tests" | "docs") {
+    if (!selectedRequest) return;
+    generatingTestsDocs = true;
+    testsDocsFeedback = "";
+    try {
+      const res = await api.generateTestsAndDocsWithAi(selectedRequest.id);
+      if (target === "tests") {
+        editPostScript = editPostScript
+          ? `${editPostScript}\n\n${res.tests_script}`
+          : res.tests_script;
+        testsDocsFeedback = "Generated test assertions added to post-request script!";
+      } else {
+        editDescription = editDescription
+          ? `${editDescription}\n\n${res.documentation}`
+          : res.documentation;
+        testsDocsFeedback = "Generated documentation added!";
+      }
+      setTimeout(() => (testsDocsFeedback = ""), 3000);
+    } catch (err) {
+      errorMessage = describeError(err);
+    } finally {
+      generatingTestsDocs = false;
+    }
+  }
+
+  async function scanSourceProjectAction() {
+    const dir = sourceDirectoryInput.trim();
+    if (!dir) {
+      sourceActionFeedback = "Please enter a source directory path.";
+      return;
+    }
+    sourceScanning = true;
+    sourceActionFeedback = "";
+    try {
+      const report = await api.scanSourceProject(dir);
+      sourceReport = report;
+      if (selectedProjectId) {
+        await api.setProjectSourceDirectory(selectedProjectId, dir, report.frameworks.join(", ") || null);
+      }
+      sourceActionFeedback = `Scanned ${report.scanned_files_count} files. Discovered ${report.endpoints.length} API endpoints.`;
+    } catch (err) {
+      sourceActionFeedback = describeError(err);
+    } finally {
+      sourceScanning = false;
+    }
+  }
+
+  async function importDiscoveredEndpointAction(endpoint: DiscoveredEndpoint) {
+    if (!selectedProjectId) return;
+    try {
+      const summary = await api.importDiscoveredEndpoint(selectedProjectId, endpoint);
+      requests = [summary, ...requests];
+      await openRequest(summary.id);
+      sourceActionFeedback = `Imported ${endpoint.method} ${endpoint.path} into project!`;
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function loadSourceAssociation(projectId: string) {
+    try {
+      const dir = await api.getProjectSourceDirectory(projectId);
+      if (dir) {
+        sourceDirectoryInput = dir;
+      } else {
+        sourceDirectoryInput = "";
+        sourceReport = null;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Explicit approval step (LP-0805): nothing from the AI preview is persisted until the
+  // user clicks this — it goes through the exact same create_request validation as a
+  // manually-typed request.
+  async function addAiPreviewToProject() {
+    if (!aiPreview || !selectedProjectId) return;
+    try {
+      const request = await api.createRequest({
+        project_id: selectedProjectId,
+        name: aiPreview.name,
+        method: aiPreview.method,
+        url: aiPreview.url,
+        headers: aiPreview.headers,
+        query_params: aiPreview.query_params,
+        auth: { type: "none" },
+        body: aiPreview.body,
+      });
+      requests = [
+        { id: request.id, project_id: request.project_id, folder_id: request.folder_id, name: request.name, method: request.method, url: request.url, created_at: request.created_at, updated_at: request.updated_at },
+        ...requests,
+      ];
+      openTabs = [
+        ...openTabs,
+        { id: request.id, name: request.name, method: request.method },
+      ];
+      selectedRequest = request;
+      activeResponse = null;
+      activeResponseBody = "";
+      responseHistory = [];
+      aiPreview = null;
+      aiPrompt = "";
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // "+" with no upfront text field: create with a placeholder name, then drop straight into
+  // the same inline-rename UI used for renaming an existing project, so the user types the
+  // real name in place instead of in a separate form first.
+  // Best-effort, silent: if this workspace already has a git repo configured, a newly created
+  // (or imported) project should show up in it without the user having to remember to hit
+  // "Save" — same repo-wide write `saveWorkspaceToRepoAction` uses, just not user-triggered.
+  // Failures are logged, not surfaced — the project itself was still created successfully.
+  async function syncNewProjectIntoWorkspaceRepo() {
+    if (!activeWorkspaceId || !gitSettings?.repo_path) return;
+    try {
+      await api.saveWorkspaceToRepo(activeWorkspaceId, gitSettings.repo_path, false);
+    } catch (err) {
+      console.error("Failed to add the new project to the workspace's git repo:", err);
+    }
+  }
+
+  async function quickCreateProject() {
+    if (!activeWorkspaceId) return;
+    try {
+      const project = await api.createProject("New Project", activeWorkspaceId);
+      projects = [project, ...projects];
+      await selectProject(project.id);
+      startRenameProject(project);
+      await syncNewProjectIntoWorkspaceRepo();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Only ever loads request *metadata* for the selected project — bodies/headers
+  // stay on disk until a specific request tab is opened (README §4/§20).
+  // Clicking the already-open project again closes it (collapses its request list back) instead
+  // of just reselecting the same project — a real toggle, not a no-op re-fetch.
+  async function toggleProjectSelection(id: string) {
+    if (selectedProjectId === id) {
+      // Same flush as openRequest/closeTab — collapsing the project must not silently drop a
+      // pending debounced edit on whatever request was open.
+      if (!skipSave) await saveRequest();
+      selectedProjectId = null;
+      selectedRequest = null;
+      selectedEnvironmentId = null;
+      openTabs = [];
+      tabDrafts.clear();
+      requests = [];
+      folders = [];
+      setRightSidebarVisible(false);
+      rightPanel = null;
+    } else {
+      selectProject(id);
+    }
+  }
+
+  async function selectProject(id: string) {
+    if (!skipSave) await saveRequest();
+    selectedProjectId = id;
+    selectedRequest = null;
+    selectedEnvironmentId = null;
+    openTabs = [];
+    tabDrafts.clear();
+    try {
+      const savedTabs = localStorage.getItem(`lp-open-tabs-${id}`);
+      if (savedTabs) openTabs = JSON.parse(savedTabs);
+    } catch {}
+    // The Code Snippet panel is generated from whatever request was open — with none open
+    // anymore (fresh project, no tabs yet), it has nothing to show, so close it rather than
+    // leaving an empty panel visible until the user notices and closes it themselves.
+    setRightSidebarVisible(false);
+    rightPanel = null;
+    loadingRequests = true;
+    try {
+      requests = await api.listRequests(id);
+      folders = await api.listFolders(id);
+      try {
+        const savedReqId = localStorage.getItem(`lp-selected-request-${id}`);
+        if (savedReqId && requests.some(r => r.id === savedReqId)) {
+          openRequest(savedReqId).catch(console.error);
+        }
+      } catch {}
+      // Auto-select the project's preferred environment, if it set one and that environment
+      // still exists (it may have been deleted since — the backend already clears the
+      // reference then, but the frontend's stale `projects` entry might not have refreshed yet).
+      const defaultEnvId = projects.find((p) => p.id === id)?.default_environment_id;
+      if (defaultEnvId && allEnvironments.some((e) => e.id === defaultEnvId)) {
+        selectedEnvironmentId = defaultEnvId;
+      }
+      await loadVariables();
+      await loadSourceAssociation(id);
+    } catch (err) {
+      errorMessage = describeError(err);
+    } finally {
+      loadingRequests = false;
+    }
+  }
+
+  // Marks (or clears) the currently-selected environment as this project's default — the one
+  // auto-selected the next time the project is opened.
+  async function toggleDefaultEnvironment() {
+    if (!selectedProjectId) return;
+    const project = projects.find((p) => p.id === selectedProjectId);
+    if (!project) return;
+    try {
+      const isCurrentlyDefault = project.default_environment_id === selectedEnvironmentId;
+      const updated = isCurrentlyDefault
+        ? await api.updateProject({ id: selectedProjectId, clear_default_environment_id: true })
+        : await api.updateProject({ id: selectedProjectId, default_environment_id: selectedEnvironmentId ?? undefined, clear_default_environment_id: !selectedEnvironmentId });
+      projects = projects.map((p) => (p.id === updated.id ? updated : p));
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // "+ Add new environment…" sticky option in the env select, and the "+" in the Environments
+  // screen sidebar: create with a placeholder name, then drop straight into inline-rename —
+  // same pattern as quickCreateProject/quickCreateRequest, no persistent text field needed.
+  async function quickCreateEnvironment() {
+    if (!selectedProjectId) return;
+    try {
+      const env = await api.createEnvironment(selectedProjectId, "New Environment");
+      await loadAllEnvironments();
+      selectedEnvironmentId = env.id;
+      await loadVariables();
+      startRenameEnvironment(env);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function startRenameEnvironment(env: Environment | EnvironmentWithProject) {
+    renamingEnvironmentId = env.id;
+    renameEnvironmentValue = env.name;
+  }
+
+  async function submitRenameEnvironment() {
+    const id = renamingEnvironmentId;
+    const value = renameEnvironmentValue.trim();
+    renamingEnvironmentId = null;
+    if (!id || !value) return;
+    try {
+      await api.updateEnvironment({ id, name: value });
+      await loadAllEnvironments();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function deleteEnvironmentAction(id: string) {
+    showConfirm(t("common.confirm"), t("error.confirmDeleteEnvironment"), async () => {
+    try {
+      await api.deleteEnvironment(id);
+      await loadAllEnvironments();
+      if (selectedEnvironmentId === id) {
+        selectedEnvironmentId = null;
+        await loadVariables();
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+    });
+  }
+
+  // "+" next to a project: create a request with sensible defaults (no upfront method/name/URL
+  // form) and drop straight into inline-rename, same pattern as quickCreateProject. Works from
+  // any project row, not just the currently-selected one — the sidebar only renders a project's
+  // request tree while it's selected, so a non-selected project must be selected first or the
+  // new request would be created correctly on the backend but never appear anywhere in the UI.
+  async function quickCreateRequest(projectId: string, folderId: string | null = null) {
+    try {
+      if (selectedProjectId !== projectId) {
+        await selectProject(projectId);
+      }
+      const request = await api.createRequest({
+        project_id: projectId,
+        folder_id: folderId,
+        name: "New Request",
+        method: "GET",
+        url: "",
+        headers: [],
+        query_params: [],
+        auth: { type: "none" },
+        body: null,
+      });
+      requests = [
+        {
+          id: request.id,
+          project_id: request.project_id,
+          folder_id: request.folder_id,
+          name: request.name,
+          method: request.method,
+          url: request.url,
+          created_at: request.created_at,
+          updated_at: request.updated_at,
+        },
+        ...requests,
+      ];
+      if (folderId) expandedFolderIds = new Set([...expandedFolderIds, folderId]);
+      openTabs = [...openTabs, { id: request.id, name: request.name, method: request.method }];
+      selectedRequest = request;
+      activeResponse = null;
+      activeResponseBody = "";
+      responseHistory = [];
+      startRenameRequest(request.id, request.name);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // "+" for folder next to a project (or a folder's own "add subfolder" action) — creates the
+  // folder, then drops straight into inline-rename, same pattern as
+  // quickCreateRequest/quickCreateProject.
+  async function quickCreateFolder(projectId: string, parentFolderId: string | null = null) {
+    try {
+      if (selectedProjectId !== projectId) {
+        await selectProject(projectId);
+      }
+      const folder = await api.createFolder({ project_id: projectId, name: "New Folder", parent_folder_id: parentFolderId });
+      folders = [...folders, folder];
+      const nextExpanded = new Set([...expandedFolderIds, folder.id]);
+      if (parentFolderId) nextExpanded.add(parentFolderId);
+      expandedFolderIds = nextExpanded;
+      startRenameFolder(folder);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function startRenameFolder(folder: Folder) {
+    renamingFolderId = folder.id;
+    renameFolderValue = folder.name;
+  }
+
+  async function submitRenameFolder() {
+    const id = renamingFolderId;
+    const value = renameFolderValue.trim();
+    renamingFolderId = null;
+    if (!id || !value) return;
+    try {
+      const updated = await api.updateFolder({ id, name: value });
+      folders = folders.map((f) => (f.id === updated.id ? updated : f));
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Ungroups the folder's requests back to the project root and promotes any child folders up
+  // to the deleted folder's own parent, instead of deleting either — matches the backend's own
+  // delete_folder semantics (see folder_store.rs).
+  function deleteFolderAction(id: string) {
+    showConfirm(t("common.confirm"), t("error.confirmDeleteFolder"), async () => {
+    try {
+      await api.deleteFolder(id);
+      const deleted = folders.find((f) => f.id === id);
+      const promotedParentId = deleted?.parent_folder_id ?? null;
+      folders = folders
+        .filter((f) => f.id !== id)
+        .map((f) => (f.parent_folder_id === id ? { ...f, parent_folder_id: promotedParentId } : f));
+      requests = requests.map((r) => (r.folder_id === id ? { ...r, folder_id: null } : r));
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+    });
+  }
+
+  function toggleFolderExpanded(id: string) {
+    const next = new Set(expandedFolderIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    expandedFolderIds = next;
+  }
+
+  // Hydrate the full request only when the user actually opens it.
+  async function openRequest(id: string) {
+    if (selectedRequest?.id === id) return;
+    // Flush any pending debounced autosave (scheduleAutoSave's 700ms timer) against the request
+    // we're LEAVING before switching — otherwise that timer still fires later, but by then
+    // selectedRequest/edit* fields point at the NEW request, so the stale save silently diffs
+    // against the wrong request and does nothing. This is what made curl-paste-then-switch (and
+    // any other quick edit-then-switch) look like it never saved.
+    if (!skipSave) await saveRequest();
+    saveCurrentDraft();
+
+    // Ensure tab exists in openTabs (LP-0407)
+    const reqSummary = requests.find((r) => r.id === id);
+    if (!openTabs.some((t) => t.id === id)) {
+      openTabs = [
+        ...openTabs,
+        {
+          id,
+          name: reqSummary?.name ?? "Request",
+          method: reqSummary?.method ?? "GET",
+        },
+      ];
+    }
+
+    try {
+      selectedRequest = await api.getRequest(id);
+      if (tabDrafts.has(id)) {
+        restoreDraft(tabDrafts.get(id)!);
+      } else {
+        activeResponse = null;
+        activeResponseBody = "";
+      }
+      responseHistory = await api.listResponseSummaries(id);
+      await loadSampleResponses(id);
+      await refreshDiagnostics();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function sendCurrentRequest() {
+    if (!selectedRequest || sending) return;
+    // Send always executes the persisted request, so unsaved edits (URL, headers, body, params,
+    // auth, ...) must be flushed first — otherwise Send would silently fire the last-saved
+    // version while the editor shows something different. saveRequest() is a cheap diff-based
+    // no-op when nothing changed, so it's safe to call unconditionally.
+    if (!skipSave) await saveRequest();
+    if (!selectedRequest) return;
+    const requestId = selectedRequest.id;
+    sending = true;
+    try {
+      const meta = await api.sendRequest(requestId, selectedEnvironmentId);
+      activeResponse = meta;
+      responseSubTab = "body";
+      const body = await api.getResponseBody(meta.id);
+      activeResponseBody = body.text;
+      activeResponseTruncated = body.truncated;
+      responseHistory = await api.listResponseSummaries(requestId);
+    } catch (err) {
+      if (isAppError(err) && err.kind === "Cancelled") {
+        if (sendCancelledNoticeTimer) clearTimeout(sendCancelledNoticeTimer);
+        sendCancelledNotice = describeError(err);
+        sendCancelledNoticeTimer = setTimeout(() => (sendCancelledNotice = ""), 2500);
+      } else {
+        errorMessage = describeError(err);
+      }
+    } finally {
+      sending = false;
+      await refreshConsoleEvents();
+    }
+  }
+
+  async function cancelCurrentSend() {
+    if (!selectedRequest) return;
+    try {
+      await api.cancelSend(selectedRequest.id);
+      await refreshConsoleEvents();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function openHistoryResponse(id: string) {
+    try {
+      activeResponse = await api.getResponse(id);
+      responseSubTab = "body";
+      const body = await api.getResponseBody(id);
+      activeResponseBody = body.text;
+      activeResponseTruncated = body.truncated;
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Clicking a saved sample response in the tree used to just open its parent request (showing
+  // whatever that request's last *real* response was, if any) — this actually loads the sample's
+  // own captured status/headers/body into the response viewer, same as clicking a history entry.
+  async function openSampleResponse(requestId: string, sr: SampleResponse) {
+    await openRequest(requestId);
+    activeResponse = {
+      id: sr.id,
+      request_id: sr.request_id,
+      status: sr.status,
+      status_text: sr.status_text,
+      duration_ms: 0,
+      body_size: (sr.body ?? "").length,
+      created_at: sr.created_at,
+      headers: sr.headers,
+      content_type: sr.content_type,
+      cookies: [],
+    };
+    activeResponseBody = sr.body ?? "";
+    activeResponseTruncated = false;
+    responseSubTab = "body";
+  }
+
+  function startRenameProject(project: Project) {
+    renamingProjectId = project.id;
+    renameProjectValue = project.name;
+  }
+
+  async function submitRenameProject(event: Event) {
+    event.preventDefault();
+    if (!renamingProjectId || !renameProjectValue.trim()) return;
+    try {
+      const updated = await api.updateProject({
+        id: renamingProjectId,
+        name: renameProjectValue.trim(),
+      });
+      projects = projects.map((p) => (p.id === updated.id ? updated : p));
+      renamingProjectId = null;
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function deleteProject(id: string) {
+    showConfirm(t("common.confirm"), t("error.confirmDeleteProject"), async () => {
+    try {
+      await api.deleteProject(id);
+      projects = projects.filter((p) => p.id !== id);
+      await loadAllEnvironments(); // deleting a project cascades its environments too
+      if (selectedProjectId === id) {
+        selectedProjectId = null;
+        requests = [];
+        selectedRequest = null;
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+    });
+  }
+
+  // Autosave: every editable field schedules a debounced save instead of requiring an explicit
+  // "Save" click. sendCurrentRequest() also flushes synchronously before sending, so a send never
+  // races an unsaved edit even if the debounce hasn't fired yet.
+  let autoSaveStatus = $state<"saved" | "unsaved" | "saving" | "error">("saved");
+  let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleAutoSave() {
+    if (!selectedRequest) return;
+    autoSaveStatus = "unsaved";
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      autoSaveTimer = null;
+      saveRequest();
+    }, 700);
+  }
+
+  let curlDetectedFeedback = $state("");
+
+  function looksLikeCurlCommand(text: string): boolean {
+    return /^\s*curl(\.exe)?\s/i.test(text);
+  }
+
+  // Pasting a full `curl ...` command into the URL field parses it with the same importer the
+  // dedicated Import screen uses, then fills in method/URL/headers/auth/body in place — instead
+  // of requiring a trip to Import just because the user had a curl snippet handy.
+  async function handleUrlPaste(event: ClipboardEvent) {
+    const text = event.clipboardData?.getData("text") ?? "";
+    if (!looksLikeCurlCommand(text) || !selectedRequest) return;
+    event.preventDefault();
+    curlDetectedFeedback = "Detecting curl command…";
+    try {
+      const parsed = await api.importCurl(text.trim());
+      editMethod = parsed.method;
+      editUrl = parsed.url;
+      editHeaders = withTrailingEmptyRow(parsed.headers.map((h) => ({ ...h })), () => ({ key: "", value: "", enabled: true, description: "" }));
+      editQueryParams = withTrailingEmptyRow(parsed.query_params.map((p) => ({ ...p })), () => ({ key: "", value: "", enabled: true }));
+      const auth = parsed.auth;
+      editAuthType = auth.type;
+      editAuthBearerToken = auth.type === "bearer" ? auth.token : "";
+      editAuthBasicUsername = auth.type === "basic" ? auth.username : "";
+      editAuthBasicPassword = auth.type === "basic" ? auth.password : "";
+      editAuthApiKeyKey = auth.type === "api_key" ? auth.key : "";
+      editAuthApiKeyValue = auth.type === "api_key" ? auth.value : "";
+      editAuthApiKeyLocation = auth.type === "api_key" ? auth.location : "header";
+      const parsedBody = parseBodyForEditing(parsed.body);
+      editBodyType = parsedBody.bodyType;
+      editBody = parsedBody.rawBody;
+      editGraphqlQuery = parsedBody.graphqlQuery;
+      editGraphqlVariables = parsedBody.graphqlVariables;
+      editFormDataItems = withTrailingEmptyRow(parsedBody.formDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
+      editUrlEncodedItems = withTrailingEmptyRow(parsedBody.urlEncodedItems, () => ({ key: "", value: "", enabled: true }));
+      editBinaryFilePath = parsedBody.binaryFilePath;
+      // Only apply the two settings curl's own flags (-k, -x) can actually express — leave
+      // timeout/redirects/HTTP-version alone, since curl parsing has no information about them
+      // and resetting them would silently discard whatever the user already had configured.
+      if (parsed.settings.verify_ssl !== undefined && parsed.settings.verify_ssl !== null) {
+        editVerifySsl = parsed.settings.verify_ssl;
+      }
+      if (parsed.settings.proxy_url) {
+        editProxyUrl = parsed.settings.proxy_url;
+      }
+      curlDetectedFeedback = "Detected a curl command — filled in method, headers, auth, and body.";
+      scheduleAutoSave();
+    } catch (err) {
+      curlDetectedFeedback = "";
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Only sends fields that actually differ from the hydrated request —
+  // the backend preserves anything omitted, but there's no reason to send it either.
+  async function saveRequest() {
+    if (!selectedRequest) return;
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
+    const original = selectedRequest;
+    autoSaveStatus = "saving";
+    try {
+      const auth = buildAuthFromEditFields();
+      const currentSettings: RequestSettings = {
+        timeout_ms: editTimeoutMs,
+        follow_redirects: editFollowRedirects,
+        max_redirects: editMaxRedirects,
+        verify_ssl: editVerifySsl,
+        proxy_url: editProxyUrl.trim() ? editProxyUrl.trim() : null,
+        http_version: editHttpVersion.trim() ? editHttpVersion.trim() : null,
+      };
+
+      const updated = await api.updateRequest({
+        id: original.id,
+        ...(editName !== original.name ? { name: editName } : {}),
+        ...(editMethod !== original.method ? { method: editMethod } : {}),
+        ...(editUrl !== original.url ? { url: editUrl } : {}),
+        ...(() => {
+          const cleanQueryParams = withoutEmptyKeyRows(editQueryParams);
+          return JSON.stringify(cleanQueryParams) !== JSON.stringify(original.query_params)
+            ? { query_params: cleanQueryParams }
+            : {};
+        })(),
+        ...(() => {
+          const cleanHeaders = withoutEmptyKeyRows(editHeaders);
+          return JSON.stringify(cleanHeaders) !== JSON.stringify(original.headers)
+            ? { headers: cleanHeaders }
+            : {};
+        })(),
+        ...(JSON.stringify(auth) !== JSON.stringify(original.auth) ? { auth } : {}),
+        ...(() => {
+          const serialized = serializeBodyForStorage();
+          if (serialized !== (original.body ?? "")) {
+            return serialized.trim().length === 0
+              ? { clear_body: true }
+              : { body: serialized };
+          }
+          return {};
+        })(),
+        ...(() => {
+          if (editDescription !== (original.description ?? "")) {
+            return editDescription.trim().length === 0
+              ? { clear_description: true }
+              : { description: editDescription };
+          }
+          return {};
+        })(),
+        ...(() => {
+          if (editPreScript !== (original.pre_request_script ?? "")) {
+            return editPreScript.trim().length === 0
+              ? { clear_pre_request_script: true }
+              : { pre_request_script: editPreScript };
+          }
+          return {};
+        })(),
+        ...(() => {
+          if (editPostScript !== (original.post_request_script ?? "")) {
+            return editPostScript.trim().length === 0
+              ? { clear_post_request_script: true }
+              : { post_request_script: editPostScript };
+          }
+          return {};
+        })(),
+        settings: currentSettings,
+      });
+      selectedRequest = updated;
+      await refreshDiagnostics();
+      openTabs = openTabs.map((t) =>
+        t.id === updated.id
+          ? { ...t, name: updated.name, method: updated.method }
+          : t,
+      );
+      tabDrafts.delete(updated.id);
+      requests = requests.map((r) =>
+        r.id === updated.id
+          ? { id: updated.id, project_id: updated.project_id, folder_id: updated.folder_id, name: updated.name, method: updated.method, url: updated.url, created_at: updated.created_at, updated_at: updated.updated_at }
+          : r,
+      );
+      autoSaveStatus = "saved";
+    } catch (err) {
+      autoSaveStatus = "error";
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function importCurlCommand(event: Event) {
+    event.preventDefault();
+    if (!curlImportText.trim() || !selectedProjectId) return;
+    curlImportError = "";
+    try {
+      const parsed = await api.importCurl(curlImportText.trim());
+      let reqName = curlImportName.trim();
+      if (!reqName) {
+        try {
+          const u = new URL(parsed.url);
+          reqName = `${parsed.method} ${u.pathname || "/"}`;
+        } catch {
+          reqName = `${parsed.method} ${parsed.url}`;
+        }
+      }
+      const request = await api.createRequest({
+        project_id: selectedProjectId,
+        name: reqName,
+        method: parsed.method,
+        url: parsed.url,
+        headers: parsed.headers,
+        query_params: parsed.query_params,
+        auth: parsed.auth,
+        body: parsed.body,
+        settings: parsed.settings,
+      });
+      requests = [
+        {
+          id: request.id,
+          project_id: request.project_id,
+          folder_id: request.folder_id,
+          name: request.name,
+          method: request.method,
+          url: request.url,
+          created_at: request.created_at,
+          updated_at: request.updated_at,
+        },
+        ...requests,
+      ];
+      openTabs = [
+        ...openTabs,
+        { id: request.id, name: request.name, method: request.method },
+      ];
+      selectedRequest = request;
+      curlImportText = "";
+      curlImportName = "";
+    } catch (err) {
+      curlImportError = describeError(err);
+    }
+  }
+
+  function handleCollectionFileUpload(event: Event) {
+    const input = event.target as HTMLInputElement;
+    if (input.files && input.files[0]) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        collectionImportText = (e.target?.result as string) || "";
+      };
+      reader.readAsText(input.files[0]);
+    }
+  }
+
+  async function importPostmanCollectionAction() {
+    if (!collectionImportText.trim() || !activeWorkspaceId) return;
+    collectionImportLoading = true;
+    collectionImportError = "";
+    collectionImportReport = null;
+    try {
+      const targetId = collectionImportTarget === "current" ? selectedProjectId : null;
+      const report = await api.importPostmanCollection(collectionImportText.trim(), targetId, activeWorkspaceId);
+      collectionImportReport = report;
+      await loadProjects();
+      if (!selectedProjectId || collectionImportTarget === "new") {
+        await selectProject(report.project_id);
+      } else {
+        await selectProject(selectedProjectId);
+      }
+      collectionImportText = "";
+      await syncNewProjectIntoWorkspaceRepo();
+    } catch (err) {
+      collectionImportError = describeError(err);
+    } finally {
+      collectionImportLoading = false;
+    }
+  }
+
+  async function exportPostmanCollectionAction(projectId?: string) {
+    const targetId = projectId ?? selectedProjectId;
+    if (!targetId) return;
+    try {
+      const json = await api.exportPostmanCollection(targetId);
+      const proj = projects.find((p) => p.id === targetId);
+      const safeName = (proj?.name || "collection").replace(/[^a-z0-9_-]/gi, "_");
+      downloadFile(json, `${safeName}.postman_collection.json`, "application/json");
+      exportFeedback = "Exported Postman Collection!";
+      setTimeout(() => (exportFeedback = ""), 3000);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function handleEnvironmentFileUpload(event: Event) {
+    const input = event.target as HTMLInputElement;
+    if (input.files && input.files[0]) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        environmentImportText = (e.target?.result as string) || "";
+      };
+      reader.readAsText(input.files[0]);
+    }
+  }
+
+  async function importPostmanEnvironmentAction() {
+    if (!environmentImportText.trim() || !selectedProjectId) return;
+    environmentImportLoading = true;
+    environmentImportError = "";
+    environmentImportReport = null;
+    try {
+      const report = await api.importPostmanEnvironment(environmentImportText.trim(), selectedProjectId);
+      environmentImportReport = report;
+      await loadAllEnvironments();
+      selectedEnvironmentId = report.environment_id;
+      await loadVariables();
+      environmentImportText = "";
+    } catch (err) {
+      environmentImportError = describeError(err);
+    } finally {
+      environmentImportLoading = false;
+    }
+  }
+
+  async function exportPostmanEnvironmentAction() {
+    if (!selectedEnvironmentId) return;
+    try {
+      const json = await api.exportPostmanEnvironment(selectedEnvironmentId);
+      const env = allEnvironments.find((e) => e.id === selectedEnvironmentId);
+      const safeName = (env?.name || "environment").replace(/[^a-z0-9_-]/gi, "_");
+      downloadFile(json, `${safeName}.postman_environment.json`, "application/json");
+      exportFeedback = "Exported Postman Environment!";
+      setTimeout(() => (exportFeedback = ""), 3000);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function downloadFile(content: string, filename: string, type: string) {
+    const blob = new Blob([content], { type: `${type};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function growHeaders() {
+    editHeaders = withTrailingEmptyRow(editHeaders, () => ({ key: "", value: "", enabled: true, description: "" }));
+  }
+
+  function removeHeader(index: number) {
+    editHeaders = withTrailingEmptyRow(editHeaders.filter((_, i) => i !== index), () => ({ key: "", value: "", enabled: true, description: "" }));
+  }
+
+  function growQueryParams() {
+    editQueryParams = withTrailingEmptyRow(editQueryParams, () => ({ key: "", value: "", enabled: true }));
+  }
+
+  function removeQueryParam(index: number) {
+    editQueryParams = withTrailingEmptyRow(editQueryParams.filter((_, i) => i !== index), () => ({ key: "", value: "", enabled: true }));
+  }
+
+  async function loadVariables() {
+    if (!selectedProjectId) {
+      projectVariables = [];
+      environmentVariables = [];
+      return;
+    }
+    try {
+      projectVariables = await api.listVariablesForScope("global", selectedProjectId);
+      if (selectedEnvironmentId) {
+        environmentVariables = await api.listVariablesForScope("environment", selectedEnvironmentId);
+      } else {
+        environmentVariables = [];
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function commitNewGlobalVar() {
+    const key = newGlobalVarDraft.key.trim();
+    if (!selectedProjectId || !key) return;
+    try {
+      await api.createVariable({
+        scope: "global",
+        project_id: selectedProjectId,
+        key,
+        value: newGlobalVarDraft.value,
+        is_secret: newGlobalVarDraft.isSecret,
+        is_local: newGlobalVarDraft.isLocal,
+        enabled: true,
+      });
+      newGlobalVarDraft = emptyVarDraft();
+      await loadVariables();
+      await refreshDiagnostics();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function commitNewEnvVar() {
+    const key = newEnvVarDraft.key.trim();
+    if (!selectedEnvironmentId || !key) return;
+    try {
+      await api.createVariable({
+        scope: "environment",
+        environment_id: selectedEnvironmentId,
+        key,
+        value: newEnvVarDraft.value,
+        is_secret: newEnvVarDraft.isSecret,
+        is_local: newEnvVarDraft.isLocal,
+        enabled: true,
+      });
+      newEnvVarDraft = emptyVarDraft();
+      await loadVariables();
+      await refreshDiagnostics();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function toggleVariableEnabled(v: VariableView) {
+    try {
+      await api.updateVariable({ id: v.id, enabled: !v.enabled });
+      await loadVariables();
+      await refreshDiagnostics();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function toggleVariableSecret(v: VariableView) {
+    try {
+      await api.updateVariable({ id: v.id, is_secret: !v.is_secret });
+      await loadVariables();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function toggleVariableLocal(v: VariableView) {
+    try {
+      await api.updateVariable({ id: v.id, is_local: !v.is_local });
+      await loadVariables();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function refreshDiagnostics() {
+    if (!selectedRequest) {
+      requestDiagnostics = null;
+      return;
+    }
+    try {
+      requestDiagnostics = await api.diagnoseRequest(selectedRequest.id, selectedEnvironmentId);
+    } catch {
+      requestDiagnostics = null;
+    }
+  }
+
+  // Fills in an unresolved {{variable}} straight from the "Unresolved variables" warning —
+  // no trip to the Environments screen needed. Lands in the active environment if one is
+  // selected (matching what actually resolved it), otherwise the project's global scope.
+  // Every diagnostic that depends on variables (the warning banner, tab badges, URL preview)
+  // is re-fetched right after, so the fix is reflected everywhere immediately.
+  async function addMissingVariable(name: string) {
+    if (!selectedProjectId) return;
+    const value = (missingVarDrafts[name] ?? "").trim();
+    if (!value) return;
+    try {
+      if (selectedEnvironmentId) {
+        await api.createVariable({
+          scope: "environment",
+          environment_id: selectedEnvironmentId,
+          key: name,
+          value,
+          is_secret: false,
+          is_local: false,
+          enabled: true,
+        });
+      } else {
+        await api.createVariable({
+          scope: "global",
+          project_id: selectedProjectId,
+          key: name,
+          value,
+          is_secret: false,
+          is_local: false,
+          enabled: true,
+        });
+      }
+      delete missingVarDrafts[name];
+      if (missingVarHover?.name === name) missingVarHover = null;
+      await loadVariables();
+      await refreshDiagnostics();
+      await refreshUrlPreview();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Shared hover-to-add-value popover for missing variables, used both by the "Unresolved
+  // variables" warning banner and by {{tokens}} highlighted inline in the URL bar. Positioned
+  // via JS (not CSS :hover) and rendered as a top-level portal — a plain CSS :hover popover
+  // nested inside the URL bar gets clipped, since the bar also needs overflow-x clipping for
+  // long URLs and CSS doesn't allow "clip X, don't clip Y" (a non-"visible" axis paired with
+  // "visible" silently becomes "auto", which still clips).
+  //
+  // Extended (LP-1201) to work for ALREADY-resolved variables too, not just missing ones — same
+  // popover, same position/hide logic, just prefilled with the live value and wired to update
+  // instead of create. Only searches the two scopes the request-editing surface already knows
+  // about (environment, then global) — the same scopes addMissingVariable can create into, so
+  // this doesn't reach further than what was already editable elsewhere.
+  let missingVarHover = $state<{ name: string; top: number; left: number } | null>(null);
+  let missingVarHoverHideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function findResolvedVariable(name: string): VariableView | undefined {
+    return (
+      environmentVariables.find((v) => v.key === name) ??
+      projectVariables.find((v) => v.key === name)
+    );
+  }
+
+  function showVarPopover(name: string, target: HTMLElement) {
+    if (missingVarDrafts[name] === undefined) {
+      const resolved = findResolvedVariable(name);
+      if (resolved) missingVarDrafts[name] = resolved.value;
+    }
+    showMissingVarPopover(name, target);
+  }
+
+  async function saveVariableFromPopover(name: string) {
+    const resolved = findResolvedVariable(name);
+    if (!resolved) {
+      await addMissingVariable(name);
+      return;
+    }
+    const value = missingVarDrafts[name] ?? "";
+    try {
+      await api.updateVariable({ id: resolved.id, value });
+      missingVarHover = null;
+      await loadVariables();
+      await refreshDiagnostics();
+      await refreshUrlPreview();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function showMissingVarPopover(name: string, target: HTMLElement) {
+    if (missingVarHoverHideTimer) {
+      clearTimeout(missingVarHoverHideTimer);
+      missingVarHoverHideTimer = null;
+    }
+    const rect = target.getBoundingClientRect();
+    missingVarHover = { name, top: rect.bottom, left: rect.left };
+  }
+
+  function scheduleHideMissingVarPopover() {
+    if (missingVarHoverHideTimer) clearTimeout(missingVarHoverHideTimer);
+    missingVarHoverHideTimer = setTimeout(() => {
+      missingVarHover = null;
+      missingVarHoverHideTimer = null;
+    }, 150);
+  }
+
+  function cancelHideMissingVarPopover() {
+    if (missingVarHoverHideTimer) {
+      clearTimeout(missingVarHoverHideTimer);
+      missingVarHoverHideTimer = null;
+    }
+  }
+
+  // Inline autocomplete (LP-1401) for two contexts that share one floating dropdown:
+  // "var" mode suggests {{variable}} names while inside an unclosed {{ in any text field,
+  // "pm" mode suggests pm.*/console.* API members while typing in a pre/post-request script
+  // textarea. Attached generically via oninput/onkeydown so no per-field wiring is needed beyond
+  // passing a `setValue` closure that writes back into that field's own bound state.
+  interface AutocompleteItem {
+    insertText: string;
+    label: string;
+    detail?: string;
+  }
+  interface AutocompleteState {
+    mode: "var" | "pm" | "header";
+    items: AutocompleteItem[];
+    activeIndex: number;
+    top: number;
+    left: number;
+    targetEl: HTMLInputElement | HTMLTextAreaElement;
+    replaceStart: number;
+    replaceEnd: number;
+    setValue: (value: string) => void;
+  }
+  let autocomplete = $state<AutocompleteState | null>(null);
+
+  // Mirrors the textarea/input's text into an offscreen div with identical font metrics so we can
+  // read where a given character index actually lands on screen — there is no DOM API that maps a
+  // string index to pixel coordinates directly, so the standard workaround is to lay out the same
+  // text a second time and measure it.
+  const CARET_MIRROR_PROPERTIES = [
+    "boxSizing", "width", "height", "overflowX", "overflowY",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderStyle",
+    "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "fontStyle", "fontVariant", "fontWeight", "fontStretch", "fontSize", "fontFamily",
+    "lineHeight", "textAlign", "textTransform", "textIndent", "letterSpacing", "wordSpacing",
+    "tabSize", "whiteSpace", "wordBreak",
+  ] as const;
+
+  function caretScreenPosition(el: HTMLInputElement | HTMLTextAreaElement, index: number): { top: number; left: number; height: number } {
+    const isInput = el.tagName === "INPUT";
+    const style = getComputedStyle(el);
+    const div = document.createElement("div");
+    const divStyle = div.style as CSSStyleDeclaration & Record<string, string>;
+    const computedStyle = style as CSSStyleDeclaration & Record<string, string>;
+    for (const prop of CARET_MIRROR_PROPERTIES) {
+      divStyle[prop] = computedStyle[prop];
+    }
+    div.style.position = "absolute";
+    div.style.visibility = "hidden";
+    div.style.whiteSpace = isInput ? "pre" : "pre-wrap";
+    div.style.wordWrap = "break-word";
+    document.body.appendChild(div);
+    const before = el.value.slice(0, index);
+    div.textContent = isInput ? before.replace(/ /g, " ") : before;
+    const marker = document.createElement("span");
+    marker.textContent = el.value.slice(index) || ".";
+    div.appendChild(marker);
+    const rect = el.getBoundingClientRect();
+    const lineHeight = parseInt(style.lineHeight, 10) || 18;
+    const top = rect.top + marker.offsetTop - el.scrollTop;
+    const left = rect.left + marker.offsetLeft - el.scrollLeft;
+    document.body.removeChild(div);
+    return { top, left, height: lineHeight };
+  }
+
+  function variableAutocompleteQuery(text: string, caret: number): { query: string; start: number } | null {
+    const upto = text.slice(0, caret);
+    const openIdx = upto.lastIndexOf("{{");
+    if (openIdx === -1) return null;
+    const closeIdx = upto.indexOf("}}", openIdx);
+    if (closeIdx !== -1) return null;
+    const inner = upto.slice(openIdx + 2);
+    if (/[{}\s]/.test(inner)) return null;
+    return { query: inner, start: openIdx + 2 };
+  }
+
+  function variableSuggestionItems(query: string): AutocompleteItem[] {
+    const q = query.toLowerCase();
+    const seen = new Set<string>();
+    const items: AutocompleteItem[] = [];
+    for (const v of environmentVariables) {
+      if (seen.has(v.key) || (q && !v.key.toLowerCase().includes(q))) continue;
+      seen.add(v.key);
+      items.push({ insertText: v.key, label: v.key, detail: t("var.scopeEnvironment") });
+    }
+    for (const v of projectVariables) {
+      if (seen.has(v.key) || (q && !v.key.toLowerCase().includes(q))) continue;
+      seen.add(v.key);
+      items.push({ insertText: v.key, label: v.key, detail: t("var.scopeGlobal") });
+    }
+    return items.slice(0, 20);
+  }
+
+  function scriptAutocompleteQuery(text: string, caret: number): { query: string; start: number } | null {
+    const upto = text.slice(0, caret);
+    const match = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.exec(upto);
+    if (!match) return null;
+    const word = match[0];
+    if (word.length < 2) return null;
+    const prefixes = ["pm", "console", "CryptoJS"];
+    if (!prefixes.some((p) => word.startsWith(p) || p.startsWith(word))) {
+      return null;
+    }
+    return { query: word, start: caret - word.length };
+  }
+
+  function pmApiSuggestions(includeResponse: boolean): AutocompleteItem[] {
+    const base: { insertText: string; label: string; detailKey: string }[] = [
+      { insertText: "pm.environment.get(", label: "pm.environment.get(key)", detailKey: "autocomplete.pmEnvGet" },
+      { insertText: "pm.environment.set(", label: "pm.environment.set(key, value)", detailKey: "autocomplete.pmEnvSet" },
+      { insertText: "pm.environment.unset(", label: "pm.environment.unset(key)", detailKey: "autocomplete.pmEnvUnset" },
+      { insertText: "pm.environment.has(", label: "pm.environment.has(key)", detailKey: "autocomplete.pmEnvHas" },
+      { insertText: "pm.variables.get(", label: "pm.variables.get(key)", detailKey: "autocomplete.pmVarGet" },
+      { insertText: "pm.variables.set(", label: "pm.variables.set(key, value)", detailKey: "autocomplete.pmVarSet" },
+      { insertText: "pm.test(", label: "pm.test(name, fn)", detailKey: "autocomplete.pmTest" },
+      { insertText: "console.log(", label: "console.log(...)", detailKey: "autocomplete.consoleLog" },
+      { insertText: "console.info(", label: "console.info(...)", detailKey: "autocomplete.consoleInfo" },
+      { insertText: "console.warn(", label: "console.warn(...)", detailKey: "autocomplete.consoleWarn" },
+      { insertText: "console.error(", label: "console.error(...)", detailKey: "autocomplete.consoleError" },
+    ];
+    const responseOnly: { insertText: string; label: string; detailKey: string }[] = [
+      { insertText: "pm.response.code", label: "pm.response.code", detailKey: "autocomplete.pmResCode" },
+      { insertText: "pm.response.status", label: "pm.response.status", detailKey: "autocomplete.pmResStatus" },
+      { insertText: "pm.response.statusText", label: "pm.response.statusText", detailKey: "autocomplete.pmResStatusText" },
+      { insertText: "pm.response.headers", label: "pm.response.headers", detailKey: "autocomplete.pmResHeaders" },
+      { insertText: "pm.response.text()", label: "pm.response.text()", detailKey: "autocomplete.pmResText" },
+      { insertText: "pm.response.json()", label: "pm.response.json()", detailKey: "autocomplete.pmResJson" },
+      { insertText: "pm.response.to.have.status(", label: "pm.response.to.have.status(code)", detailKey: "autocomplete.pmResToHaveStatus" },
+      { insertText: "pm.response.to.have.header(", label: "pm.response.to.have.header(key, value?)", detailKey: "autocomplete.pmResToHaveHeader" },
+    ];
+    // pm.request only exists in pre-request scripts (LP-1406) — the request hasn't been sent
+    // yet in that context, so it's the mirror image of pm.response being post-request-only.
+    const requestOnly: { insertText: string; label: string; detailKey: string }[] = [
+      { insertText: "pm.request.headers.add(", label: "pm.request.headers.add({key, value})", detailKey: "autocomplete.pmReqHeadersAdd" },
+      { insertText: "pm.request.headers.upsert(", label: "pm.request.headers.upsert({key, value})", detailKey: "autocomplete.pmReqHeadersUpsert" },
+      { insertText: "pm.request.headers.remove(", label: "pm.request.headers.remove(key)", detailKey: "autocomplete.pmReqHeadersRemove" },
+      { insertText: "pm.request.headers.has(", label: "pm.request.headers.has(key)", detailKey: "autocomplete.pmReqHeadersHas" },
+      { insertText: "pm.request.headers.get(", label: "pm.request.headers.get(key)", detailKey: "autocomplete.pmReqHeadersGet" },
+      { insertText: "pm.request.body.toString()", label: "pm.request.body.toString()", detailKey: "autocomplete.pmReqBodyToString" },
+      { insertText: "pm.request.body.update(", label: "pm.request.body.update(newBody)", detailKey: "autocomplete.pmReqBodyUpdate" },
+      { insertText: "pm.request.url.toString()", label: "pm.request.url.toString()", detailKey: "autocomplete.pmReqUrl" },
+      { insertText: "pm.request.method", label: "pm.request.method", detailKey: "autocomplete.pmReqMethod" },
+      { insertText: "CryptoJS.HmacSHA256(", label: "CryptoJS.HmacSHA256(message, key)", detailKey: "autocomplete.cryptoHmacSha256" },
+      { insertText: "CryptoJS.HmacSHA1(", label: "CryptoJS.HmacSHA1(message, key)", detailKey: "autocomplete.cryptoHmacSha1" },
+      { insertText: "CryptoJS.SHA256(", label: "CryptoJS.SHA256(message)", detailKey: "autocomplete.cryptoSha256" },
+      { insertText: "CryptoJS.SHA1(", label: "CryptoJS.SHA1(message)", detailKey: "autocomplete.cryptoSha1" },
+      { insertText: "CryptoJS.enc.Base64.stringify(", label: "CryptoJS.enc.Base64.stringify(wordArray)", detailKey: "autocomplete.cryptoBase64Stringify" },
+      { insertText: "CryptoJS.enc.Hex.stringify(", label: "CryptoJS.enc.Hex.stringify(wordArray)", detailKey: "autocomplete.cryptoHexStringify" },
+    ];
+    const all = includeResponse ? [...base, ...responseOnly] : [...base, ...requestOnly];
+    return all.map((s) => ({ insertText: s.insertText, label: s.label, detail: t(s.detailKey) }));
+  }
+
+  function pmSuggestionItems(query: string, includeResponse: boolean): AutocompleteItem[] {
+    const q = query.toLowerCase();
+    return pmApiSuggestions(includeResponse)
+      .filter((s) => s.insertText.toLowerCase().startsWith(q) || s.label.toLowerCase().startsWith(q))
+      .slice(0, 20);
+  }
+
+  // A curated set of headers actually useful when testing an API — not the full IANA registry,
+  // which would mostly just add noise (browser-only headers like Sec-Fetch-*, response-only
+  // headers like ETag, etc. don't belong in a request's own header list).
+  const STANDARD_REQUEST_HEADERS = [
+    "Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
+    "Authorization", "Cache-Control", "Connection", "Content-Disposition",
+    "Content-Length", "Content-Type", "Cookie", "DNT", "Expect", "Forwarded",
+    "Host", "If-Match", "If-Modified-Since", "If-None-Match", "If-Unmodified-Since",
+    "Origin", "Pragma", "Range", "Referer", "TE", "User-Agent",
+    "Upgrade-Insecure-Requests", "Warning", "X-Api-Key", "X-CSRF-Token",
+    "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Request-ID",
+    "X-Requested-With",
+  ];
+
+  function headerNameQuery(text: string): { query: string; start: number } | null {
+    if (!text) return null;
+    return { query: text, start: 0 };
+  }
+
+  function headerSuggestionItems(query: string): AutocompleteItem[] {
+    const q = query.toLowerCase();
+    return STANDARD_REQUEST_HEADERS.filter((h) => h.toLowerCase().startsWith(q) && h.toLowerCase() !== q)
+      .slice(0, 20)
+      .map((h) => ({ insertText: h, label: h }));
+  }
+
+  function updateAutocompleteFor(
+    el: HTMLInputElement | HTMLTextAreaElement,
+    mode: "var" | "pm" | "header",
+    includeResponse: boolean,
+    setValue: (value: string) => void,
+  ) {
+    const caret = el.selectionStart ?? el.value.length;
+    const hit =
+      mode === "var"
+        ? variableAutocompleteQuery(el.value, caret)
+        : mode === "pm"
+          ? scriptAutocompleteQuery(el.value, caret)
+          : headerNameQuery(el.value);
+    if (!hit) {
+      autocomplete = null;
+      return;
+    }
+    const items =
+      mode === "var"
+        ? variableSuggestionItems(hit.query)
+        : mode === "pm"
+          ? pmSuggestionItems(hit.query, includeResponse)
+          : headerSuggestionItems(hit.query);
+    if (!items.length) {
+      autocomplete = null;
+      return;
+    }
+    // Header-name mode always replaces the whole field, regardless of caret position.
+    const replaceEnd = mode === "header" ? el.value.length : caret;
+    const pos = caretScreenPosition(el, hit.start);
+    autocomplete = {
+      mode,
+      items,
+      activeIndex: 0,
+      top: pos.top + pos.height + 2,
+      left: pos.left,
+      targetEl: el,
+      replaceStart: hit.start,
+      replaceEnd,
+      setValue,
+    };
+  }
+
+  function handleAutocompleteKeydown(e: KeyboardEvent) {
+    if (!autocomplete) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      autocomplete = { ...autocomplete, activeIndex: (autocomplete.activeIndex + 1) % autocomplete.items.length };
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      autocomplete = { ...autocomplete, activeIndex: (autocomplete.activeIndex - 1 + autocomplete.items.length) % autocomplete.items.length };
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      applyAutocompleteItem(autocomplete.items[autocomplete.activeIndex]);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      autocomplete = null;
+    }
+  }
+
+  function applyAutocompleteItem(item: AutocompleteItem) {
+    const ac = autocomplete;
+    if (!ac) return;
+    const { targetEl, replaceStart, replaceEnd, mode, setValue } = ac;
+    const value = targetEl.value;
+    const before = value.slice(0, replaceStart);
+    const after = value.slice(replaceEnd);
+    const hasClosing = mode === "var" && after.startsWith("}}");
+    const insertText = mode === "var" && !hasClosing ? item.insertText + "}}" : item.insertText;
+    const newValue = before + insertText + after;
+    const newCaret = before.length + insertText.length + (hasClosing ? 2 : 0);
+    setValue(newValue);
+    autocomplete = null;
+    tick().then(() => {
+      targetEl.focus();
+      targetEl.setSelectionRange(newCaret, newCaret);
+    });
+  }
+
+  function hideAutocompleteSoon() {
+    setTimeout(() => {
+      autocomplete = null;
+    }, 120);
+  }
+
+  function deleteVariable(id: string) {
+    showConfirm(t("common.confirm"), t("error.confirmDeleteVariable"), async () => {
+    try {
+      await api.deleteVariable(id);
+      await loadVariables();
+      await refreshDiagnostics();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+    });
+  }
+
+  async function revealSecret(id: string) {
+    try {
+      const val = await api.revealVariableValue(id);
+      revealedSecrets = { ...revealedSecrets, [id]: val };
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function copyResponseBody() {
+    if (!activeResponseBody) return;
+    try {
+      await navigator.clipboard.writeText(activeResponseBody);
+      copyFeedback = "Copied!";
+      setTimeout(() => (copyFeedback = ""), 2000);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function downloadResponseBody() {
+    if (!activeResponseBody || !activeResponse) return;
+    const blob = new Blob([activeResponseBody], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `response-${activeResponse.status}-${activeResponse.id.slice(0, 8)}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function deleteRequest(id: string) {
+    showConfirm(t("common.confirm"), t("error.confirmDeleteRequest"), async () => {
+    try {
+      await api.deleteRequest(id);
+      requests = requests.filter((r) => r.id !== id);
+      closeTab(id);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+    });
+  }
+
+  // Full copy — headers, params, auth, body, description and scripts all carry over, not just
+  // method/URL, so "Duplicate" is a real starting point for a variant request, not a blank one.
+  async function duplicateRequest(id: string) {
+    try {
+      const source = await api.getRequest(id);
+      const created = await api.createRequest({
+        project_id: source.project_id,
+        folder_id: source.folder_id,
+        name: t("sidebar.copyOf", { name: source.name }),
+        method: source.method,
+        url: source.url,
+        headers: source.headers,
+        query_params: source.query_params,
+        auth: source.auth,
+        body: source.body,
+        description: source.description,
+        settings: source.settings,
+        pre_request_script: source.pre_request_script,
+        post_request_script: source.post_request_script,
+      });
+      requests = [
+        {
+          id: created.id,
+          project_id: created.project_id,
+          folder_id: created.folder_id,
+          name: created.name,
+          method: created.method,
+          url: created.url,
+          created_at: created.created_at,
+          updated_at: created.updated_at,
+        },
+        ...requests,
+      ];
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // --- Git & Collaboration Functions (LP-0701 - LP-0713) ---
+  async function loadGitSettings() {
+    if (!activeWorkspaceId) return;
+    try {
+      const s = await api.getWorkspaceGitSettings(activeWorkspaceId);
+      gitSettings = s;
+      if (s) {
+        gitRepoPathInput = s.repo_path ?? "";
+        gitRemoteUrlInput = s.remote_url ?? "";
+        gitBranchInput = s.branch || "main";
+        gitAutoSyncInput = s.auto_sync;
+        githubTokenInput = s.github_token ?? "";
+        if (s.repo_path) {
+          await refreshGitStatus(s.repo_path);
+        } else {
+          gitStatus = null;
+        }
+        if (s.github_token) {
+          verifyGitHubTokenAction(false);
+        }
+      } else {
+        gitRepoPathInput = "";
+        gitRemoteUrlInput = "";
+        gitBranchInput = "main";
+        gitAutoSyncInput = false;
+        githubTokenInput = "";
+        gitStatus = null;
+        githubUser = null;
+        githubRepoInfo = null;
+      }
+      // No workspace-level settings yet — offer any leftover per-project configs as options
+      // rather than guessing; the user picks one (or dismisses and configures from scratch).
+      legacyGitCandidates = s ? [] : await api.findLegacyGitSettingsForWorkspace(activeWorkspaceId);
+    } catch (err) {
+      console.error("Failed to load git settings:", err);
+    }
+  }
+
+  async function refreshGitStatus(path?: string) {
+    const dir = path ?? gitRepoPathInput.trim();
+    if (!dir) return;
+    gitStatusLoading = true;
+    try {
+      const status = await api.getGitStatus(dir);
+      gitStatus = status;
+      if (status.has_conflicts && status.conflict_files.length > 0) {
+        gitActiveTab = "conflicts";
+      }
+    } catch (err) {
+      gitStatus = null;
+      console.error("Failed to refresh git status:", err);
+    } finally {
+      gitStatusLoading = false;
+    }
+  }
+
+  async function saveGitSettingsAction() {
+    if (!activeWorkspaceId) return;
+    gitActionError = "";
+    gitActionFeedback = "";
+    try {
+      const settings: WorkspaceGitSettings = {
+        workspace_id: activeWorkspaceId,
+        repo_path: gitRepoPathInput.trim() || null,
+        remote_url: gitRemoteUrlInput.trim() || null,
+        branch: gitBranchInput.trim() || "main",
+        auto_sync: gitAutoSyncInput,
+        github_token: githubTokenInput.trim() || null,
+        last_sync_at: gitSettings?.last_sync_at ?? null,
+      };
+      await api.saveWorkspaceGitSettings(settings);
+      gitSettings = settings;
+      legacyGitCandidates = [];
+      gitActionFeedback = "Settings saved successfully.";
+      if (settings.repo_path) {
+        await refreshGitStatus(settings.repo_path);
+      }
+    } catch (err) {
+      gitActionError = describeError(err);
+    }
+  }
+
+  // The user picked one of the offered legacy per-project configs — fill the form with it and
+  // save it as this workspace's own settings (a real save, not just a preview: they explicitly
+  // chose it from the options).
+  async function adoptLegacyGitSettings(candidate: LegacyGitSettingsCandidate) {
+    gitRepoPathInput = candidate.settings.repo_path ?? "";
+    gitRemoteUrlInput = candidate.settings.remote_url ?? "";
+    gitBranchInput = candidate.settings.branch || "main";
+    gitAutoSyncInput = candidate.settings.auto_sync;
+    githubTokenInput = candidate.settings.github_token ?? "";
+    await saveGitSettingsAction();
+  }
+
+  function dismissLegacyGitCandidates() {
+    legacyGitCandidates = [];
+  }
+
+  async function initializeGitRepoAction() {
+    const dir = gitRepoPathInput.trim();
+    if (!dir) {
+      gitActionError = "Please specify a local repository directory.";
+      return;
+    }
+    gitLoading = true;
+    gitActionError = "";
+    gitActionFeedback = "";
+    try {
+      await api.gitInitRepository(dir);
+      await saveGitSettingsAction();
+      if (activeWorkspaceId) {
+        await api.saveWorkspaceToRepo(activeWorkspaceId, dir, false);
+      }
+      await refreshGitStatus(dir);
+      gitActionFeedback = "Git repository initialized successfully with .gitignore and every project's canonical file.";
+    } catch (err) {
+      gitActionError = describeError(err);
+    } finally {
+      gitLoading = false;
+    }
+  }
+
+  async function saveWorkspaceToRepoAction() {
+    if (!activeWorkspaceId || !gitRepoPathInput.trim()) return;
+    gitLoading = true;
+    gitActionError = "";
+    gitActionFeedback = "";
+    try {
+      const paths = await api.saveWorkspaceToRepo(activeWorkspaceId, gitRepoPathInput.trim(), false);
+      await refreshGitStatus();
+      gitActionFeedback = `Saved ${paths.length} project file${paths.length === 1 ? "" : "s"} to the repo.`;
+    } catch (err) {
+      gitActionError = describeError(err);
+    } finally {
+      gitLoading = false;
+    }
+  }
+
+  async function commitAndPushAction() {
+    const dir = gitRepoPathInput.trim();
+    if (!dir || !activeWorkspaceId) return;
+    const msg = gitCommitMessage.trim() || "Update workspace from Light Postman";
+    gitLoading = true;
+    gitActionError = "";
+    gitActionFeedback = "";
+    try {
+      await api.saveWorkspaceToRepo(activeWorkspaceId, dir, false);
+      const commitHash = await api.gitCommitChanges(dir, msg);
+      gitCommitMessage = "";
+      let pushed = false;
+      if (gitRemoteUrlInput.trim()) {
+        try {
+          await api.gitPushRepository(dir, "origin", gitBranchInput.trim() || "main");
+          pushed = true;
+        } catch (pushErr) {
+          gitActionFeedback = `Committed (${commitHash.slice(0, 7)}), but remote push failed: ${describeError(pushErr)}`;
+          await refreshGitStatus();
+          return;
+        }
+      }
+      const now = new Date().toISOString();
+      if (gitSettings) {
+        gitSettings.last_sync_at = now;
+        await api.saveWorkspaceGitSettings(gitSettings);
+      }
+      gitActionFeedback = pushed
+        ? `Committed (${commitHash.slice(0, 7)}) and pushed to remote.`
+        : `Committed (${commitHash.slice(0, 7)}) to local git repo.`;
+      await refreshGitStatus();
+    } catch (err) {
+      gitActionError = describeError(err);
+    } finally {
+      gitLoading = false;
+    }
+  }
+
+  function describeWorkspaceImportReport(report: WorkspaceImportReport): string {
+    const parts = [];
+    if (report.updated_projects.length) parts.push(`${report.updated_projects.length} updated`);
+    if (report.created_projects.length) parts.push(`${report.created_projects.length} created`);
+    if (!parts.length) parts.push("nothing to import");
+    let msg = `Pulled from remote — ${parts.join(", ")}.`;
+    if (report.warnings.length) msg += ` ${report.warnings.length} warning(s): ${report.warnings.join("; ")}`;
+    return msg;
+  }
+
+  async function pullRepositoryAction() {
+    const dir = gitRepoPathInput.trim();
+    if (!dir || !activeWorkspaceId) return;
+    gitLoading = true;
+    gitActionError = "";
+    gitActionFeedback = "";
+    try {
+      await api.gitPullRepository(dir, "origin", gitBranchInput.trim() || "main");
+      const report = await api.loadWorkspaceFromRepo(activeWorkspaceId, dir);
+      await loadProjects();
+      gitActionFeedback = describeWorkspaceImportReport(report);
+      await refreshGitStatus();
+    } catch (err) {
+      gitActionError = describeError(err);
+      await refreshGitStatus();
+    } finally {
+      gitLoading = false;
+    }
+  }
+
+  async function viewDiffAction() {
+    const dir = gitRepoPathInput.trim();
+    if (!dir) return;
+    gitLoading = true;
+    gitActionError = "";
+    try {
+      gitDiffContent = await api.gitGetDiff(dir);
+      showDiffModal = true;
+    } catch (err) {
+      gitActionError = describeError(err);
+    } finally {
+      gitLoading = false;
+    }
+  }
+
+  async function viewHistoryAction() {
+    const dir = gitRepoPathInput.trim();
+    if (!dir) return;
+    gitLoading = true;
+    gitActionError = "";
+    try {
+      gitHistory = await api.gitGetLog(dir, 25);
+      showHistoryModal = true;
+    } catch (err) {
+      gitActionError = describeError(err);
+    } finally {
+      gitLoading = false;
+    }
+  }
+
+  async function resolveConflictAction(file: string, choice: string) {
+    const dir = gitRepoPathInput.trim();
+    if (!dir || !activeWorkspaceId) return;
+    gitLoading = true;
+    gitActionError = "";
+    gitActionFeedback = "";
+    try {
+      await api.gitResolveConflict(dir, file, choice);
+      gitActionFeedback = `Resolved conflict on '${file}' with choice '${choice}'.`;
+      if (choice === "theirs" && file.includes("light-postman.json")) {
+        await api.loadWorkspaceFromRepo(activeWorkspaceId, dir);
+        await loadProjects();
+      }
+      await refreshGitStatus();
+    } catch (err) {
+      gitActionError = describeError(err);
+    } finally {
+      gitLoading = false;
+    }
+  }
+
+  async function verifyGitHubTokenAction(showFeedback = true) {
+    const token = githubTokenInput.trim();
+    if (!token) return;
+    githubValidating = true;
+    if (showFeedback) {
+      gitActionError = "";
+      gitActionFeedback = "";
+    }
+    try {
+      githubUser = await api.verifyGitHubToken(token);
+      if (showFeedback) {
+        gitActionFeedback = `Authenticated as @${githubUser.login}`;
+      }
+    } catch (err) {
+      githubUser = null;
+      if (showFeedback) {
+        gitActionError = `GitHub token verification failed: ${describeError(err)}`;
+      }
+    } finally {
+      githubValidating = false;
+    }
+  }
+
+  async function checkGitHubRepoAction() {
+    const token = githubTokenInput.trim();
+    const url = gitRemoteUrlInput.trim();
+    if (!token || !url) {
+      gitActionError = "GitHub Token and Remote URL are required to verify repository permissions.";
+      return;
+    }
+    githubValidating = true;
+    gitActionError = "";
+    gitActionFeedback = "";
+    try {
+      const match = url.match(/github\.com[:/]([^/]+)\/([^/.]+)(?:\.git)?/);
+      if (!match) {
+        throw new Error("Could not parse owner/repo from Remote URL. Expected format: https://github.com/owner/repo.git");
+      }
+      const [, owner, repo] = match;
+      githubRepoInfo = await api.getGitHubRepoInfo(token, owner, repo);
+      gitActionFeedback = `Repository permissions verified for ${githubRepoInfo.full_name}.`;
+    } catch (err) {
+      githubRepoInfo = null;
+      gitActionError = `Repository permission check failed: ${describeError(err)}`;
+    } finally {
+      githubValidating = false;
+    }
+  }
+
+  async function exportProjectFileAction() {
+    if (!selectedProjectId) return;
+    try {
+      projectFileJson = await api.exportProjectFile(selectedProjectId, !projectFileMaskSecrets);
+      projectFileStatus = "Canonical project file generated.";
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function importProjectFileAction() {
+    if (!projectFileJson.trim() || !activeWorkspaceId) return;
+    try {
+      const proj = await api.importProjectFile(projectFileJson, selectedProjectId, activeWorkspaceId);
+      projectFileStatus = `Project '${proj.name}' imported successfully.`;
+      await selectProject(proj.id);
+      await syncNewProjectIntoWorkspaceRepo();
+    } catch (err) {
+      projectFileStatus = `Import failed: ${describeError(err)}`;
+    }
+  }
+
+  function downloadProjectFile() {
+    if (!projectFileJson || !selectedProjectId) return;
+    const blob = new Blob([projectFileJson], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "light-postman.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  $effect(() => {
+    if (autoSyncTimer) {
+      clearInterval(autoSyncTimer);
+      autoSyncTimer = null;
+    }
+    if (gitAutoSyncInput && gitRepoPathInput.trim() && activeWorkspaceId) {
+      autoSyncTimer = setInterval(async () => {
+        try {
+          const status = await api.getGitStatus(gitRepoPathInput.trim());
+          gitStatus = status;
+          if (status.status_kind === "behind") {
+            await pullRepositoryAction();
+          } else if (status.status_kind === "ahead" || status.status_kind === "modified") {
+            await commitAndPushAction();
+          }
+        } catch {
+          // ignore auto-sync errors
+        }
+      }, autoSyncIntervalMs);
+    }
+    return () => {
+      if (autoSyncTimer) {
+        clearInterval(autoSyncTimer);
+        autoSyncTimer = null;
+      }
+    };
+  });
+
+  let confirmDialog = $state<{
+    show: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  }>({
+    show: false,
+    title: "",
+    message: "",
+    onConfirm: () => {}
+  });
+
+  function showConfirm(title: string, message: string, onConfirm: () => void) {
+    confirmDialog = { show: true, title, message, onConfirm };
+  }
+</script>
+
+{#if confirmDialog.show}
+  <div
+    class="modal-backdrop"
+    onclick={(e) => { if (e.target === e.currentTarget) confirmDialog.show = false; }}
+    onkeydown={(e) => { if (e.key === "Escape") confirmDialog.show = false; }}
+    role="dialog"
+    aria-modal="true"
+    tabindex="0"
+  >
+    <div class="modal-container">
+      <div class="modal-header">
+        <h3>{confirmDialog.title}</h3>
+        <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (confirmDialog.show = false)}>{@render iconClose()}</button>
+      </div>
+      <div class="modal-body">
+        <p>{confirmDialog.message}</p>
+      </div>
+      <div class="modal-footer" style="display:flex; justify-content: flex-end; gap: 0.5rem;">
+        <button type="button" onclick={() => (confirmDialog.show = false)}>{t("request.cancel")}</button>
+        <button type="button" class="btn-primary" onclick={() => { confirmDialog.show = false; confirmDialog.onConfirm(); }}>{t("common.confirm")}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+
+
+<!-- Icon library — one consistent stroke system (1.6px, square caps/joins, 16x16) replacing the
+     platform-emoji glyphs the app used to lean on. Filled shapes are noted per-icon. Sized via
+     `.icon { width/height: 1em }` so every call site scales with its own font-size (and with
+     `uiScale`, since that's how the rest of the app's rem-based sizing already scales). -->
+{#snippet iconClose()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M4 4l8 8M12 4l-8 8"/></svg>{/snippet}
+{#snippet iconCheck()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M3.5 8.5l3 3 6-7"/></svg>{/snippet}
+{#snippet iconCheckCircle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5.2 8.2l2 2 3.6-4.4"/></svg>{/snippet}
+{#snippet iconXCircle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M6 6l4 4M10 6l-4 4"/></svg>{/snippet}
+{#snippet iconTrash()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3 5h10M6 5V3.6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1V5"/><path d="M5.1 5l.7 8a1 1 0 0 0 1 .9h2.4a1 1 0 0 0 1-.9l.7-8"/><path d="M6.6 7.3v5M9.4 7.3v5"/></svg>{/snippet}
+{#snippet iconEdit()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M10.4 3l2.6 2.6-7.4 7.4H3v-2.6z"/><path d="M9 4.4L11.6 7"/></svg>{/snippet}
+{#snippet iconWarning()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M8 2.3L14.2 13H1.8Z"/><path d="M8 6.3v3.2"/><circle cx="8" cy="11.3" r="0.55" fill="currentColor" stroke="none"/></svg>{/snippet}
+{#snippet iconInfo()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 7.3v4"/><circle cx="8" cy="4.9" r="0.55" fill="currentColor" stroke="none"/></svg>{/snippet}
+{#snippet iconMoreVertical()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="3.7" r="1.15" fill="currentColor"/><circle cx="8" cy="8" r="1.15" fill="currentColor"/><circle cx="8" cy="12.3" r="1.15" fill="currentColor"/></svg>{/snippet}
+{#snippet iconMenu()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>{/snippet}
+{#snippet iconFolder()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 4.5h4l1.2 1.5H14v6.5H2Z"/></svg>{/snippet}
+{#snippet iconFolderOpen()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 4.8h4l1.2 1.5H14L12.7 12.5H3.3Z"/></svg>{/snippet}
+{#snippet iconFolderPlus()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter" stroke-linecap="square"><path d="M2 4.5h4l1.2 1.5H14v6.5H2Z"/><path d="M8 7.3v3.4M6.3 9h3.4"/></svg>{/snippet}
+{#snippet iconGlobe()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2.1 2.1 2.1 9.9 0 12M8 2c-2.1 2.1-2.1 9.9 0 12"/></svg>{/snippet}
+{#snippet iconImport()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M8 2.2v7.3M5 6.8L8 9.8l3-3"/><path d="M2.5 10.3v2.2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2.2"/></svg>{/snippet}
+{#snippet iconEye()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.4 8S4 3.6 8 3.6 14.6 8 14.6 8 12 12.4 8 12.4 1.4 8 1.4 8Z"/><circle cx="8" cy="8" r="2"/></svg>{/snippet}
+{#snippet iconLock()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="3.3" y="7" width="9.4" height="6.3"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>{/snippet}
+{#snippet iconGitBranch()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4.5" cy="3.6" r="1.3"/><circle cx="4.5" cy="12.4" r="1.3"/><circle cx="11.5" cy="7.6" r="1.3"/><path d="M4.5 4.9v6.2M4.5 8.2C4.5 5.9 6.6 5 10.2 4.7"/></svg>{/snippet}
+{#snippet iconMonitor()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2" y="3" width="12" height="8"/><path d="M6 13.3h4M8 11v2.3"/></svg>{/snippet}
+{#snippet iconGrid()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.3" y="2.3" width="4.7" height="4.7"/><rect x="9" y="2.3" width="4.7" height="4.7"/><rect x="2.3" y="9" width="4.7" height="4.7"/><rect x="9" y="9" width="4.7" height="4.7"/></svg>{/snippet}
+{#snippet iconLayout()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2" y="2.3" width="12" height="3.2"/><rect x="2" y="7" width="12" height="6.7"/></svg>{/snippet}
+{#snippet iconClock()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.6V8l2.8 1.8"/></svg>{/snippet}
+{#snippet iconSettings()}<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>{/snippet}
+{#snippet iconSparkle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M8 1.4c.45 2.85 1.85 4.25 4.6 4.6-2.75.45-4.15 1.85-4.6 4.6-.45-2.75-1.85-4.15-4.6-4.6C6.15 5.65 7.55 4.25 8 1.4Z"/></svg>{/snippet}
+{#snippet iconInboxEmpty()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 9.3 4.4 3h7.2L14 9.3"/><path d="M2 9.3v3.4h12V9.3h-3.1a2.2 2.2 0 0 1-4.4 0H2Z"/></svg>{/snippet}
+{#snippet iconFileText()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M4 2h5.4L12 4.6V14H4Z"/><path d="M9.4 2v2.6H12"/><path d="M6 8.2h4M6 10.6h4"/></svg>{/snippet}
+{#snippet iconSave()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M13.5 13.5H2.5v-11h8l3 3v8z"/><path d="M4 2.5v4h5v-4"/><path d="M11.5 13.5v-4h-7v4"/></svg>{/snippet}
+{#snippet iconStar(filled: boolean)}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill={filled ? "currentColor" : "none"} stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2.1l1.8 3.7 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6Z"/></svg>{/snippet}
+{#snippet iconChevronRight()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M6 3.3 11 8l-5 4.7"/></svg>{/snippet}
+{#snippet iconChevronLeft()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M10 3.3 5 8l5 4.7"/></svg>{/snippet}
+{#snippet iconChevronDown()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3.3 6 8 11l4.7-5"/></svg>{/snippet}
+{#snippet iconChevronUp()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3.3 10 8 5l4.7 5"/></svg>{/snippet}
+{#snippet iconExpandAll()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.4" y="2.4" width="11.2" height="11.2"/><path d="M8 5v6M5 8h6"/></svg>{/snippet}
+{#snippet iconCollapseAll()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.4" y="2.4" width="11.2" height="11.2"/><path d="M5 8h6"/></svg>{/snippet}
+{#snippet iconCopy()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="5.5" y="5.5" width="8" height="8"/><path d="M10.5 5.5V3H3v8h2.5"/></svg>{/snippet}
+{#snippet iconExpandDiagonal()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M9.5 2.5h4v4M13.5 2.5 8.8 7.2"/><path d="M6.5 13.5h-4v-4M2.5 13.5 7.2 8.8"/></svg>{/snippet}
+{#snippet iconArrowUp()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M8 12.5V4M4.3 7.7 8 4l3.7 3.7"/></svg>{/snippet}
+{#snippet iconArrowDown()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M8 3.5V12M4.3 8.3 8 12l3.7-3.7"/></svg>{/snippet}
+{#snippet railScreenIcon(id: string)}
+  {#if id === "workspace"}{@render iconLayout()}
+  {:else if id === "environments"}{@render iconGlobe()}
+  {:else if id === "git"}{@render iconGitBranch()}
+  {:else if id === "import"}{@render iconImport()}
+  {:else if id === "launcher"}{@render iconGrid()}
+  {:else if id === "history"}{@render iconClock()}
+  {:else if id === "settings"}{@render iconSettings()}
+  {/if}
+{/snippet}
+
+<div
+  class="app-shell"
+  data-theme={themeMode}
+  style="{surfaceStyleOverride(surfaceTint, themeMode)} {accentStyleOverride(accentColor)} {fontStyleOverride(headingFontOverride, bodyFontOverride)} {textColorStyleOverride(textColorOverride)}"
+>
+  <nav class="screens-rail" class:collapsed={!screensRailVisible}>
+    <div class="rail-brand">
+      {#if screensRailVisible}<span>{t("rail.brand")}</span>{/if}
+      <button
+        type="button"
+        class="icon-btn"
+        title={screensRailVisible ? t("rail.hide") : t("rail.show")}
+        onclick={() => setScreensRailVisible(!screensRailVisible)}
+      >{@render iconMenu()}</button>
+    </div>
+    <div class="rail-screens">
+      {#each SCREENS as s (s.id)}
+        <button
+          type="button"
+          class="rail-screen"
+          class:active={activeScreen === s.id}
+          title={t(s.label)}
+          onclick={() => (activeScreen = s.id)}
+        >
+          <span class="rail-screen-icon">{@render railScreenIcon(s.id)}</span>
+          {#if screensRailVisible}<span class="rail-screen-label">{t(s.label)}</span>{/if}
+        </button>
+      {/each}
+    </div>
+    {#if screensRailVisible}
+      <div class="rail-budget">
+        <span class="rail-budget-label">{t("rail.budget")}</span>
+        {#if systemDiagnostics}
+          <span class="rail-budget-value">{formatByteSize(systemDiagnostics.process_rss_bytes)}</span>
+          <span class="rail-budget-meta">{t("rail.tabsOpen", { count: openTabs.length })} · DB {formatByteSize(systemDiagnostics.db_size_bytes + systemDiagnostics.db_wal_size_bytes)}</span>
+        {:else}
+          <span class="rail-budget-meta">{t("rail.loading")}</span>
+        {/if}
+      </div>
+    {/if}
+  </nav>
+
+  {#snippet noProjectPicker(screenName: string)}
+    <section class="screen-page">
+      <div class="screen-page-header">
+        <span class="screen-kicker">{screenName}</span>
+        <h1 class="screen-title">{t("env.pickProject")}</h1>
+      </div>
+      {#if projects.length}
+        <div class="screen-page-body">
+          <select
+            class="project-picker-select"
+            value=""
+            onchange={(e) => {
+              const id = (e.target as HTMLSelectElement).value;
+              if (id) selectProject(id);
+            }}
+          >
+            <option value="" disabled>{t("env.chooseProject")}</option>
+            {#each projects as p (p.id)}
+              <option value={p.id}>{p.name}</option>
+            {/each}
+          </select>
+        </div>
+      {:else}
+        <div class="screen-empty">
+          <div class="empty-icon">{@render iconFolder()}</div>
+          <p>{t("env.noProjectsYet")}</p>
+        </div>
+      {/if}
+    </section>
+  {/snippet}
+
+  {#snippet projectSwitcher()}
+    <select
+      class="project-picker-select project-picker-select-sm"
+      value={selectedProjectId ?? ""}
+      onchange={(e) => {
+        const id = (e.target as HTMLSelectElement).value;
+        if (id) selectProject(id);
+      }}
+    >
+      {#each projects as p (p.id)}
+        <option value={p.id}>{p.name}</option>
+      {/each}
+    </select>
+  {/snippet}
+
+  {#snippet requestRow(req: RequestSummary)}
+    {@const sampleCount = sampleResponsesByRequestId.get(req.id)?.length}
+    <li class="request-item-wrapper">
+      <div class="request-item" class:active={req.id === selectedRequest?.id}>
+        {#if renamingRequestId === req.id && req.id !== selectedRequest?.id}
+          <form class="inline-form" onsubmit={submitRenameRequest}>
+            <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
+            <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>{@render iconClose()}</button>
+          </form>
+        {:else}
+          <button
+            type="button"
+            class="tree-expand-btn"
+            title={expandedTreeRequestIds.has(req.id) ? t("sidebar.collapseSamples") : t("sidebar.expandSamples")}
+            onclick={() => toggleTreeRequestExpanded(req.id)}
+          >{#if expandedTreeRequestIds.has(req.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</button>
+          <button type="button" class="request-link" onclick={() => openRequest(req.id)} ondblclick={() => startRenameRequest(req.id, req.name)}>
+            <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
+            <span class="request-name">{req.name}</span>
+            {#if sampleCount}<span class="tab-badge">{sampleCount}</span>{/if}
+          </button>
+          <button class="icon-btn icon-btn-ghost" title={t("sidebar.duplicate")} onclick={() => duplicateRequest(req.id)}>{@render iconCopy()}</button>
+          <button class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteRequest(req.id)}>{@render iconTrash()}</button>
+        {/if}
+      </div>
+      {#if expandedTreeRequestIds.has(req.id)}
+        <ul class="sample-tree-list">
+          {#each sampleResponsesByRequestId.get(req.id) ?? [] as sr (sr.id)}
+            <li class="sample-tree-item">
+              {#if renamingSampleResponseId === sr.id}
+                <form class="inline-form" onsubmit={(e) => { e.preventDefault(); submitRenameSampleResponse(req.id); }}>
+                  <input bind:value={renameSampleResponseValue} use:focusOnMount onblur={() => submitRenameSampleResponse(req.id)} />
+                  <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingSampleResponseId = null)}>{@render iconClose()}</button>
+                </form>
+              {:else}
+                <button
+                  type="button"
+                  class="sample-tree-link"
+                  title={t("sample.badge")}
+                  onclick={() => openSampleResponse(req.id, sr)}
+                  ondblclick={() => startRenameSampleResponse(sr)}
+                >
+                  <span class="status-chip" class:status-ok={sr.status < 400} class:status-err={sr.status >= 400}>{sr.status}</span>
+                  <span class="sample-tree-name">{sr.name}</span>
+                </button>
+                <button class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameSampleResponse(sr)}>{@render iconEdit()}</button>
+                <button class="icon-btn icon-btn-ghost" title={t("sample.delete")} onclick={() => deleteSampleResponseAction(req.id, sr.id)}>{@render iconTrash()}</button>
+              {/if}
+            </li>
+          {:else}
+            <li class="empty">{t("sidebar.noSamplesYet")}</li>
+          {/each}
+        </ul>
+      {/if}
+    </li>
+  {/snippet}
+
+  <!-- Recursive: a folder can contain child folders (unlimited depth), each independently
+       collapsible/expandable via the same expandedFolderIds set as its parent — clicking a
+       folder toggles it open/closed regardless of how deep it's nested. -->
+  {#snippet folderNode(project: Project, folder: Folder)}
+    {@const isExpanded = expandedFolderIds.has(folder.id)}
+    {@const childFolders = foldersByParentId.get(folder.id) ?? []}
+    {@const childRequests = requestsByFolderId.get(folder.id) ?? []}
+    <div class="folder-node">
+      <div class="folder-row">
+        {#if renamingFolderId === folder.id}
+          <form class="inline-form" onsubmit={submitRenameFolder}>
+            <input bind:value={renameFolderValue} use:focusOnMount onblur={submitRenameFolder} />
+            <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingFolderId = null)}>{@render iconClose()}</button>
+          </form>
+        {:else}
+          <button
+            type="button"
+            class="tree-expand-btn"
+            title={isExpanded ? t("sidebar.collapseFolder") : t("sidebar.expandFolder")}
+            onclick={() => toggleFolderExpanded(folder.id)}
+          >{#if isExpanded}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</button>
+          <button type="button" class="folder-link" onclick={() => toggleFolderExpanded(folder.id)} ondblclick={() => startRenameFolder(folder)}>
+            <span class="folder-icon">{#if isExpanded}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
+            <span class="project-name">{folder.name}</span>
+            {#if childRequests.length}<span class="request-count-badge">{childRequests.length}</span>{/if}
+          </button>
+          <div class="project-row-actions">
+            <button class="icon-btn" title={t("sidebar.addSubfolder")} onclick={() => quickCreateFolder(project.id, folder.id)}>{@render iconFolderPlus()}</button>
+            <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id, folder.id)}>+</button>
+            <button class="icon-btn" title={t("sidebar.rename")} onclick={() => startRenameFolder(folder)}>{@render iconEdit()}</button>
+            <button class="icon-btn" title={t("sidebar.deleteFolder")} onclick={() => deleteFolderAction(folder.id)}>{@render iconTrash()}</button>
+          </div>
+        {/if}
+      </div>
+      {#if isExpanded}
+        <div class="folder-children">
+          {#each childFolders as child (child.id)}
+            {@render folderNode(project, child)}
+          {/each}
+          <ul class="request-list">
+            {#each childRequests as req (req.id)}
+              {@render requestRow(req)}
+            {:else}
+              {#if !childFolders.length}
+                <li class="empty">{t("sidebar.noRequestsInFolder")}</li>
+              {/if}
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    </div>
+  {/snippet}
+
+  {#snippet expandedResponseView()}
+    <section class="screen-page">
+      <div class="screen-page-header">
+        <span class="screen-kicker">{t("response.title")}</span>
+        <div class="screen-title-row">
+          {#if selectedRequest}
+            <h1 class="screen-title">{selectedRequest.method} {selectedRequest.name}</h1>
+          {:else}
+            <h1 class="screen-title">{t("response.noRequestOpen")}</h1>
+          {/if}
+          <button type="button" class="btn-ghost btn-xs" title={t("response.backToWorkspace")} onclick={() => (responseExpanded = false)}>{t("response.backToWorkspace")}</button>
+        </div>
+      </div>
+
+      {#if !selectedRequest}
+        <div class="screen-empty">
+          <div class="empty-icon">{@render iconInboxEmpty()}</div>
+          <p>{t("response.openFromWorkspace")}</p>
+        </div>
+      {:else if !activeResponse}
+        <div class="screen-empty">
+          <div class="empty-icon">{@render iconInboxEmpty()}</div>
+          <p>{t("response.sendToSee")}</p>
+        </div>
+      {:else}
+        <div class="response-screen-body">
+          <aside class="response-screen-side">
+            <div class="response-screen-stat-block">
+              <span class="screen-kicker">{t("response.status")}</span>
+              <div class="response-screen-status" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>
+                {activeResponse.status} {activeResponse.status_text}
+              </div>
+              <div class="response-screen-path">{selectedRequest.method} {selectedRequest.url}</div>
+            </div>
+            <div class="response-screen-metrics">
+              <div class="response-screen-metric">
+                <span class="screen-kicker">{t("response.time")}</span>
+                <div class="response-screen-metric-value">{activeResponse.duration_ms} ms</div>
+              </div>
+              <div class="response-screen-metric">
+                <span class="screen-kicker">{t("response.size")}</span>
+                <div class="response-screen-metric-value">{formatByteSize(activeResponse.body_size)}</div>
+              </div>
+              <div class="response-screen-metric">
+                <span class="screen-kicker">{t("response.heldInRam")}</span>
+                <div class="response-screen-metric-value">{formatByteSize(Math.min(activeResponse.body_size, 256 * 1024))}</div>
+              </div>
+              <div class="response-screen-metric">
+                <span class="screen-kicker">{t("response.storage")}</span>
+                <div class="response-screen-metric-value">{activeResponse.body_size > 256 * 1024 ? t("response.disk") : t("response.inline")}</div>
+              </div>
+            </div>
+            <div class="response-screen-tests">
+              <span class="screen-kicker">{t("response.tests")}</span>
+              {#if activeResponseTests.length}
+                {#each activeResponseTests as test, i (i)}
+                  <div class="response-screen-test-row">
+                    <span class:status-ok={test.passed} class:status-err={!test.passed}>{test.passed ? t("response.pass") : t("response.fail")}</span>
+                    <span>{test.name}</span>
+                  </div>
+                {/each}
+              {:else}
+                <p class="screen-empty-inline">{t("response.noTestsRan")}</p>
+              {/if}
+            </div>
+          </aside>
+
+          <div class="response-screen-main">
+            <div class="response-subtabs">
+              <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>{t("response.body")}</button>
+              <button type="button" class="response-subtab" class:active={responseSubTab === "headers"} onclick={() => (responseSubTab = "headers")}>
+                {t("response.headers")} {#if activeResponse.headers?.length}<span class="tab-badge">{activeResponse.headers.length}</span>{/if}
+              </button>
+              <button type="button" class="response-subtab" class:active={responseSubTab === "cookies"} onclick={() => (responseSubTab = "cookies")}>
+                {t("response.cookies")} {#if activeResponse.cookies?.length}<span class="tab-badge">{activeResponse.cookies.length}</span>{/if}
+              </button>
+              <button type="button" class="response-subtab" class:active={responseSubTab === "history"} onclick={() => (responseSubTab = "history")}>
+                {t("response.history")} {#if responseHistory.length}<span class="tab-badge">{responseHistory.length}</span>{/if}
+              </button>
+              <div class="response-stat-spacer"></div>
+              {#if responseSubTab === "body"}
+                <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>{t("response.pretty")}</button>
+                <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>{t("response.raw")}</button>
+                {#if responseBodyIsHtml}
+                  <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "preview"} onclick={() => (responseViewMode = "preview")}>{t("response.preview")}</button>
+                {/if}
+              {/if}
+              <button type="button" class="btn-ghost btn-xs" onclick={copyResponseBody}>{t("response.copyAction")}</button>
+              <button type="button" class="btn-ghost btn-xs" onclick={downloadResponseBody}>{t("response.saveToFile")}</button>
+            </div>
+            <div class="response-screen-content">
+              {#if responseSubTab === "body"}
+                {#if responseViewMode === "preview" && responseBodyIsHtml}
+                  <iframe class="response-preview-frame" title={t("response.preview")} sandbox="" srcdoc={activeResponseBody}></iframe>
+                {:else if responseBodyIsJson}
+                  <pre class="body-view screen-body-view">{@html highlightedResponseBody}</pre>
+                {:else}
+                  <pre class="body-view screen-body-view">{prettyResponseBody}</pre>
+                {/if}
+                {#if activeResponseTruncated}<p class="hint">{t("response.truncated")}</p>{/if}
+              {:else if responseSubTab === "headers"}
+                {#if activeResponse.headers?.length}
+                  <div class="headers-list">
+                    {#each activeResponse.headers as h}
+                      <div class="header-line"><strong>{h.key}:</strong> {h.value}</div>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="empty">{t("response.noHeaders")}</p>
+                {/if}
+              {:else if responseSubTab === "cookies"}
+                {#if activeResponse.cookies?.length}
+                  <div class="headers-list">
+                    {#each activeResponse.cookies as c}
+                      <div class="header-line"><strong>{c.name}:</strong> {c.value}</div>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="empty">{t("response.noCookies")}</p>
+                {/if}
+              {:else if responseSubTab === "history"}
+                {#if responseHistory.length}
+                  <ul class="response-history-list">
+                    {#each responseHistory as r (r.id)}
+                      <li>
+                        <button type="button" class="response-history-row" onclick={() => openHistoryResponse(r.id)}>
+                          <span class="status-chip" class:status-ok={r.status < 400} class:status-err={r.status >= 400}>{r.status}</span>
+                          <span class="response-history-duration">{r.duration_ms} ms</span>
+                          <span class="response-history-time">{new Date(r.created_at).toLocaleString()}</span>
+                        </button>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="empty">{t("history.empty")}</p>
+                {/if}
+              {/if}
+            </div>
+          </div>
+        </div>
+      {/if}
+    </section>
+  {/snippet}
+
+  <div class="screen-area">
+  {#if activeScreen === "workspace"}
+  {#if responseExpanded}
+    {@render expandedResponseView()}
+  {:else}
+  <div class="app">
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand">{t("topbar.brand")}</span>
+    </div>
+    <div class="topbar-center">
+      {#if selectedProjectId}
+        <div class="env-bar">
+          <div class="menu-wrap">
+            <button
+              type="button"
+              class="env-select env-select-btn"
+              onclick={() => (envPickerOpen ? (envPickerOpen = false) : openEnvPicker())}
+            >
+              <span class="env-select-label">{selectedEnvironmentId ? (allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId) : t("topbar.noEnvironment")}</span>
+              {@render iconChevronDown()}
+            </button>
+            {#if envPickerOpen}
+              <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (envPickerOpen = false)}></button>
+              <div class="dropdown-menu env-picker-menu">
+                <input
+                  type="search"
+                  class="request-search-input env-picker-search"
+                  placeholder={t("env.searchEnvironments")}
+                  bind:value={envPickerQuery}
+                  use:focusOnMount
+                />
+                <button type="button" class="dropdown-menu-item" onclick={() => { envPickerOpen = false; quickCreateEnvironment(); }}>{t("topbar.newEnvironment")}</button>
+                {#if !envPickerQuery}
+                  <button type="button" class="dropdown-menu-item" class:active={!selectedEnvironmentId} onclick={() => pickEnvironment(null)}>{t("topbar.noEnvironment")}</button>
+                {/if}
+                <div class="env-picker-list">
+                  {#each envPickerFilteredByProject as [projectName, envs] (projectName)}
+                    <div class="env-screen-group-label">{projectName}</div>
+                    {#each envs as env (env.id)}
+                      <button type="button" class="dropdown-menu-item" class:active={selectedEnvironmentId === env.id} onclick={() => pickEnvironment(env.id)}>{env.name}</button>
+                    {/each}
+                  {:else}
+                    {#if envPickerQuery}<p class="screen-empty-inline">{t("palette.noMatches")}</p>{/if}
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+          {#if selectedProjectId}
+            {@const isDefault = projects.find((p) => p.id === selectedProjectId)?.default_environment_id === selectedEnvironmentId}
+            <button
+              type="button"
+              class="icon-btn"
+              class:active={isDefault}
+              title={isDefault ? t("topbar.unsetDefaultEnv") : t("topbar.setDefaultEnv")}
+              onclick={toggleDefaultEnvironment}
+            >
+              {#if isDefault}{@render iconStar(true)}{:else}{@render iconStar(false)}{/if}
+            </button>
+          {/if}
+          {#if renamingEnvironmentId}
+            <form class="inline-form" onsubmit={submitRenameEnvironment}>
+              <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
+              <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+              <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>{@render iconClose()}</button>
+            </form>
+          {/if}
+          <button
+            type="button"
+            class="icon-btn"
+            title={t("topbar.manageVariables")}
+            onclick={() => { loadVariables(); activeScreen = "environments"; }}
+          >
+            {@render iconEye()}
+          </button>
+          {#if selectedEnvironmentId}
+            <button
+              type="button"
+              class="icon-btn"
+              title={t("topbar.exportEnvironment")}
+              onclick={exportPostmanEnvironmentAction}
+            >
+              {@render iconImport()}
+            </button>
+          {/if}
+        </div>
+      {/if}
+    </div>
+    <div class="topbar-right">
+      <button type="button" class="palette-trigger" title={t("topbar.searchPlaceholder")} onclick={openPalette}>
+        <span>{t("topbar.searchPlaceholder")}</span>
+        <span class="palette-kbd">⌘K</span>
+      </button>
+      <button
+        type="button"
+        class="btn-ghost"
+        title={aiConfigured ? t("topbar.askAiTitle") : t("topbar.setupAiTitle")}
+        onclick={() => (showAiPanel = true)}
+      >
+        {@render iconSparkle()} {aiConfigured ? t("topbar.askAi") : t("topbar.setupAi")}
+      </button>
+      <button type="button" class="btn-ghost" title={t("topbar.importTitle")} onclick={() => { importActiveTab = "collection"; collectionImportReport = null; collectionImportError = ""; activeScreen = "import"; }}>
+        {@render iconImport()} {t("topbar.import")}
+      </button>
+    </div>
+  </header>
+
+  {#if exportFeedback}
+    <div class="success-banner">{exportFeedback}</div>
+  {/if}
+  {#if errorMessage}
+    <div class="error-banner">
+      {errorMessage}
+      <button type="button" class="dismiss-btn" title={t("error.dismiss")} onclick={() => (errorMessage = "")}>{@render iconClose()}</button>
+    </div>
+  {/if}
+
+  <div class="workspace">
+    {#if sidebarVisible}
+    <aside class="sidebar" style="width: {sidebarWidth}px">
+      <div class="sidebar-workspace-row">
+        <div class="menu-wrap sidebar-workspace-menu">
+          <button
+            type="button"
+            class="workspace-switcher-btn"
+            onclick={() => (workspacePickerOpen = !workspacePickerOpen)}
+          >
+            <span class="workspace-switcher-label">{workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? t("workspace.defaultName")}</span>
+            {@render iconChevronDown()}
+          </button>
+          {#if workspacePickerOpen}
+            <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (workspacePickerOpen = false)}></button>
+            <div class="dropdown-menu workspace-picker-menu">
+              {#each workspaces as ws (ws.id)}
+                {#if renamingWorkspaceId === ws.id}
+                  <form class="inline-form" onsubmit={submitRenameWorkspace}>
+                    <input bind:value={renameWorkspaceValue} use:focusOnMount onblur={submitRenameWorkspace} />
+                    <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                    <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingWorkspaceId = null)}>{@render iconClose()}</button>
+                  </form>
+                {:else}
+                  <div class="dropdown-menu-item workspace-picker-item" class:active={ws.id === activeWorkspaceId}>
+                    <button type="button" class="workspace-picker-item-btn" onclick={() => selectWorkspace(ws.id)}>{ws.name}</button>
+                    <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameWorkspace(ws)}>{@render iconEdit()}</button>
+                  </div>
+                {/if}
+              {/each}
+              <button type="button" class="dropdown-menu-item" onclick={quickCreateWorkspace}>+ {t("workspace.newWorkspace")}</button>
+            </div>
+          {/if}
+        </div>
+      </div>
+      <div class="sidebar-header">
+        <span class="sidebar-title">{t("sidebar.projects")}</span>
+        <div class="sidebar-header-actions">
+          <button
+            type="button"
+            class="icon-btn"
+            title={t("sidebar.importCollection")}
+            onclick={() => {
+              collectionImportTarget = "new";
+              importActiveTab = "collection";
+              collectionImportReport = null;
+              collectionImportError = "";
+              activeScreen = "import";
+            }}
+          >{@render iconImport()}</button>
+          <button type="button" class="icon-btn" title={t("sidebar.newProject")} onclick={quickCreateProject}>+</button>
+          <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => setSidebarVisible(false)}>{@render iconChevronLeft()}</button>
+        </div>
+      </div>
+
+      <div class="project-search-box">
+        <input
+          type="search"
+          placeholder={t("sidebar.searchProjects")}
+          bind:value={projectSearchQuery}
+          class="project-search-input"
+        />
+        {#if projectSearchQuery}
+          <span class="request-count-badge">{filteredProjects.length}/{projects.length}</span>
+        {/if}
+        <div class="menu-wrap">
+          <button
+            type="button"
+            class="icon-btn"
+            title={t("sidebar.sortOptions")}
+            onclick={() => (projectSortMenuOpen = !projectSortMenuOpen)}
+          >{@render iconMoreVertical()}</button>
+          {#if projectSortMenuOpen}
+            <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (projectSortMenuOpen = false)}></button>
+            <div class="dropdown-menu">
+              {#each PROJECT_SORT_FIELDS as f (f.field)}
+                <button
+                  type="button"
+                  class="dropdown-menu-item"
+                  class:active={projectSortField === f.field}
+                  onclick={() => pickProjectSortField(f.field)}
+                >
+                  <span>{t(f.label)}</span>
+                  {#if projectSortField === f.field}
+                    <span class="sort-dir-indicator">{#if projectSortDir === "asc"}{@render iconArrowUp()}{:else}{@render iconArrowDown()}{/if}</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      <div class="project-list">
+        {#each filteredProjects as project (project.id)}
+          <div class="project-node">
+            <div class="project-row" class:active={project.id === selectedProjectId}>
+              {#if renamingProjectId === project.id}
+                <form class="inline-form" onsubmit={submitRenameProject}>
+                  <input bind:value={renameProjectValue} use:focusOnMount onblur={submitRenameProject} />
+                  <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingProjectId = null)}>{@render iconClose()}</button>
+                </form>
+              {:else}
+                <button type="button" class="project-link" onclick={() => toggleProjectSelection(project.id)} ondblclick={() => startRenameProject(project)}>
+                  <span class="folder-icon">{#if project.id === selectedProjectId}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
+                  <span class="project-name">{project.name}</span>
+                  {#if projectRequestCounts[project.id]}<span class="request-count-badge">{projectRequestCounts[project.id]}</span>{/if}
+                </button>
+                <div class="project-row-actions" class:force-visible={openProjectMenuId === project.id}>
+                  <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id)}>+</button>
+                  <div class="menu-wrap">
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      title={t("sidebar.moreActions")}
+                      onclick={() => (openProjectMenuId = openProjectMenuId === project.id ? null : project.id)}
+                    >{@render iconMoreVertical()}</button>
+                    {#if openProjectMenuId === project.id}
+                      <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (openProjectMenuId = null)}></button>
+                      <div class="dropdown-menu">
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={() => { openProjectMenuId = null; quickCreateFolder(project.id); }}
+                        >{t("sidebar.addFolder")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={async () => {
+                            openProjectMenuId = null;
+                            await selectProject(project.id);
+                            collectionImportTarget = "current";
+                            importActiveTab = "collection";
+                            collectionImportReport = null;
+                            collectionImportError = "";
+                            activeScreen = "import";
+                          }}
+                        >{t("sidebar.importInto")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={() => { openProjectMenuId = null; exportPostmanCollectionAction(project.id); }}
+                        >{t("sidebar.exportCollection")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={async () => {
+                            openProjectMenuId = null;
+                            await selectProject(project.id);
+                            await exportProjectFileAction();
+                            gitActiveTab = "projectfile";
+                            activeScreen = "git";
+                          }}
+                        >{t("sidebar.exportProjectFile")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={() => { openProjectMenuId = null; startRenameProject(project); }}
+                        >{t("sidebar.rename")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={() => { openProjectMenuId = null; deleteProject(project.id); }}
+                        >{t("sidebar.delete")}</button>
+                      </div>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+            </div>
+
+            {#if project.id === selectedProjectId}
+              <div class="project-requests">
+                <div class="request-search-box">
+                  <input
+                    type="search"
+                    placeholder={t("sidebar.searchRequests")}
+                    bind:value={requestSearchQuery}
+                    class="request-search-input"
+                  />
+                  {#if requestSearchQuery}
+                    <span class="request-count-badge">{filteredRequests.length}/{requests.length}</span>
+                  {/if}
+                  {#if !requestSearchQuery && folders.length > 0}
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      title={expandedFolderIds.size < folders.length ? t("sidebar.expandAllFolders") : t("sidebar.collapseAllFolders")}
+                      onclick={toggleExpandAllFolders}
+                    >{#if expandedFolderIds.size < folders.length}{@render iconExpandAll()}{:else}{@render iconCollapseAll()}{/if}</button>
+                  {/if}
+                  <div class="menu-wrap">
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      title={t("sidebar.sortOptions")}
+                      onclick={() => (requestSortMenuOpen = !requestSortMenuOpen)}
+                    >{@render iconMoreVertical()}</button>
+                    {#if requestSortMenuOpen}
+                      <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (requestSortMenuOpen = false)}></button>
+                      <div class="dropdown-menu">
+                        {#each REQUEST_SORT_FIELDS as f (f.field)}
+                          <button
+                            type="button"
+                            class="dropdown-menu-item"
+                            class:active={requestSortField === f.field}
+                            onclick={() => pickRequestSortField(f.field)}
+                          >
+                            <span>{t(f.label)}</span>
+                            {#if requestSortField === f.field}
+                              <span class="sort-dir-indicator">{#if requestSortDir === "asc"}{@render iconArrowUp()}{:else}{@render iconArrowDown()}{/if}</span>
+                            {/if}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                </div>
+
+                {#if loadingRequests}
+                  <p class="hint">{t("rail.loading")}</p>
+                {:else if requestSearchQuery}
+                  <ul class="request-list">
+                    {#each visibleRequests as req (req.id)}
+                      {@render requestRow(req)}
+                    {:else}
+                      <li class="empty">{t("sidebar.noMatchingRequests")}</li>
+                    {/each}
+                  </ul>
+
+                  {#if totalRequestPages > 1}
+                    <div class="request-pagination">
+                      <button type="button" title={t("sidebar.prevPage")} disabled={requestPage === 0} onclick={() => (requestPage = Math.max(0, requestPage - 1))}>{@render iconChevronLeft()}</button>
+                      <span>{requestPage + 1} / {totalRequestPages}</span>
+                      <button type="button" title={t("sidebar.nextPage")} disabled={requestPage >= totalRequestPages - 1} onclick={() => (requestPage = Math.min(totalRequestPages - 1, requestPage + 1))}>{@render iconChevronRight()}</button>
+                    </div>
+                  {/if}
+                {:else}
+                  {#each rootFolders as folder (folder.id)}
+                    {@render folderNode(project, folder)}
+                  {/each}
+
+                  <ul class="request-list">
+                    {#each rootRequests as req (req.id)}
+                      {@render requestRow(req)}
+                    {:else}
+                      {#if !folders.length}
+                        <li class="empty">{t("sidebar.noRequestsYet")}</li>
+                      {/if}
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <p class="empty">{projectSearchQuery ? t("sidebar.noMatchingProjects") : t("sidebar.noProjectsYet")}</p>
+        {/each}
+      </div>
+    </aside>
+
+    <div
+      class="sidebar-resize-handle"
+      class:resizing={sidebarResizing}
+      onmousedown={startSidebarResize}
+      onkeydown={(e) => {
+        sidebarManuallyResized = true;
+        if (e.key === "ArrowLeft") sidebarWidth = Math.max(200, sidebarWidth - 16);
+        else if (e.key === "ArrowRight") sidebarWidth = Math.min(600, sidebarWidth + 16);
+      }}
+      role="slider"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      aria-valuenow={sidebarWidth}
+      aria-valuemin={200}
+      aria-valuemax={600}
+      tabindex="0"
+    ></div>
+    {:else}
+    <button type="button" class="sidebar-expand-btn" title={t("sidebar.show")} onclick={() => setSidebarVisible(true)}>{@render iconChevronRight()}</button>
+    {/if}
+
+    <main class="main">
+      {#if !selectedProjectId}
+        <div class="empty-state">
+          <div class="empty-icon">{@render iconFolder()}</div>
+          <p>{t("workspace.selectProject")}</p>
+        </div>
+      {:else if !selectedRequest}
+        <div class="empty-state">
+          <div class="empty-icon">{@render iconFileText()}</div>
+          <p>{t("request.selectPrompt")}</p>
+        </div>
+      {:else}
+        <section class="detail">
+          {#if openTabs.length > 0}
+            <div class="request-tabs-row">
+              <div class="request-tabs-bar">
+                {#each openTabs as tab (tab.id)}
+                  <div class="request-tab-pill" class:active={tab.id === selectedRequest?.id}>
+                    <button
+                      type="button"
+                      class="tab-pill-btn"
+                      onclick={() => openRequest(tab.id)}
+                      onmousedown={(e) => {
+                        if (e.button === 1) {
+                          e.preventDefault();
+                          closeTabAction(tab.id);
+                        }
+                      }}
+                    >
+                      <span class="tab-method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
+                      <span class="tab-title">{tab.name}</span>
+                      {#if isTabDirty(tab.id)}
+                        <span class="dirty-dot" title={t("tab.unsavedChanges")}>•</span>
+                      {/if}
+                    </button>
+                    <button
+                      type="button"
+                      class="tab-close-btn"
+                      title={t("tab.closeTab")}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        closeTabAction(tab.id);
+                      }}
+                    >
+                      {@render iconClose()}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+              {#if openTabs.length > 8}
+                <details class="tab-overflow-menu">
+                  <summary class="tab-overflow-trigger" title={t("tab.allOpenTabs")}>
+                    {@render iconChevronDown()}<span>{openTabs.length}</span>
+                  </summary>
+                  <div class="tab-overflow-list">
+                    {#each openTabs as tab (tab.id)}
+                      <button
+                        type="button"
+                        class="tab-overflow-item"
+                        class:active={tab.id === selectedRequest?.id}
+                        onclick={(e) => {
+                          openRequest(tab.id);
+                          (e.currentTarget as HTMLElement).closest("details")?.removeAttribute("open");
+                        }}
+                      >
+                        <span class="method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
+                        <span class="request-name">{tab.name}</span>
+                        {#if isTabDirty(tab.id)}<span class="dirty-dot" title={t("tab.unsavedChanges")}>•</span>{/if}
+                      </button>
+                    {/each}
+                  </div>
+                </details>
+              {/if}
+            </div>
+          {/if}
+
+          <div class="breadcrumb-row">
+            <span class="breadcrumb-icon">{@render iconFolder()}</span>
+            <span class="breadcrumb-path">{projects.find((p) => p.id === selectedProjectId)?.name ?? ""}</span>
+            <span class="breadcrumb-sep">›</span>
+            {#if renamingRequestId === selectedRequest.id}
+              <form class="inline-form" onsubmit={submitRenameRequest}>
+                <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
+                <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>{@render iconClose()}</button>
+              </form>
+            {:else}
+              <button
+                type="button"
+                class="breadcrumb-current breadcrumb-current-btn"
+                title={t("breadcrumb.renameHint")}
+                onclick={() => startRenameRequest(selectedRequest!.id, selectedRequest!.name)}
+              >
+                {selectedRequest.name} <span class="breadcrumb-edit-hint">{@render iconEdit()}</span>
+              </button>
+            {/if}
+          </div>
+
+          <form class="request-bar" onsubmit={(e) => { e.preventDefault(); saveRequest(); }}>
+            <div class="request-bar-row">
+              <div class="url-pill">
+                <select bind:value={editMethod} class="method-select method-{editMethod.toLowerCase()}" onchange={scheduleAutoSave}>
+                  <option>GET</option>
+                  <option>POST</option>
+                  <option>PUT</option>
+                  <option>PATCH</option>
+                  <option>DELETE</option>
+                  <option>HEAD</option>
+                  <option>OPTIONS</option>
+                  <option>TRACE</option>
+                </select>
+                <span class="url-pill-divider"></span>
+                <div class="url-input-shell">
+                  <div class="url-token-overlay" aria-hidden="true">
+                    {#each urlTokens as tok, i (i)}
+                      {#if tok.type === "text"}
+                        <span class="url-token-text">{tok.text}</span>
+                      {:else}
+                        {@const missing = requestDiagnostics?.all_missing?.includes(tok.name) ?? false}
+                        <span
+                          class="url-token-var"
+                          class:missing
+                          role="presentation"
+                          onmouseenter={(e) => showVarPopover(tok.name, e.currentTarget as HTMLElement)}
+                          onmouseleave={scheduleHideMissingVarPopover}
+                        >
+                          {tok.raw}
+                        </span>
+                      {/if}
+                    {/each}
+                  </div>
+                  <input
+                    placeholder={t("request.urlPlaceholder")}
+                    bind:value={editUrl}
+                    class="url-input url-input-ghost"
+                    oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLInputElement, "var", false, (v) => (editUrl = v)); }}
+                    onkeydown={handleAutocompleteKeydown}
+                    onblur={hideAutocompleteSoon}
+                    onpaste={handleUrlPaste}
+                    onscroll={syncUrlOverlayScroll}
+                  />
+                </div>
+              </div>
+              <div class="send-action">
+                {#if sending}
+                  <button type="button" class="btn-cancel" onclick={cancelCurrentSend}>{t("request.cancel")}</button>
+                {:else}
+                  <button type="button" class="btn-send" onclick={sendCurrentRequest}>{t("request.send")}</button>
+                {/if}
+                <button
+                  type="button"
+                  class="btn-save"
+                  class:is-error={autoSaveStatus === "error"}
+                  class:is-unsaved={autoSaveStatus === "unsaved"}
+                  title={t("request.saveNow")}
+                  onclick={() => saveRequest()}
+                >
+                  {#if autoSaveStatus === "saving"}{t("request.saving")}
+                  {:else if autoSaveStatus === "unsaved"}{t("request.unsaved")}
+                  {:else if autoSaveStatus === "error"}{t("request.saveFailed")}
+                  {:else}{t("request.saved")}{/if}
+                </button>
+                <button
+                  type="button"
+                  class="icon-btn btn-code-toggle"
+                  class:active={rightSidebarVisible && rightPanel === "code"}
+                  title={t("bottom.codeSnippet")}
+                  onclick={() => {
+                    if (rightSidebarVisible && rightPanel === "code") {
+                      setRightSidebarVisible(false);
+                    } else {
+                      rightPanel = "code";
+                      setRightSidebarVisible(true);
+                    }
+                  }}
+                >&lt;/&gt;</button>
+              </div>
+            </div>
+            <div class="request-bar-row secondary">
+              {#if curlDetectedFeedback}
+                <span class="hint">{curlDetectedFeedback}</span>
+              {/if}
+              {#if sendCancelledNotice}
+                <span class="hint">{sendCancelledNotice}</span>
+              {/if}
+              <div class="response-stat-spacer"></div>
+              <button type="button" class="icon-btn" title={t("request.deleteRequest")} onclick={() => deleteRequest(selectedRequest!.id)}>{@render iconTrash()}</button>
+            </div>
+          </form>
+
+          {#if missingVarHover}
+            {@const resolved = findResolvedVariable(missingVarHover.name)}
+            <div
+              class="missing-var-popover-portal"
+              role="group"
+              aria-label={t(resolved ? "var.editValueFor" : "missingvar.addValueFor", { name: missingVarHover.name })}
+              style="top: {missingVarHover.top}px; left: {missingVarHover.left}px;"
+              onmouseenter={cancelHideMissingVarPopover}
+              onmouseleave={scheduleHideMissingVarPopover}
+            >
+              {#if resolved}
+                <span class="var-popover-scope">{t(resolved.scope === "environment" ? "var.scopeEnvironment" : "var.scopeGlobal")}</span>
+              {/if}
+              <input
+                placeholder={t("missingvar.valueFor", { name: missingVarHover.name })}
+                value={missingVarDrafts[missingVarHover.name] ?? ""}
+                oninput={(e) => (missingVarDrafts[missingVarHover!.name] = (e.target as HTMLInputElement).value)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    saveVariableFromPopover(missingVarHover!.name);
+                  }
+                }}
+              />
+              <button type="button" onclick={() => saveVariableFromPopover(missingVarHover!.name)}>{t(resolved ? "var.save" : "missingvar.add")}</button>
+            </div>
+          {/if}
+
+          {#if autocomplete}
+            <ul
+              class="autocomplete-portal"
+              role="listbox"
+              style="top: {autocomplete.top}px; left: {autocomplete.left}px;"
+            >
+              {#each autocomplete.items as item, i (item.insertText)}
+                <li>
+                  <button
+                    type="button"
+                    class="autocomplete-item"
+                    class:active={i === autocomplete.activeIndex}
+                    onmousedown={(e) => { e.preventDefault(); applyAutocompleteItem(item); }}
+                  >
+                    <span class="autocomplete-label">{item.label}</span>
+                    {#if item.detail}<span class="autocomplete-detail">{item.detail}</span>{/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+
+          {#if urlPreview}
+            <div class="url-preview-bar">
+              <span class="preview-label">{t("request.resolvesTo")}</span> <code>{urlPreview.resolved}</code>
+              {#if urlPreview.missing.length}
+                <span class="warn-inline">{t("request.missing", { list: urlPreview.missing.join(", ") })}</span>
+              {/if}
+            </div>
+          {/if}
+
+          {#if requestDiagnostics?.all_missing?.length}
+            <div class="warn-banner missing-vars-banner">
+              {@render iconWarning()} {t("request.unresolvedVariables")}
+              {#each requestDiagnostics.all_missing as varName (varName)}
+                <span
+                  class="missing-var-chip"
+                  role="presentation"
+                  onmouseenter={(e) => showMissingVarPopover(varName, e.currentTarget as HTMLElement)}
+                  onmouseleave={scheduleHideMissingVarPopover}
+                >
+                  <strong>{varName}</strong>
+                </span>
+              {/each}
+              <span class="hint">{t("request.unresolvedHint", { scope: selectedEnvironmentId ? t("request.scopeEnvironment") : t("request.scopeGlobal") })}</span>
+            </div>
+          {/if}
+
+          <div class="editor-tabs">
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "params"} onclick={() => (activeEditorTab = "params")}>
+              {t("tab.params")}
+              {#if requestDiagnostics?.query_params_missing?.length}
+                <span class="tab-badge-warn" title={t("tab.missingInParams", { list: requestDiagnostics.query_params_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.query_params_missing.length}</span>
+              {:else if withoutEmptyKeyRows(editQueryParams).length}
+                <span class="tab-badge">{withoutEmptyKeyRows(editQueryParams).length}</span>
+              {/if}
+            </button>
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "headers"} onclick={() => (activeEditorTab = "headers")}>
+              {t("tab.headers")}
+              {#if requestDiagnostics?.headers_missing?.length}
+                <span class="tab-badge-warn" title={t("tab.missingInHeaders", { list: requestDiagnostics.headers_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.headers_missing.length}</span>
+              {:else if withoutEmptyKeyRows(editHeaders).length}
+                <span class="tab-badge">{withoutEmptyKeyRows(editHeaders).length}</span>
+              {/if}
+            </button>
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "auth"} onclick={() => (activeEditorTab = "auth")}>
+              {t("tab.auth")}
+              {#if requestDiagnostics?.auth_missing?.length}
+                <span class="tab-badge-warn" title={t("tab.missingInAuth", { list: requestDiagnostics.auth_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.auth_missing.length}</span>
+              {:else if editAuthType !== "none"}
+                <span class="tab-dot">•</span>
+              {/if}
+            </button>
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "body"} onclick={() => (activeEditorTab = "body")}>
+              {t("tab.body")}
+              {#if requestDiagnostics?.body_missing?.length}
+                <span class="tab-badge-warn" title={t("tab.missingInBody", { list: requestDiagnostics.body_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.body_missing.length}</span>
+              {:else if editBody}
+                <span class="tab-dot">•</span>
+              {/if}
+            </button>
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "scripts"} onclick={() => (activeEditorTab = "scripts")}>
+              {t("tab.scripts")} {#if editPreScript || editPostScript}<span class="tab-dot">•</span>{/if}
+            </button>
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "settings"} onclick={() => (activeEditorTab = "settings")}>
+              {t("tab.settings")}
+            </button>
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "docs"} onclick={() => (activeEditorTab = "docs")}>
+              {t("tab.docs")} {#if editDescription}<span class="tab-dot">•</span>{/if}
+            </button>
+          </div>
+
+          <div class="editor-body-row">
+          <div class="editor-pane">
+          <div class="tab-content">
+            {#if activeEditorTab === "params"}
+              <div class="params-table">
+                {#each editQueryParams as param, i (i)}
+                  <div class="params-row">
+                    <input type="checkbox" bind:checked={param.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
+                    <input placeholder={t("params.key")} bind:value={param.key} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
+                    <input placeholder={t("params.value")} bind:value={param.value} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
+                    {#if i < editQueryParams.length - 1 || param.key.trim()}
+                      <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeQueryParam(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+
+            {:else if activeEditorTab === "headers"}
+              <div class="params-table">
+                {#each editHeaders as header, i (i)}
+                  <div class="params-row">
+                    <input type="checkbox" bind:checked={header.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
+                    <input
+                      placeholder={t("params.key")}
+                      bind:value={header.key}
+                      oninput={(e) => {
+                        growHeaders();
+                        scheduleAutoSave();
+                        updateAutocompleteFor(e.currentTarget as HTMLInputElement, "header", false, (v) => (header.key = v));
+                      }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
+                    />
+                    <input
+                      placeholder={t("params.value")}
+                      bind:value={header.value}
+                      oninput={(e) => {
+                        growHeaders();
+                        scheduleAutoSave();
+                        updateAutocompleteFor(e.currentTarget as HTMLInputElement, "var", false, (v) => (header.value = v));
+                      }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
+                    />
+                    <input placeholder={t("headers.description")} bind:value={header.description} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
+                    {#if i < editHeaders.length - 1 || header.key.trim()}
+                      <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeHeader(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+
+            {:else if activeEditorTab === "auth"}
+              <div class="params-table">
+                <select bind:value={editAuthType} onchange={scheduleAutoSave}>
+                  <option value="none">{t("auth.none")}</option>
+                  <option value="bearer">{t("auth.bearer")}</option>
+                  <option value="basic">{t("auth.basic")}</option>
+                  <option value="api_key">{t("auth.apiKey")}</option>
+                </select>
+                {#if editAuthType === "bearer"}
+                  <div class="params-row">
+                    <input placeholder={t("auth.token")} bind:value={editAuthBearerToken} oninput={scheduleAutoSave} />
+                  </div>
+                {:else if editAuthType === "basic"}
+                  <div class="params-row">
+                    <input placeholder={t("auth.username")} bind:value={editAuthBasicUsername} oninput={scheduleAutoSave} />
+                    <input placeholder={t("auth.password")} type="password" bind:value={editAuthBasicPassword} oninput={scheduleAutoSave} />
+                  </div>
+                {:else if editAuthType === "api_key"}
+                  <div class="params-row">
+                    <input placeholder={t("params.key")} bind:value={editAuthApiKeyKey} oninput={scheduleAutoSave} />
+                    <input placeholder={t("params.value")} bind:value={editAuthApiKeyValue} oninput={scheduleAutoSave} />
+                    <select bind:value={editAuthApiKeyLocation} onchange={scheduleAutoSave}>
+                      <option value="header">{t("auth.locationHeader")}</option>
+                      <option value="query">{t("auth.locationQuery")}</option>
+                    </select>
+                  </div>
+                {/if}
+              </div>
+
+            {:else if activeEditorTab === "body"}
+              <div class="params-table">
+                <div class="body-mode-bar">
+                  <label class="radio-label">
+                    <input type="radio" bind:group={editBodyType} value="raw" onchange={scheduleAutoSave} /> {t("body.raw")}
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" bind:group={editBodyType} value="form-data" onchange={scheduleAutoSave} /> {t("body.formData")}
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" bind:group={editBodyType} value="x-www-form-urlencoded" onchange={scheduleAutoSave} /> {t("body.urlEncoded")}
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" bind:group={editBodyType} value="binary" onchange={scheduleAutoSave} /> {t("body.binary")}
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" bind:group={editBodyType} value="graphql" onchange={scheduleAutoSave} /> {t("body.graphql")}
+                  </label>
+                  {#if editBodyType === "raw"}
+                    <select class="raw-type-select" value={rawContentType} onchange={(e) => setRawContentType((e.target as HTMLSelectElement).value)}>
+                      {#each RAW_CONTENT_TYPES as type (type.id)}
+                        <option value={type.id}>{t(type.label)}</option>
+                      {/each}
+                    </select>
+                    {#if rawContentType === "json"}
+                      <button type="button" onclick={() => { if (!editBody) editBody = "{\n  \n}"; scheduleAutoSave(); }}>{t("body.jsonTemplate")}</button>
+                    {/if}
+                    <button type="button" onclick={() => { editBody = ""; scheduleAutoSave(); }}>{t("body.clearBody")}</button>
+                    {#if rawContentType === "json" || rawContentType === "xml" || rawContentType === "html"}
+                      <button type="button" onclick={prettifyBody}>{t("body.prettify")}</button>
+                    {/if}
+                    {#if bodyPrettifyFeedback}<span class="warn-inline">{bodyPrettifyFeedback}</span>{/if}
+                  {/if}
+                </div>
+
+                {#if editBodyType === "raw"}
+                  <textarea
+                    placeholder={t("body.rawPlaceholder")}
+                    bind:value={editBody}
+                    class="body-input"
+                    rows="8"
+                    oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLTextAreaElement, "var", false, (v) => (editBody = v)); }}
+                    onkeydown={handleAutocompleteKeydown}
+                    onblur={hideAutocompleteSoon}
+                  ></textarea>
+                {:else if editBodyType === "form-data"}
+                  <div class="params-table">
+                    {#each editFormDataItems as item, i (i)}
+                      <div class="params-row">
+                        <input type="checkbox" bind:checked={item.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
+                        <input placeholder={t("params.key")} bind:value={item.key} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
+                        {#if item.is_file}
+                          <input placeholder={t("body.filePath")} bind:value={item.file_path} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
+                        {:else}
+                          <input placeholder={t("params.value")} bind:value={item.value} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
+                        {/if}
+                        <label class="checkbox-label" title={t("body.fileHint")}>
+                          <input type="checkbox" bind:checked={item.is_file} onchange={scheduleAutoSave} /> {t("body.file")}
+                        </label>
+                        {#if i < editFormDataItems.length - 1 || item.key.trim()}
+                          <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeFormDataItem(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {:else if editBodyType === "x-www-form-urlencoded"}
+                  <div class="params-table">
+                    {#each editUrlEncodedItems as item, i (i)}
+                      <div class="params-row">
+                        <input type="checkbox" bind:checked={item.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
+                        <input placeholder={t("params.key")} bind:value={item.key} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
+                        <input placeholder={t("params.value")} bind:value={item.value} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
+                        {#if i < editUrlEncodedItems.length - 1 || item.key.trim()}
+                          <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeUrlEncodedItem(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {:else if editBodyType === "binary"}
+                  <div class="params-table">
+                    <div class="params-row">
+                      <input placeholder={t("body.binaryPathPlaceholder")} bind:value={editBinaryFilePath} oninput={scheduleAutoSave} />
+                    </div>
+                    <p class="hint">{t("body.binaryHint")}</p>
+                  </div>
+                {:else if editBodyType === "graphql"}
+                  <div class="graphql-editor">
+                    <h4>{t("body.graphqlQuery")}</h4>
+                    <textarea
+                      placeholder={t("body.graphqlQueryPlaceholder")}
+                      bind:value={editGraphqlQuery}
+                      class="body-input"
+                      rows="6"
+                      oninput={() => {
+                        try {
+                          const vars = editGraphqlVariables ? JSON.parse(editGraphqlVariables) : {};
+                          editBody = JSON.stringify({ query: editGraphqlQuery, variables: vars }, null, 2);
+                        } catch {
+                          editBody = JSON.stringify({ query: editGraphqlQuery }, null, 2);
+                        }
+                        scheduleAutoSave();
+                      }}
+                    ></textarea>
+                    <h4>{t("body.graphqlVariables")}</h4>
+                    <textarea
+                      placeholder={t("body.graphqlVariablesPlaceholder")}
+                      bind:value={editGraphqlVariables}
+                      class="body-input"
+                      rows="3"
+                      oninput={() => {
+                        try {
+                          const vars = editGraphqlVariables ? JSON.parse(editGraphqlVariables) : {};
+                          editBody = JSON.stringify({ query: editGraphqlQuery, variables: vars }, null, 2);
+                        } catch {
+                          editBody = JSON.stringify({ query: editGraphqlQuery }, null, 2);
+                        }
+                        scheduleAutoSave();
+                      }}
+                    ></textarea>
+                  </div>
+                {/if}
+              </div>
+
+            {:else if activeEditorTab === "scripts"}
+              <div class="scripts-layout">
+                <div class="scripts-side">
+                  <button type="button" class="scripts-side-item" class:active={activeScriptTab === "pre"} onclick={() => (activeScriptTab = "pre")}>
+                    {t("scripts.pre")} {#if editPreScript}<span class="tab-dot">•</span>{/if}
+                  </button>
+                  <button type="button" class="scripts-side-item" class:active={activeScriptTab === "post"} onclick={() => (activeScriptTab = "post")}>
+                    {t("scripts.post")} {#if editPostScript}<span class="tab-dot">•</span>{/if}
+                  </button>
+                </div>
+                <div class="scripts-main">
+                  {#if activeScriptTab === "pre"}
+                    <p class="hint">{t("scripts.preHint")}</p>
+                    <textarea
+                      placeholder={t("scripts.prePlaceholder")}
+                      bind:value={editPreScript}
+                      class="body-input scripts-textarea"
+                      oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLTextAreaElement, "pm", false, (v) => (editPreScript = v)); }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
+                    ></textarea>
+                  {:else}
+                    <div class="field-header-row">
+                      <p class="hint">{t("scripts.postHint")}</p>
+                      <button
+                        type="button"
+                        class="btn-ghost btn-xs"
+                        disabled={generatingTestsDocs}
+                        onclick={() => generateTestsAndDocsWithAiAction("tests")}
+                        title={t("scripts.generateTestsTitle")}
+                      >
+                        {generatingTestsDocs ? t("scripts.generating") : t("scripts.generateTests")}
+                      </button>
+                    </div>
+                    {#if testsDocsFeedback}
+                      <p class="action-feedback-inline">{testsDocsFeedback}</p>
+                    {/if}
+                    <textarea
+                      placeholder={t("scripts.postPlaceholder")}
+                      bind:value={editPostScript}
+                      class="body-input scripts-textarea"
+                      oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLTextAreaElement, "pm", true, (v) => (editPostScript = v)); }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
+                    ></textarea>
+                  {/if}
+                </div>
+              </div>
+
+            {:else if activeEditorTab === "settings"}
+              <div class="params-table settings-grid">
+                <label class="settings-row">
+                  <span>{t("reqSettings.timeout")}</span>
+                  <input
+                    type="number"
+                    placeholder={t("reqSettings.timeoutPlaceholder")}
+                    value={editTimeoutMs ?? ""}
+                    oninput={(e) => {
+                      const val = (e.target as HTMLInputElement).value;
+                      editTimeoutMs = val ? parseInt(val, 10) : null;
+                      scheduleAutoSave();
+                    }}
+                  />
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" bind:checked={editFollowRedirects} onchange={scheduleAutoSave} />
+                  {t("reqSettings.followRedirects")}
+                </label>
+                <label class="settings-row">
+                  <span>{t("reqSettings.maxRedirects")}</span>
+                  <input type="number" bind:value={editMaxRedirects} min="0" max="50" oninput={scheduleAutoSave} />
+                </label>
+                <label class="checkbox-label">
+                  <input type="checkbox" bind:checked={editVerifySsl} onchange={scheduleAutoSave} />
+                  {t("reqSettings.verifySsl")}
+                </label>
+                <label class="settings-row">
+                  <span>{t("reqSettings.proxyUrl")}</span>
+                  <input placeholder="http://127.0.0.1:8080" bind:value={editProxyUrl} oninput={scheduleAutoSave} />
+                </label>
+                <label class="settings-row">
+                  <span>{t("reqSettings.httpVersion")}</span>
+                  <select bind:value={editHttpVersion} onchange={scheduleAutoSave}>
+                    <option value="">{t("reqSettings.httpVersionDefault")}</option>
+                    <option value="HTTP/1.1">HTTP/1.1</option>
+                    <option value="HTTP/2">HTTP/2</option>
+                  </select>
+                </label>
+              </div>
+
+            {:else if activeEditorTab === "docs"}
+              <div class="params-table">
+                <div class="field-header-row">
+                  <h4>{t("docs.title")}</h4>
+                  <button
+                    type="button"
+                    class="btn-ghost btn-xs"
+                    disabled={generatingTestsDocs}
+                    onclick={() => generateTestsAndDocsWithAiAction("docs")}
+                    title={t("docs.generateTitle")}
+                  >
+                    {generatingTestsDocs ? t("scripts.generating") : t("docs.generate")}
+                  </button>
+                </div>
+                {#if testsDocsFeedback}
+                  <p class="action-feedback-inline">{testsDocsFeedback}</p>
+                {/if}
+                <textarea
+                  placeholder={t("docs.placeholder")}
+                  bind:value={editDescription}
+                  class="body-input"
+                  rows="8"
+                  oninput={scheduleAutoSave}
+                ></textarea>
+              </div>
+
+            {/if}
+          </div>
+
+          <div class="sample-responses-section">
+            <div class="field-header-row">
+              <h3>{t("sample.title", { count: sampleResponses.length })}</h3>
+              <button
+                type="button"
+                class="btn-ghost btn-xs"
+                disabled={generatingSample}
+                onclick={generateSampleResponseWithAiAction}
+                title={t("sample.generateTitle")}
+              >
+                {generatingSample ? t("scripts.generating") : t("sample.generate")}
+              </button>
+            </div>
+            {#if sampleFeedback}
+              <p class="action-feedback-inline">{sampleFeedback}</p>
+            {/if}
+            {#if sampleResponses.length}
+              <div class="sample-responses-list">
+                {#each sampleResponses as sr (sr.id)}
+                  <details class="sample-response-card">
+                    <summary class="sample-response-summary">
+                      <span class="badge badge-sample">{t("sample.badge")}</span>
+                      <strong class:status-ok={sr.status < 400} class:status-err={sr.status >= 400}>
+                        {sr.status}
+                      </strong>
+                      <span class="sample-name">{sr.name}</span>
+                      <span class="hint">{new Date(sr.created_at).toLocaleTimeString()}</span>
+                      <button
+                        type="button"
+                        class="btn-delete-icon"
+                        onclick={(e) => { e.stopPropagation(); deleteSampleResponseAction(sr.request_id, sr.id); }}
+                        title={t("sample.delete")}
+                      >{@render iconClose()}</button>
+                    </summary>
+                    <pre class="body-view">{sr.body ?? ""}</pre>
+                  </details>
+                {/each}
+              </div>
+            {/if}
+          </div>
+          </div>
+
+          {#if !responsePaneCollapsed}
+            <div
+              class="response-pane-resize-handle"
+              class:resizing={responsePaneResizing}
+              onmousedown={startResponsePaneResize}
+              onkeydown={(e) => {
+                responsePaneManuallyResized = true;
+                if (e.key === "ArrowUp") responsePaneHeight = Math.min(window.innerHeight - 220, responsePaneHeight + 16);
+                else if (e.key === "ArrowDown") responsePaneHeight = Math.max(160, responsePaneHeight - 16);
+              }}
+              role="slider"
+              aria-orientation="horizontal"
+              aria-label={t("response.resizeHandle")}
+              aria-valuenow={responsePaneHeight}
+              aria-valuemin={160}
+              aria-valuemax={900}
+              tabindex="0"
+            ></div>
+          {/if}
+
+          <div class="response-pane" class:collapsed={responsePaneCollapsed} style="height: {responsePaneCollapsed ? 'auto' : responsePaneHeight + 'px'}">
+          <div class="response-pane-bar">
+            <button
+              type="button"
+              class="icon-btn"
+              title={responsePaneCollapsed ? t("response.expandPane") : t("response.collapsePane")}
+              onclick={() => setResponsePaneCollapsed(!responsePaneCollapsed)}
+            >{#if responsePaneCollapsed}{@render iconChevronUp()}{:else}{@render iconChevronDown()}{/if}</button>
+            <span class="response-pane-bar-label">
+              {t("response.title")}
+              {#if activeResponse}
+                <span class="status-chip" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>{activeResponse.status}</span>
+              {/if}
+            </span>
+          </div>
+          {#if !responsePaneCollapsed}
+          {#if sending}
+            <div class="response-loading">
+              <span class="spinner" aria-hidden="true"></span>
+              {t("response.sending")}
+            </div>
+          {:else if activeResponse}
+            <div class="response">
+              <div class="response-stat-row">
+                <span class="response-stat-status" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>
+                  {activeResponse.status} {activeResponse.status_text}
+                </span>
+                <span class="response-stat-item"><span class="response-stat-label">{t("response.time")}</span> {activeResponse.duration_ms} ms</span>
+                <span class="response-stat-item"><span class="response-stat-label">{t("response.size")}</span> {formatByteSize(activeResponse.body_size)}</span>
+                <div class="response-stat-spacer"></div>
+                {#if copyFeedback}
+                  <span class="hint">{copyFeedback}</span>
+                {/if}
+                <button type="button" class="icon-btn" title={t("response.copyTitle")} onclick={copyResponseBody}>{@render iconCopy()}</button>
+                <button type="button" class="icon-btn" title={t("response.downloadTitle")} onclick={downloadResponseBody}>{@render iconImport()}</button>
+                <button type="button" class="icon-btn" title={t("response.expand")} onclick={() => (responseExpanded = true)}>{@render iconExpandDiagonal()}</button>
+              </div>
+
+              <div class="response-subtabs">
+                <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>{t("response.body")}</button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "headers"} onclick={() => (responseSubTab = "headers")}>
+                  {t("response.headers")}
+                  {#if activeResponse.headers?.length}<span class="tab-badge">{activeResponse.headers.length}</span>{/if}
+                </button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "cookies"} onclick={() => (responseSubTab = "cookies")}>
+                  {t("response.cookies")}
+                  {#if activeResponse.cookies?.length}<span class="tab-badge">{activeResponse.cookies.length}</span>{/if}
+                </button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "tests"} onclick={() => (responseSubTab = "tests")}>
+                  {t("response.tests")}
+                  {#if activeResponseTests.length}
+                    <span class="tab-badge" class:tab-badge-warn={activeResponseTests.some((test) => !test.passed)}>
+                      {activeResponseTests.filter((test) => test.passed).length}/{activeResponseTests.length}
+                    </span>
+                  {/if}
+                </button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "history"} onclick={() => (responseSubTab = "history")}>
+                  {t("response.history")}
+                  {#if responseHistory.length}<span class="tab-badge">{responseHistory.length}</span>{/if}
+                </button>
+
+                {#if responseSubTab === "body"}
+                  <div class="response-format-toggle">
+                    <button type="button" class="btn-toggle" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>{t("response.pretty")}</button>
+                    <button type="button" class="btn-toggle" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>{t("response.raw")}</button>
+                    {#if responseBodyIsHtml}
+                      <button type="button" class="btn-toggle" class:active={responseViewMode === "preview"} onclick={() => (responseViewMode = "preview")}>{t("response.preview")}</button>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+
+              <div class="response-subtab-content">
+                {#if responseSubTab === "body"}
+                  {#if responseViewMode === "preview" && responseBodyIsHtml}
+                    <iframe class="response-preview-frame" title={t("response.preview")} sandbox="" srcdoc={activeResponseBody}></iframe>
+                  {:else if responseBodyIsJson}
+                    <pre class="body-view">{@html highlightedResponseBody}</pre>
+                  {:else}
+                    <pre class="body-view">{prettyResponseBody}</pre>
+                  {/if}
+                  {#if activeResponseTruncated}
+                    <p class="hint">{t("response.truncated")}</p>
+                  {/if}
+                {:else if responseSubTab === "headers"}
+                  {#if activeResponse.headers?.length}
+                    <div class="headers-list">
+                      {#each activeResponse.headers as h}
+                        <div class="header-line">
+                          <strong>{h.key}:</strong> {h.value}
+                        </div>
+                      {/each}
+                    </div>
+                  {:else}
+                    <p class="empty">{t("response.noHeaders")}</p>
+                  {/if}
+                {:else if responseSubTab === "cookies"}
+                  {#if activeResponse.cookies?.length}
+                    <div class="headers-list">
+                      {#each activeResponse.cookies as c}
+                        <div class="header-line">
+                          <strong>{c.name}:</strong> {c.value}
+                          {#if c.domain}<span class="hint">{t("cookie.domain", { value: c.domain })}</span>{/if}
+                          {#if c.path}<span class="hint">{t("cookie.path", { value: c.path })}</span>{/if}
+                          {#if c.http_only}<span class="badge">{t("cookie.httpOnly")}</span>{/if}
+                          {#if c.secure}<span class="badge">{t("cookie.secure")}</span>{/if}
+                        </div>
+                      {/each}
+                    </div>
+                  {:else}
+                    <p class="empty">{t("response.noCookies")}</p>
+                  {/if}
+                {:else if responseSubTab === "tests"}
+                  {#if activeResponseTests.length}
+                    <ul class="test-results-list">
+                      {#each activeResponseTests as test, i (i)}
+                        <li class="test-result-row" class:test-pass={test.passed} class:test-fail={!test.passed}>
+                          <span class="test-result-icon">{#if test.passed}{@render iconCheck()}{:else}{@render iconClose()}{/if}</span>
+                          <span class="test-result-name">{test.name}</span>
+                          {#if !test.passed && test.error}<span class="test-result-error">{test.error}</span>{/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else}
+                    <p class="empty">{t("response.testsHintFull")}</p>
+                  {/if}
+                {:else if responseSubTab === "history"}
+                  {#if responseHistory.length}
+                    <ul class="response-history-list">
+                      {#each responseHistory as r (r.id)}
+                        <li>
+                          <button type="button" class="response-history-row" onclick={() => openHistoryResponse(r.id)}>
+                            <span class="status-chip" class:status-ok={r.status < 400} class:status-err={r.status >= 400}>{r.status}</span>
+                            <span class="response-history-duration">{r.duration_ms} ms</span>
+                            <span class="response-history-time">{new Date(r.created_at).toLocaleString()}</span>
+                          </button>
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else}
+                    <p class="empty">{t("history.empty")}</p>
+                  {/if}
+                {/if}
+              </div>
+            </div>
+          {:else}
+            <div class="response-empty-state">
+              <div class="empty-icon">{@render iconInboxEmpty()}</div>
+              <p>{t("response.sendEmpty")}</p>
+            </div>
+          {/if}
+          {/if}
+          </div>
+          </div>
+        </section>
+      {/if}
+    </main>
+
+    {#if activeScreen === "workspace" && !responseExpanded && selectedProjectId}
+      {#if rightSidebarVisible}
+        <aside class="right-sidebar">
+          <div class="right-sidebar-header">
+            <span class="right-sidebar-title">
+              {#if rightPanel === "info"}{@render iconInfo()} {t("bottom.info")}{:else}&lt;/&gt; {t("bottom.codeSnippet")}{/if}
+            </span>
+            <div class="response-stat-spacer"></div>
+            <button
+              type="button"
+              class="icon-btn"
+              class:active={rightPanel === "info"}
+              title={t("bottom.info")}
+              onclick={() => (rightPanel = rightPanel === "info" ? "code" : "info")}
+            >{@render iconInfo()}</button>
+            <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => setRightSidebarVisible(false)}>{@render iconChevronRight()}</button>
+          </div>
+
+          {#if !selectedRequest}
+            <p class="screen-empty-inline">{t("request.selectPrompt")}</p>
+          {:else if rightPanel === "info"}
+            <div class="bottom-panel">
+              <dl class="info-list info-list-grid">
+                <dt>{t("bottom.id")}</dt>
+                <dd>{selectedRequest.id}</dd>
+                <dt>{t("bottom.projectId")}</dt>
+                <dd>{selectedRequest.project_id}</dd>
+                <dt>{t("bottom.created")}</dt>
+                <dd>{new Date(selectedRequest.created_at).toLocaleString()}</dd>
+                <dt>{t("bottom.updated")}</dt>
+                <dd>{new Date(selectedRequest.updated_at).toLocaleString()}</dd>
+                <dt>{t("bottom.headersCount")}</dt>
+                <dd>{selectedRequest.headers.length}</dd>
+                <dt>{t("bottom.queryParamsCount")}</dt>
+                <dd>{selectedRequest.query_params.length}</dd>
+              </dl>
+            </div>
+          {:else}
+            <div class="bottom-panel">
+              <div class="params-row">
+                <select bind:value={snippetTarget}>
+                  <option value="windows_cmd">{t("bottom.targetWindowsCmd")}</option>
+                  <option value="power_shell">{t("bottom.targetPowershell")}</option>
+                  <option value="bash">{t("bottom.targetBash")}</option>
+                  <option value="python_requests">{t("bottom.targetPython")}</option>
+                  <option value="java_script_fetch">{t("bottom.targetJavascript")}</option>
+                </select>
+                <select bind:value={snippetMode}>
+                  <option value="placeholder">{t("bottom.placeholderSafe")}</option>
+                  <option value="resolved">{t("bottom.resolvedReal")}</option>
+                </select>
+                {#if snippet}
+                  <button type="button" onclick={copySnippetToClipboard}>{t("bottom.copyClipboard")}</button>
+                {/if}
+              </div>
+              {#if snippetError}
+                <p class="error">{snippetError}</p>
+              {:else if snippetLoading}
+                <p class="hint">{t("bottom.generatingSnippet")}</p>
+              {:else if snippet}
+                <pre class="body-view bottom-panel-code">{snippet}</pre>
+              {/if}
+            </div>
+          {/if}
+        </aside>
+      {:else}
+        <button type="button" class="sidebar-expand-btn" title={t("sidebar.show")} onclick={() => setRightSidebarVisible(true)}>{@render iconChevronLeft()}</button>
+      {/if}
+    {/if}
+  </div>
+
+  {#if showConsole}
+    <div
+      class="console-resize-handle"
+      class:resizing={consoleResizing}
+      onmousedown={startConsoleResize}
+      onkeydown={(e) => {
+        if (e.key === "ArrowUp") consoleHeight = Math.min(window.innerHeight - 160, consoleHeight + 16);
+        else if (e.key === "ArrowDown") consoleHeight = Math.max(120, consoleHeight - 16);
+      }}
+      role="slider"
+      aria-orientation="horizontal"
+      aria-label={t("console.resizeHandle")}
+      aria-valuenow={consoleHeight}
+      aria-valuemin={120}
+      aria-valuemax={900}
+      tabindex="0"
+    ></div>
+    <div class="console-drawer" style="height: {consoleHeight}px">
+      <div class="console-header">
+        <div class="console-title-group">
+          <span class="console-title">{t("console.title")}</span>
+          <span class="console-count-badge">{t("console.eventsCount", { count: filteredConsoleEvents.length })}</span>
+        </div>
+
+        <div class="console-toolbar">
+          <select bind:value={consoleLevelFilter} class="console-select">
+            <option value="all">{t("console.allLevels")}</option>
+            <option value="info">{t("console.info")}</option>
+            <option value="warn">{t("console.warn")}</option>
+            <option value="error">{t("console.error")}</option>
+            <option value="debug">{t("console.debug")}</option>
+          </select>
+
+          <label class="console-check-label" title={t("console.activeRequestOnlyTitle")}>
+            <input type="checkbox" bind:checked={consoleActiveRequestOnly} />
+            {t("console.activeRequestOnly")}
+          </label>
+
+          <input
+            type="search"
+            placeholder={t("console.filterPlaceholder")}
+            bind:value={consoleSearchFilter}
+            class="console-search"
+          />
+
+          <button type="button" class="console-btn" onclick={refreshConsoleEvents} title={t("console.refreshTitle")}>{t("console.refresh")}</button>
+          <button type="button" class="console-btn" onclick={clearConsole} title={t("console.clearTitle")}>{t("console.clear")}</button>
+          <button type="button" class="console-btn" onclick={copyConsoleLog} title={t("console.copyTitle")}>{t("console.copy")}</button>
+          <button type="button" class="console-btn" onclick={exportConsoleJson} title={t("console.exportJsonTitle")}>{t("console.exportJson")}</button>
+          <button type="button" class="console-close-btn" onclick={() => (showConsole = false)} title={t("console.closeTitle")}>{@render iconClose()}</button>
+        </div>
+      </div>
+
+      <div class="console-body">
+        {#if filteredConsoleEvents.length === 0}
+          <div class="console-empty">{t("console.empty")}</div>
+        {:else}
+          <div class="console-events-list">
+            {#each filteredConsoleEvents as evt (evt.id)}
+              <div class="console-row" class:error-row={evt.level === "error"} class:warn-row={evt.level === "warn"}>
+                <div
+                  class="console-row-summary"
+                  onclick={() => toggleEventExpanded(evt.id)}
+                  role="button"
+                  tabindex="0"
+                  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") toggleEventExpanded(evt.id); }}
+                >
+                  <span class="evt-expander">{#if expandedEventIds.has(evt.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</span>
+                  <span class="evt-time">{formatConsoleTime(evt.timestamp)}</span>
+                  <span class="evt-level level-{evt.level}">{evt.level.toUpperCase()}</span>
+                  <span class="evt-type">{evt.event_type}</span>
+                  <span class="evt-cid" title={t("console.correlationIdTitle", { id: evt.correlation_id })}>#{evt.correlation_id.slice(0, 8)}</span>
+                  <span class="evt-msg">{evt.message}</span>
+                </div>
+
+                {#if expandedEventIds.has(evt.id) && evt.details}
+                  {@const d = evt.details as Record<string, unknown>}
+                  {@const known = ["request_start", "response_received", "cookie_injected", "request_error", "test_assertion"].includes(evt.event_type)}
+                  <div class="console-row-details">
+                    <div class="details-actions">
+                      {#if known}
+                        <button type="button" class="console-mini-btn" onclick={() => toggleRawDetails(evt.id)}>
+                          {rawDetailsVisible.has(evt.id) ? t("console.hideRawJson") : t("console.viewRawJson")}
+                        </button>
+                      {/if}
+                      <button type="button" class="console-mini-btn" onclick={() => copyEventDetails(evt)}>{t("console.copyDetailsJson")}</button>
+                    </div>
+
+                    {#if evt.event_type === "request_start"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.method")}</span><span class="detail-v">{detailStr(d, "method")}</span>
+                        <span class="detail-k">{t("console.url")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "url")}</span>
+                        <span class="detail-k">{t("console.authType")}</span><span class="detail-v">{detailStr(d, "auth_type")}</span>
+                        <span class="detail-k">{t("console.bodyBytes")}</span><span class="detail-v">{formatByteSize(Number(d.body_bytes ?? 0))}</span>
+                        <span class="detail-k">{t("console.timeout")}</span><span class="detail-v">{detailStr(d, "timeout_ms")} ms</span>
+                        <span class="detail-k">{t("console.followRedirects")}</span><span class="detail-v">{String(d.follow_redirects)}</span>
+                        <span class="detail-k">{t("console.verifySsl")}</span><span class="detail-v">{String(d.verify_ssl)}</span>
+                        {#if detailStr(d, "proxy")}
+                          <span class="detail-k">{t("console.proxy")}</span><span class="detail-v">{detailStr(d, "proxy")}</span>
+                        {/if}
+                        {#if detailStr(d, "http_version")}
+                          <span class="detail-k">{t("console.httpVersion")}</span><span class="detail-v">{detailStr(d, "http_version")}</span>
+                        {/if}
+                      </div>
+                      {#if asHeaderRows(d.headers).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("params.key")}</th><th>{t("params.value")}</th></tr></thead>
+                          <tbody>
+                            {#each asHeaderRows(d.headers) as h, i (i)}
+                              <tr class:disabled-row={h.enabled === false}><td>{h.key}</td><td>{h.value}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                    {:else if evt.event_type === "response_received"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.status")}</span><span class="detail-v">{detailStr(d, "status")} {detailStr(d, "status_text")}</span>
+                        <span class="detail-k">{t("console.duration")}</span><span class="detail-v">{detailStr(d, "duration_ms")} ms</span>
+                        <span class="detail-k">{t("console.bodySize")}</span><span class="detail-v">{formatByteSize(Number(d.body_size ?? 0))}</span>
+                        {#if detailStr(d, "content_type")}
+                          <span class="detail-k">{t("console.contentType")}</span><span class="detail-v">{detailStr(d, "content_type")}</span>
+                        {/if}
+                      </div>
+                      {#if asHeaderRows(d.headers).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("params.key")}</th><th>{t("params.value")}</th></tr></thead>
+                          <tbody>
+                            {#each asHeaderRows(d.headers) as h, i (i)}
+                              <tr><td>{h.key}</td><td>{h.value}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                      {#if asCookieRows(d.cookies).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("console.cookieName")}</th><th>{t("params.value")}</th><th>{t("console.cookieDomain")}</th></tr></thead>
+                          <tbody>
+                            {#each asCookieRows(d.cookies) as c, i (i)}
+                              <tr><td>{c.name}</td><td>{c.value || "—"}</td><td>{c.domain}{c.path}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                    {:else if evt.event_type === "cookie_injected"}
+                      <p class="detail-list-label">{t("console.injectedCookies")}</p>
+                      <ul class="detail-plain-list">
+                        {#each (Array.isArray(d.cookies) ? d.cookies : []) as c, i (i)}
+                          <li>{String(c)}</li>
+                        {/each}
+                      </ul>
+                    {:else if evt.event_type === "request_error"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.error")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "error")}</span>
+                      </div>
+                    {:else if evt.event_type === "test_assertion"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.testName")}</span><span class="detail-v">{detailStr(d, "name")}</span>
+                        <span class="detail-k">{t("console.testPassed")}</span><span class="detail-v">{d.passed ? t("console.pass") : t("console.fail")}</span>
+                        {#if detailStr(d, "error")}
+                          <span class="detail-k">{t("console.testError")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "error")}</span>
+                        {/if}
+                      </div>
+                    {/if}
+
+                    {#if !known || rawDetailsVisible.has(evt.id)}
+                      <pre class="console-json-view">{JSON.stringify(evt.details, null, 2)}</pre>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  <footer class="app-status-bar">
+    <div class="status-left">
+      <button
+        type="button"
+        class="console-toggle-btn"
+        class:active={showConsole}
+        onclick={() => {
+          showConsole = !showConsole;
+          if (showConsole) refreshConsoleEvents();
+        }}
+      >
+        <span>{t("console.title")}</span>
+        {#if consoleErrorCount > 0}
+          <span class="status-badge-error">{@render iconXCircle()} {consoleErrorCount}</span>
+        {/if}
+        {#if consoleWarnCount > 0}
+          <span class="status-badge-warn">{@render iconWarning()} {consoleWarnCount}</span>
+        {/if}
+      </button>
+    </div>
+    <div class="status-right">
+      {#if selectedProjectId}
+        <button
+          type="button"
+          class="git-status-pill git-kind-{gitStatus?.status_kind ?? 'unconfigured'}"
+          class:git-has-conflict={gitStatus?.has_conflicts}
+          title={t("footer.gitSyncTitle")}
+          onclick={() => {
+            activeScreen = "git";
+            if (gitRepoPathInput) refreshGitStatus();
+          }}
+        >
+          <span class="git-icon">{@render iconGitBranch()}</span>
+          {#if !gitSettings?.repo_path}
+            <span>{t("footer.gitNotConfigured")}</span>
+          {:else if gitStatusLoading}
+            <span>{t("footer.gitChecking")}</span>
+          {:else if gitStatus?.has_conflicts}
+            <span class="git-alert">{t("footer.gitConflict", { count: gitStatus.conflict_files.length })}</span>
+          {:else if gitStatus}
+            <span>{t("footer.gitBranchStatus", { branch: gitStatus.branch, status: gitStatus.status_kind })}</span>
+            {#if gitStatus.ahead > 0}<span class="git-ahead">{@render iconArrowUp()}{gitStatus.ahead}</span>{/if}
+            {#if gitStatus.behind > 0}<span class="git-behind">{@render iconArrowDown()}{gitStatus.behind}</span>{/if}
+          {:else}
+            <span>{t("footer.gitLabel", { branch: gitBranchInput })}</span>
+          {/if}
+        </button>
+        <span class="status-info">{t("footer.project", { name: projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId })}</span>
+      {/if}
+      {#if selectedEnvironmentId}
+        <span class="status-info">{t("footer.env", { name: allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId })}</span>
+      {/if}
+    </div>
+  </footer>
+
+
+  {#if showAiPanel}
+    <div
+      class="modal-backdrop"
+      onclick={(e) => { if (e.target === e.currentTarget) showAiPanel = false; }}
+      onkeydown={(e) => { if (e.key === "Escape") showAiPanel = false; }}
+      role="dialog"
+      aria-modal="true"
+      tabindex="0"
+    >
+      <div class="modal-container modal-wide">
+        <div class="modal-header">
+          <div class="modal-title-wrap">
+            <h3>{t("ai.title")}</h3>
+            <span class="modal-sub">{t("ai.subtitle")}</span>
+          </div>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showAiPanel = false)}>{@render iconClose()}</button>
+        </div>
+
+        <div class="modal-tabs">
+          <button
+            type="button"
+            class="modal-tab-btn"
+            class:active={aiActiveTab === "generate"}
+            onclick={() => (aiActiveTab = "generate")}
+          >
+            {t("ai.tabGenerate")}
+          </button>
+          <button
+            type="button"
+            class="modal-tab-btn"
+            class:active={aiActiveTab === "source"}
+            onclick={() => (aiActiveTab = "source")}
+          >
+            {t("ai.tabSource")} {#if sourceReport}<span class="badge badge-framework">{sourceReport.endpoints.length}</span>{/if}
+          </button>
+          <button
+            type="button"
+            class="modal-tab-btn"
+            class:active={aiActiveTab === "settings"}
+            onclick={() => (aiActiveTab = "settings")}
+          >
+            {t("ai.tabSettings")} {#if !aiConfigured}<span class="tab-badge-alert">!</span>{/if}
+          </button>
+        </div>
+
+        {#if aiActiveTab === "generate"}
+          <div class="modal-body">
+            {#if !aiConfigured}
+              <div class="action-alert warning">
+                <span>{t("ai.notConfiguredWarning")}</span>
+                <button type="button" class="btn-primary btn-xs" onclick={() => (aiActiveTab = "settings")}>{t("ai.configureAi")}</button>
+              </div>
+            {/if}
+
+            <div class="ai-context-options">
+              <label class="checkbox-label" title={t("ai.includeExistingTitle")}>
+                <input type="checkbox" bind:checked={aiIncludeExistingRequests} />
+                {t("ai.includeExisting")}
+              </label>
+              <label class="checkbox-label" title={t("ai.includeVarsTitle")}>
+                <input type="checkbox" bind:checked={aiIncludeVariables} />
+                {t("ai.includeVars")}
+              </label>
+            </div>
+
+            <form onsubmit={generateWithAi} class="ai-prompt-form">
+              <textarea
+                placeholder={t("ai.promptPlaceholder")}
+                bind:value={aiPrompt}
+                class="body-input"
+                rows="3"
+              ></textarea>
+              <div class="params-row">
+                <button type="submit" class="btn-primary" disabled={aiGenerating || !aiPrompt.trim()}>
+                  {aiGenerating ? t("ai.generatingDefinition") : t("ai.generateRequest")}
+                </button>
+              </div>
+            </form>
+
+            {#if aiPreview}
+              <div class="ai-preview-card">
+                <div class="preview-title-row">
+                  <span class="method method-{aiPreview.method.toLowerCase()}">{aiPreview.method}</span>
+                  <span class="preview-name">{aiPreview.name}</span>
+                  <code class="preview-url">{aiPreview.url}</code>
+                </div>
+                {#if aiPreview.description}
+                  <p class="hint preview-desc">{aiPreview.description}</p>
+                {/if}
+                <div class="preview-meta-row">
+                  <span>{t("ai.headersCount", { count: aiPreview.headers.length })}</span>
+                  <span>{t("ai.queryParamsCount", { count: aiPreview.query_params.length })}</span>
+                  {#if aiPreview.body}<span>{t("ai.hasBody")}</span>{/if}
+                </div>
+                {#if aiPreview.body}
+                  <pre class="body-view preview-body-pre">{aiPreview.body}</pre>
+                {/if}
+                <div class="params-row">
+                  <button
+                    type="button"
+                    class="btn-primary"
+                    onclick={() => { addAiPreviewToProject(); showAiPanel = false; }}
+                  >
+                    {t("ai.addToProject")}
+                  </button>
+                  <button type="button" onclick={() => (aiPreview = null)}>{t("ai.discard")}</button>
+                </div>
+              </div>
+            {/if}
+          </div>
+
+        {:else if aiActiveTab === "source"}
+          <div class="modal-body">
+            <p class="hint">
+              {t("ai.sourceDesc")} <em>{t("ai.sourceReadOnly")}</em>
+            </p>
+
+            <div class="source-scan-bar">
+              <input
+                type="text"
+                placeholder={t("ai.sourcePathPlaceholder")}
+                bind:value={sourceDirectoryInput}
+                class="url-input"
+              />
+              <button
+                type="button"
+                class="btn-primary"
+                disabled={sourceScanning || !sourceDirectoryInput.trim()}
+                onclick={scanSourceProjectAction}
+              >
+                {sourceScanning ? t("ai.scanning") : t("ai.scanCodebase")}
+              </button>
+            </div>
+
+            {#if sourceActionFeedback}
+              <p class="action-feedback-inline">{sourceActionFeedback}</p>
+            {/if}
+
+            {#if sourceReport}
+              <div class="source-summary-panel">
+                <div class="source-badges-row">
+                  <span class="badge">{t("ai.typeLabel", { type: sourceReport.project_type })}</span>
+                  <span class="badge">{t("ai.scannedLabel", { count: sourceReport.scanned_files_count })}</span>
+                  <span class="badge badge-success">{t("ai.foundLabel", { count: sourceReport.endpoints.length })}</span>
+                  {#each sourceReport.frameworks as fw}
+                    <span class="badge badge-framework">{fw}</span>
+                  {/each}
+                  {#if sourceReport.has_openapi}
+                    <span class="badge badge-openapi">{t("ai.openapiDetected", { path: sourceReport.openapi_path ?? t("ai.specDetected") })}</span>
+                  {/if}
+                </div>
+
+                {#if sourceReport.endpoints.length > 0}
+                  <div class="source-filter-row">
+                    <input
+                      type="text"
+                      placeholder={t("ai.filterRoutesPlaceholder")}
+                      bind:value={sourceFilter}
+                      class="url-input"
+                    />
+                  </div>
+
+                  <div class="discovered-endpoints-list">
+                    {#each filteredSourceEndpoints as ep, idx (idx)}
+                      <div class="discovered-endpoint-card">
+                        <div class="ep-info">
+                          <span class="method method-{ep.method.toLowerCase()}">{ep.method}</span>
+                          <code class="ep-path">{ep.path}</code>
+                          {#if ep.auth_hint}
+                            <span class="badge badge-auth" title={t("ai.authDetectedTitle")}>{@render iconLock()} {ep.auth_hint}</span>
+                          {/if}
+                        </div>
+                        <div class="ep-meta">
+                          <span class="ep-file">{ep.source_file}{ep.line_number ? `:${ep.line_number}` : ''}</span>
+                          {#if ep.description}
+                            <span class="ep-summary">{ep.description}</span>
+                          {/if}
+                        </div>
+                        <button
+                          type="button"
+                          class="btn-xs-primary"
+                          disabled={!selectedProjectId}
+                          onclick={() => { importDiscoveredEndpointAction(ep); showAiPanel = false; }}
+                          title={t("ai.importEndpointTitle")}
+                        >
+                          {t("ai.importRequest")}
+                        </button>
+                      </div>
+                    {/each}
+                    {#if filteredSourceEndpoints.length === 0}
+                      <p class="hint text-center">{t("ai.noRoutesMatch", { filter: sourceFilter })}</p>
+                    {/if}
+                  </div>
+                {:else}
+                  <p class="hint">{t("ai.noRoutesFound")}</p>
+                {/if}
+              </div>
+            {/if}
+          </div>
+
+        {:else if aiActiveTab === "settings"}
+          <div class="modal-body">
+            <div class="ai-settings-grid">
+              <div class="settings-field">
+                <label for="ai-provider-select"><strong>{t("ai.providerLabel")}</strong></label>
+                <select id="ai-provider-select" bind:value={aiProviderInput} onchange={onAiProviderChange} class="url-input">
+                  {#each AI_PROVIDERS as p (p.id)}
+                    <option value={p.id}>{t(p.labelKey)}</option>
+                  {/each}
+                </select>
+                <span class="hint">{t("ai.providerHint")}</span>
+              </div>
+
+              <div class="settings-field">
+                <label for="ai-api-key-input">
+                  <strong>{t("ai.apiKeyLabel")}</strong>
+                  {#if aiConfigured}
+                    <span class="badge badge-success">{t("ai.configured")}</span>
+                  {:else}
+                    <span class="badge">{t("ai.notConfigured")}</span>
+                  {/if}
+                </label>
+                <div class="password-input-row">
+                  <input
+                    id="ai-api-key-input"
+                    type={aiShowKey ? "text" : "password"}
+                    placeholder={aiSettings?.api_key || AI_API_KEY_PLACEHOLDER[aiProviderInput]}
+                    bind:value={aiApiKeyInput}
+                    class="url-input"
+                  />
+                  <button type="button" class="btn-ghost" onclick={() => (aiShowKey = !aiShowKey)}>
+                    {aiShowKey ? t("ai.hide") : t("ai.show")}
+                  </button>
+                </div>
+                <span class="hint">{t("ai.apiKeyHint")}</span>
+              </div>
+
+              <div class="settings-field">
+                <label for="ai-model-input"><strong>{t("ai.modelLabel")}</strong></label>
+                <input
+                  id="ai-model-input"
+                  type="text"
+                  list="ai-model-suggestions"
+                  placeholder={t("ai.modelPlaceholder")}
+                  bind:value={aiModelInput}
+                  class="url-input"
+                />
+                <datalist id="ai-model-suggestions">
+                  {#each AI_MODEL_SUGGESTIONS[aiProviderInput] as m (m)}
+                    <option value={m}></option>
+                  {/each}
+                </datalist>
+                <span class="hint">{t("ai.modelHint")}</span>
+              </div>
+
+              <div class="settings-field">
+                <label for="ai-base-url-input">
+                  <strong>{t("ai.baseUrlLabel")}</strong>
+                  {#if aiProviderInput === "custom"}
+                    <span class="badge badge-warn">{t("ai.required")}</span>
+                  {/if}
+                </label>
+                <input
+                  id="ai-base-url-input"
+                  type="text"
+                  placeholder={aiProviderInput === "custom" ? t("ai.baseUrlPlaceholderCustom") : t("ai.baseUrlPlaceholder")}
+                  bind:value={aiBaseUrlInput}
+                  class="url-input"
+                />
+                <span class="hint">{aiProviderInput === "custom" ? t("ai.baseUrlHintCustom") : t("ai.baseUrlHint")}</span>
+              </div>
+
+              <div class="params-row">
+                <button type="button" class="btn-primary" onclick={saveAiSettingsAction}>{t("ai.saveSettings")}</button>
+                <button type="button" class="btn-secondary" disabled={aiTesting} onclick={testAiConnectionAction}>
+                  {aiTesting ? t("ai.testing") : t("ai.testConnection")}
+                </button>
+              </div>
+
+              {#if aiSettingsFeedback}
+                <p class="action-feedback-inline text-success">{aiSettingsFeedback}</p>
+              {/if}
+              {#if aiTestFeedback}
+                <div class="action-alert success">
+                  <span>{@render iconCheckCircle()} {aiTestFeedback}</span>
+                </div>
+              {/if}
+              {#if aiTestError}
+                <div class="action-alert error">
+                  <span>{@render iconXCircle()} {aiTestError}</span>
+                </div>
+              {/if}
+            </div>
+          </div>
+        {/if}
+
+        <div class="modal-footer">
+          <button type="button" onclick={() => (showAiPanel = false)}>{t("common.close")}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showDiffModal}
+    <div
+      class="modal-backdrop"
+      onclick={(e) => { if (e.target === e.currentTarget) showDiffModal = false; }}
+      onkeydown={(e) => { if (e.key === "Escape") showDiffModal = false; }}
+      role="dialog"
+      aria-modal="true"
+      tabindex="0"
+    >
+      <div class="modal-container">
+        <div class="modal-header">
+          <h3>{t("diff.title")}</h3>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showDiffModal = false)}>{@render iconClose()}</button>
+        </div>
+        <div class="modal-body">
+          {#if !gitDiffContent.trim()}
+            <p class="hint">{t("diff.noDiff")}</p>
+          {:else}
+            <pre class="diff-viewer">{gitDiffContent}</pre>
+          {/if}
+        </div>
+        <div class="modal-footer">
+          <button type="button" onclick={() => (showDiffModal = false)}>{t("common.close")}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showHistoryModal}
+    <div
+      class="modal-backdrop"
+      onclick={(e) => { if (e.target === e.currentTarget) showHistoryModal = false; }}
+      onkeydown={(e) => { if (e.key === "Escape") showHistoryModal = false; }}
+      role="dialog"
+      aria-modal="true"
+      tabindex="0"
+    >
+      <div class="modal-container">
+        <div class="modal-header">
+          <h3>{t("diffHistory.title")}</h3>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showHistoryModal = false)}>{@render iconClose()}</button>
+        </div>
+        <div class="modal-body">
+          {#if gitHistory.length === 0}
+            <p class="hint">{t("diffHistory.noHistory")}</p>
+          {:else}
+            <div class="history-list">
+              {#each gitHistory as c}
+                <div class="history-item">
+                  <div class="commit-header">
+                    <code class="commit-hash">{c.hash.slice(0, 8)}</code>
+                    <span class="commit-author">{c.author}</span>
+                    <span class="commit-date">{c.date}</span>
+                  </div>
+                  <p class="commit-msg">{c.message}</p>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        <div class="modal-footer">
+          <button type="button" onclick={() => (showHistoryModal = false)}>{t("common.close")}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+</div>
+{/if}
+{:else if activeScreen === "environments"}
+  {#if !selectedProjectId}
+    {@render noProjectPicker(t("rail.environments"))}
+  {:else}
+    <div class="env-screen">
+      <aside class="env-screen-side">
+        <div class="env-screen-side-header">
+          <span class="screen-kicker">{t("env.title")}</span>
+          <button type="button" class="icon-btn" title={t("env.newEnvironment")} onclick={quickCreateEnvironment}>+</button>
+        </div>
+        <div class="env-screen-project-row">
+          <span class="env-screen-project-label">{t("env.project")}</span>
+          {@render projectSwitcher()}
+        </div>
+        <div class="request-search-box">
+          <input
+            type="search"
+            placeholder={t("env.searchEnvironments")}
+            bind:value={envSearchQuery}
+            class="request-search-input"
+          />
+        </div>
+        <div class="env-screen-list">
+          {#if !envSearchQuery}
+            <button
+              type="button"
+              class="env-screen-item"
+              class:active={!selectedEnvironmentId}
+              onclick={() => { selectedEnvironmentId = null; loadVariables(); }}
+            >
+              {t("env.noEnvironment")}
+            </button>
+          {/if}
+          {#each filteredEnvironmentsByProject as [projectName, envs] (projectName)}
+            <div class="env-screen-group-label">{projectName}</div>
+            {#each envs as env (env.id)}
+              {#if renamingEnvironmentId === env.id}
+                <form class="inline-form env-screen-rename-form" onsubmit={submitRenameEnvironment}>
+                  <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
+                  <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>{@render iconClose()}</button>
+                </form>
+              {:else}
+                <div class="env-screen-item-row" class:active={selectedEnvironmentId === env.id}>
+                  <button
+                    type="button"
+                    class="env-screen-item"
+                    onclick={() => { selectedEnvironmentId = env.id; loadVariables(); }}
+                    ondblclick={() => startRenameEnvironment(env)}
+                  >
+                    {env.name}
+                  </button>
+                  <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameEnvironment(env)}>{@render iconEdit()}</button>
+                  <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteEnvironmentAction(env.id)}>{@render iconTrash()}</button>
+                </div>
+              {/if}
+            {/each}
+          {:else}
+            {#if envSearchQuery}
+              <p class="screen-empty-inline">{t("palette.noMatches")}</p>
+            {/if}
+          {/each}
+        </div>
+      </aside>
+
+      <section class="screen-page">
+        <div class="screen-page-header">
+          <span class="screen-kicker">{t("env.editing")}</span>
+          <h1 class="screen-title">{selectedEnvironmentId ? (allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? t("env.fallbackName")) : t("env.globalAll")}</h1>
+        </div>
+
+        <div class="screen-page-body">
+          <div class="request-search-box">
+            <input
+              type="search"
+              placeholder={t("env.searchVariables")}
+              bind:value={envVarSearchQuery}
+              class="request-search-input"
+            />
+            {#if envVarSearchQuery}
+              <span class="request-count-badge">{filteredProjectVariables.length + filteredEnvironmentVariables.length}/{projectVariables.length + environmentVariables.length}</span>
+            {/if}
+          </div>
+          <h4>{t("env.globalVariables", { count: filteredProjectVariables.length })}</h4>
+          <div class="params-table">
+            {#each filteredProjectVariables as v (v.id)}
+              <div class="params-row">
+                <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} title={t("params.enabled")} />
+                <span class="var-key">{v.key}</span>
+                <span class="var-val">{revealedSecrets[v.id] ?? v.value}</span>
+                {#if v.is_local}
+                  <span class="badge badge-local" title={t("env.localBadgeTitle")}>{t("env.localBadge")}</span>
+                {/if}
+                {#if v.is_secret}
+                  <span class="badge">{t("env.secretBadge")}</span>
+                  {#if !revealedSecrets[v.id]}
+                    <button type="button" class="icon-btn" title={t("env.reveal")} onclick={() => revealSecret(v.id)}>{@render iconEye()}</button>
+                  {/if}
+                {/if}
+                <button type="button" class="icon-btn" title={v.is_local ? t("env.makeShared") : t("env.makeLocalOnly")} onclick={() => toggleVariableLocal(v)}>{#if v.is_local}{@render iconMonitor()}{:else}{@render iconGlobe()}{/if}</button>
+                <button type="button" class="icon-btn" title={t("env.toggleSecret")} onclick={() => toggleVariableSecret(v)}>{@render iconLock()}</button>
+                <button type="button" class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteVariable(v.id)}>{@render iconTrash()}</button>
+              </div>
+            {/each}
+            <div
+              class="params-row"
+              onfocusout={(e) => {
+                const row = e.currentTarget as HTMLElement;
+                if (!e.relatedTarget || !row.contains(e.relatedTarget as Node)) commitNewGlobalVar();
+              }}
+            >
+              <span class="params-row-spacer"></span>
+              <input
+                placeholder={t("params.key")}
+                bind:value={newGlobalVarDraft.key}
+                onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewGlobalVar(); } }}
+              />
+              <input
+                placeholder={t("params.value")}
+                bind:value={newGlobalVarDraft.value}
+                onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewGlobalVar(); } }}
+              />
+              <label class="checkbox-label">
+                <input type="checkbox" bind:checked={newGlobalVarDraft.isSecret} /> {t("env.secret")}
+              </label>
+              <label class="checkbox-label" title={t("env.localHint")}>
+                <input type="checkbox" bind:checked={newGlobalVarDraft.isLocal} /> {t("env.local")}
+              </label>
+            </div>
+          </div>
+
+          {#if selectedEnvironmentId}
+            <h4>{t("env.environmentVariables", { count: filteredEnvironmentVariables.length })}</h4>
+            <div class="params-table">
+              {#each filteredEnvironmentVariables as v (v.id)}
+                <div class="params-row">
+                  <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} title={t("params.enabled")} />
+                  <span class="var-key">{v.key}</span>
+                  <span class="var-val">{revealedSecrets[v.id] ?? v.value}</span>
+                  {#if v.is_local}
+                    <span class="badge badge-local" title={t("env.localBadgeTitle")}>{t("env.localBadge")}</span>
+                  {/if}
+                  {#if v.is_secret}
+                    <span class="badge">{t("env.secretBadge")}</span>
+                    {#if !revealedSecrets[v.id]}
+                      <button type="button" class="icon-btn" title={t("env.reveal")} onclick={() => revealSecret(v.id)}>{@render iconEye()}</button>
+                    {/if}
+                  {/if}
+                  <button type="button" class="icon-btn" title={v.is_local ? t("env.makeShared") : t("env.makeLocalOnly")} onclick={() => toggleVariableLocal(v)}>{#if v.is_local}{@render iconMonitor()}{:else}{@render iconGlobe()}{/if}</button>
+                  <button type="button" class="icon-btn" title={t("env.toggleSecret")} onclick={() => toggleVariableSecret(v)}>{@render iconLock()}</button>
+                  <button type="button" class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteVariable(v.id)}>{@render iconTrash()}</button>
+                </div>
+              {/each}
+              <div
+                class="params-row"
+                onfocusout={(e) => {
+                  const row = e.currentTarget as HTMLElement;
+                  if (!e.relatedTarget || !row.contains(e.relatedTarget as Node)) commitNewEnvVar();
+                }}
+              >
+                <span class="params-row-spacer"></span>
+                <input
+                  placeholder={t("params.key")}
+                  bind:value={newEnvVarDraft.key}
+                  onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewEnvVar(); } }}
+                />
+                <input
+                  placeholder={t("params.value")}
+                  bind:value={newEnvVarDraft.value}
+                  onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewEnvVar(); } }}
+                />
+                <label class="checkbox-label">
+                  <input type="checkbox" bind:checked={newEnvVarDraft.isSecret} /> {t("env.secret")}
+                </label>
+                <label class="checkbox-label" title={t("env.localHint")}>
+                  <input type="checkbox" bind:checked={newEnvVarDraft.isLocal} /> {t("env.local")}
+                </label>
+              </div>
+            </div>
+          {/if}
+        </div>
+      </section>
+    </div>
+  {/if}
+{:else if activeScreen === "git"}
+  {#if !activeWorkspaceId}
+    <div class="screen-empty">
+      <div class="empty-icon">{@render iconInboxEmpty()}</div>
+      <p>{t("rail.loading")}</p>
+    </div>
+  {:else}
+    <section class="screen-page">
+      <div class="screen-page-header">
+        <span class="screen-kicker">{t("git.title")}</span>
+        <div class="screen-title-row">
+          <h1 class="screen-title">{workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? t("workspace.defaultName")}</h1>
+        </div>
+        <p class="screen-subtitle">{t("git.workspaceScopeHint")}</p>
+      </div>
+
+      <div class="modal-tabs" style="flex:none; padding: 0 var(--space-6);">
+          <button
+            type="button"
+            class="modal-tab-btn"
+            class:active={gitActiveTab === "sync"}
+            onclick={() => (gitActiveTab = "sync")}
+          >
+            {t("git.repoSync")}
+          </button>
+          <button
+            type="button"
+            class="modal-tab-btn"
+            class:active={gitActiveTab === "conflicts"}
+            onclick={() => (gitActiveTab = "conflicts")}
+          >
+            {t("git.conflicts")}
+            {#if gitStatus?.has_conflicts}
+              <span class="tab-badge-alert">{gitStatus.conflict_files.length}</span>
+            {/if}
+          </button>
+          <button
+            type="button"
+            class="modal-tab-btn"
+            class:active={gitActiveTab === "github"}
+            onclick={() => (gitActiveTab = "github")}
+          >
+            {t("git.githubAuth")}
+          </button>
+          <button
+            type="button"
+            class="modal-tab-btn"
+            class:active={gitActiveTab === "projectfile"}
+            onclick={() => (gitActiveTab = "projectfile")}
+          >
+            {t("git.projectFile")}
+          </button>
+        </div>
+
+        <div class="screen-page-body">
+          {#if gitActionFeedback}
+            <div class="action-alert success">{gitActionFeedback}</div>
+          {/if}
+          {#if gitActionError}
+            <div class="action-alert error">{gitActionError}</div>
+          {/if}
+
+          {#if gitActiveTab === "sync"}
+            {#if legacyGitCandidates.length}
+              <div class="git-panel-section legacy-git-banner">
+                <h4>{t("git.legacyFoundTitle")}</h4>
+                <p class="hint">{t("git.legacyFoundHint")}</p>
+                <ul class="legacy-git-list">
+                  {#each legacyGitCandidates as candidate (candidate.project_id)}
+                    <li class="legacy-git-row">
+                      <div class="legacy-git-row-info">
+                        <strong>{candidate.project_name}</strong>
+                        <span class="hint">{candidate.settings.repo_path}</span>
+                      </div>
+                      <button type="button" class="btn-primary btn-xs" onclick={() => adoptLegacyGitSettings(candidate)}>{t("git.legacyUseThis")}</button>
+                    </li>
+                  {/each}
+                </ul>
+                <button type="button" class="btn-ghost btn-xs" onclick={dismissLegacyGitCandidates}>{t("git.legacyDismiss")}</button>
+              </div>
+            {/if}
+            <div class="git-panel-section">
+              <h4>{t("git.repositorySettings")}</h4>
+              <div class="form-row-stacked">
+                <label for="git-repo-path-input">{t("git.repoPathLabel")}</label>
+                <div class="input-with-actions">
+                  <input
+                    id="git-repo-path-input"
+                    type="text"
+                    placeholder={t("git.repoPathPlaceholder")}
+                    bind:value={gitRepoPathInput}
+                    class="path-input"
+                  />
+                  <button type="button" onclick={saveGitSettingsAction}>{t("git.savePath")}</button>
+                  <button type="button" onclick={() => refreshGitStatus()} disabled={!gitRepoPathInput.trim() || gitStatusLoading}>
+                    {gitStatusLoading ? t("git.checkingStatus") : t("git.checkStatus")}
+                  </button>
+                </div>
+                <p class="hint">{t("git.repoPathHint")}</p>
+              </div>
+
+              {#if !gitStatus || !gitStatus.is_repo}
+                <div class="alert-box-warning">
+                  <p><strong>{t("git.notARepoTitle")}</strong> {t("git.notARepoDesc")}</p>
+                  <button
+                    type="button"
+                    class="btn-primary"
+                    disabled={!gitRepoPathInput.trim() || gitLoading}
+                    onclick={initializeGitRepoAction}
+                  >
+                    {gitLoading ? t("git.initializing") : t("git.initializeRepo")}
+                  </button>
+                </div>
+              {:else}
+                <div class="git-status-card">
+                  <div class="status-summary-row">
+                    <span class="status-label">{t("git.branch")}</span>
+                    <strong>{gitStatus.branch}</strong>
+                    <span class="status-sep">|</span>
+                    <span class="status-label">{t("git.status")}</span>
+                    <span class="git-badge-kind kind-{gitStatus.status_kind}">{gitStatus.status_kind.toUpperCase()}</span>
+                    {#if gitStatus.ahead > 0}
+                      <span class="badge-ahead">{t("git.unpushed", { count: gitStatus.ahead })}</span>
+                    {/if}
+                    {#if gitStatus.behind > 0}
+                      <span class="badge-behind">{t("git.unpulled", { count: gitStatus.behind })}</span>
+                    {/if}
+                  </div>
+
+                  {#if gitStatus.staged_files.length > 0 || gitStatus.unstaged_files.length > 0 || gitStatus.untracked_files.length > 0}
+                    <div class="files-changed-summary">
+                      {#if gitStatus.staged_files.length > 0}
+                        <p class="file-category">{t("git.staged")} <code>{gitStatus.staged_files.join(", ")}</code></p>
+                      {/if}
+                      {#if gitStatus.unstaged_files.length > 0}
+                        <p class="file-category">{t("git.modified")} <code>{gitStatus.unstaged_files.join(", ")}</code></p>
+                      {/if}
+                      {#if gitStatus.untracked_files.length > 0}
+                        <p class="file-category">{t("git.untracked")} <code>{gitStatus.untracked_files.join(", ")}</code></p>
+                      {/if}
+                    </div>
+                  {:else}
+                    <p class="working-tree-clean">{t("git.workingTreeClean")}</p>
+                  {/if}
+                </div>
+
+                <div class="git-commit-box">
+                  <h4>{t("git.manualSync")}</h4>
+                  <div class="commit-input-row">
+                    <input
+                      type="text"
+                      placeholder={t("git.commitMessagePlaceholder")}
+                      bind:value={gitCommitMessage}
+                    />
+                    <button
+                      type="button"
+                      class="btn-primary"
+                      disabled={gitLoading}
+                      onclick={commitAndPushAction}
+                    >
+                      {gitLoading ? t("git.syncing") : t("git.commitPush")}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={gitLoading}
+                      onclick={pullRepositoryAction}
+                    >
+                      {gitLoading ? t("git.pulling") : t("git.pullRemote")}
+                    </button>
+                  </div>
+                  <div class="quick-git-actions">
+                    <button type="button" class="icon-btn-text" onclick={saveWorkspaceToRepoAction} disabled={gitLoading}>
+                      {t("git.saveProjectFile")}
+                    </button>
+                    <button type="button" class="icon-btn-text" onclick={viewDiffAction} disabled={gitLoading}>
+                      {t("git.viewDiff")}
+                    </button>
+                    <button type="button" class="icon-btn-text" onclick={viewHistoryAction} disabled={gitLoading}>
+                      {t("git.commitHistory")}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="auto-sync-box">
+                  <label class="checkbox-label">
+                    <input type="checkbox" bind:checked={gitAutoSyncInput} onchange={saveGitSettingsAction} />
+                    <strong>{t("git.enableAutoSync")}</strong>
+                  </label>
+                  <p class="hint">{t("git.autoSyncDesc")}</p>
+                  {#if gitSettings?.last_sync_at}
+                    <p class="hint">{t("git.lastSynced", { time: new Date(gitSettings.last_sync_at).toLocaleString() })}</p>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {:else if gitActiveTab === "conflicts"}
+            <div class="git-panel-section">
+              <h4>{t("git.conflictDetection")}</h4>
+              {#if !gitStatus?.has_conflicts || gitStatus.conflict_files.length === 0}
+                <div class="clean-box">
+                  <p>{t("git.noConflicts")}</p>
+                </div>
+              {:else}
+                <div class="conflict-alert-box">
+                  <p><strong>{t("git.conflictsDetectedTitle")}</strong> {t("git.conflictsDetectedDesc")}</p>
+                </div>
+                <div class="conflicts-list">
+                  {#each gitStatus.conflict_files as file}
+                    <div class="conflict-item-card">
+                      <div class="conflict-item-header">
+                        <span class="conflict-filename">{@render iconFileText()} {file}</span>
+                        <div class="conflict-choices">
+                          <button
+                            type="button"
+                            class="btn-choice"
+                            title={t("git.view3wayDiffTitle")}
+                            onclick={() => loadConflictVersions(file)}
+                          >
+                            {selectedConflictFile === file && conflictVersions ? t("git.viewing3wayDiff") : t("git.view3wayDiff")}
+                          </button>
+                          <button
+                            type="button"
+                            class="btn-choice local"
+                            title={t("git.keepLocalTitle")}
+                            onclick={() => { resolveConflictAction(file, "ours"); if (selectedConflictFile === file) { selectedConflictFile = null; conflictVersions = null; } }}
+                            disabled={gitLoading}
+                          >
+                            {t("git.keepLocal")}
+                          </button>
+                          <button
+                            type="button"
+                            class="btn-choice remote"
+                            title={t("git.keepRemoteTitle")}
+                            onclick={() => { resolveConflictAction(file, "theirs"); if (selectedConflictFile === file) { selectedConflictFile = null; conflictVersions = null; } }}
+                            disabled={gitLoading}
+                          >
+                            {t("git.keepRemote")}
+                          </button>
+                        </div>
+                      </div>
+                      <p class="hint">{t("git.conflictDecideHint")}</p>
+
+                      {#if selectedConflictFile === file}
+                        <div class="conflict-3way">
+                          {#if conflictVersionsLoading}
+                            <p class="hint">{t("git.loadingVersions")}</p>
+                          {:else if conflictVersions}
+                            <div class="conflict-3way-col">
+                              <span class="screen-kicker">{t("git.baseAncestor")}</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.base ?? t("git.noCommonAncestor")}</pre>
+                            </div>
+                            <div class="conflict-3way-col">
+                              <span class="screen-kicker">{t("git.localOurs")}</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.local ?? t("git.absentLocally")}</pre>
+                            </div>
+                            <div class="conflict-3way-col">
+                              <span class="screen-kicker">{t("git.remoteTheirs")}</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.remote ?? t("git.absentRemote")}</pre>
+                            </div>
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {:else if gitActiveTab === "github"}
+            <div class="git-panel-section">
+              <h4>{t("git.githubCollab")}</h4>
+              <p class="hint">{t("git.githubTokenDesc")}</p>
+
+              <div class="form-row-stacked">
+                <label for="github-pat-input">{t("git.patLabel")}</label>
+                <div class="input-with-actions">
+                  <input
+                    id="github-pat-input"
+                    type={githubShowToken ? "text" : "password"}
+                    placeholder="ghp_..."
+                    bind:value={githubTokenInput}
+                  />
+                  <button type="button" onclick={() => (githubShowToken = !githubShowToken)}>
+                    {githubShowToken ? t("git.hide") : t("git.show")}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-primary"
+                    disabled={!githubTokenInput.trim() || githubValidating}
+                    onclick={() => { saveGitSettingsAction(); verifyGitHubTokenAction(true); }}
+                  >
+                    {githubValidating ? t("git.verifying") : t("git.verifyToken")}
+                  </button>
+                </div>
+              </div>
+
+              {#if githubUser}
+                <div class="github-profile-card">
+                  {#if githubUser.avatar_url}
+                    <img src={githubUser.avatar_url} alt={githubUser.login} class="github-avatar" />
+                  {/if}
+                  <div class="github-profile-info">
+                    <strong>{githubUser.name ?? githubUser.login}</strong>
+                    <span class="hint">@{githubUser.login}</span>
+                    {#if githubUser.email}
+                      <span class="hint">{githubUser.email}</span>
+                    {/if}
+                  </div>
+                  <span class="badge badge-success">{t("git.authenticated")}</span>
+                </div>
+              {/if}
+
+              <div class="form-row-stacked">
+                <label for="git-remote-url-input">{t("git.remoteUrlLabel")}</label>
+                <div class="input-with-actions">
+                  <input
+                    id="git-remote-url-input"
+                    type="text"
+                    placeholder="https://github.com/owner/repository.git"
+                    bind:value={gitRemoteUrlInput}
+                  />
+                  <button type="button" onclick={saveGitSettingsAction}>{t("git.saveRemote")}</button>
+                  <button
+                    type="button"
+                    disabled={!githubTokenInput.trim() || !gitRemoteUrlInput.trim() || githubValidating}
+                    onclick={checkGitHubRepoAction}
+                  >
+                    {t("git.checkPermissions")}
+                  </button>
+                </div>
+              </div>
+
+              {#if githubRepoInfo}
+                <div class="repo-permissions-card">
+                  <h5>{t("git.repository", { name: githubRepoInfo.full_name })}</h5>
+                  <div class="perm-badges">
+                    <span class="perm-badge" class:perm-granted={githubRepoInfo.permissions?.pull}>
+                      {t("git.readPull", { state: githubRepoInfo.permissions?.pull ? t("git.granted") : t("git.denied") })}
+                    </span>
+                    <span class="perm-badge" class:perm-granted={githubRepoInfo.permissions?.push}>
+                      {t("git.writePush", { state: githubRepoInfo.permissions?.push ? t("git.granted") : t("git.denied") })}
+                    </span>
+                    <span class="perm-badge" class:perm-granted={githubRepoInfo.permissions?.admin}>
+                      {t("git.admin", { state: githubRepoInfo.permissions?.admin ? t("git.granted") : t("git.denied") })}
+                    </span>
+                  </div>
+                  <p class="hint">{t("git.defaultBranchLine", { branch: githubRepoInfo.default_branch, visibility: githubRepoInfo.private ? t("git.private") : t("git.public") })}</p>
+                </div>
+              {/if}
+            </div>
+          {:else if gitActiveTab === "projectfile"}
+            <div class="git-panel-section">
+              <h4>{t("git.canonicalFormat")}</h4>
+              <p class="hint">{t("git.canonicalFormatDesc")}</p>
+              {#if !selectedProjectId}
+                <p class="hint">{t("git.selectProjectFirst")}</p>
+              {/if}
+
+              <div class="projectfile-options">
+                <label class="checkbox-label">
+                  <input type="checkbox" bind:checked={projectFileMaskSecrets} />
+                  {t("git.maskSecrets")}
+                </label>
+                <button type="button" class="btn-primary" onclick={exportProjectFileAction} disabled={!selectedProjectId}>
+                  {t("git.generateJson")}
+                </button>
+              </div>
+
+              {#if projectFileJson}
+                <div class="json-preview-box">
+                  <div class="json-preview-toolbar">
+                    <span>light-postman.json</span>
+                    <div class="toolbar-actions">
+                      <button type="button" onclick={downloadProjectFile}>{t("git.downloadFile")}</button>
+                      <button type="button" onclick={importProjectFileAction}>{t("git.importIntoProject")}</button>
+                    </div>
+                  </div>
+                  <textarea rows="12" bind:value={projectFileJson} class="code-area"></textarea>
+                  {#if projectFileStatus}
+                    <p class="hint">{projectFileStatus}</p>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+    </section>
+  {/if}
+{:else if activeScreen === "import"}
+  <section class="screen-page">
+    <div class="screen-page-header">
+      <span class="screen-kicker">{t("import.title")}</span>
+      <h1 class="screen-title">{t("import.subtitle")}</h1>
+    </div>
+
+    <div class="modal-tabs" style="flex:none; padding: 0 var(--space-6);">
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "collection"} onclick={() => (importActiveTab = "collection")}>{t("import.tabCollection")}</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "environment"} onclick={() => (importActiveTab = "environment")}>{t("import.tabEnvironment")}</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "curl"} onclick={() => (importActiveTab = "curl")}>{t("import.tabCurl")}</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "localWorkspace"} onclick={() => (importActiveTab = "localWorkspace")}>{t("import.tabLocalWorkspace")}</button>
+    </div>
+
+    <div class="screen-page-body">
+      {#if importActiveTab === "collection"}
+        <p class="hint">{t("import.collectionHint")}</p>
+        <div class="file-dropzone">
+          <label class="file-label">
+            <span>{t("import.chooseJsonFile")}</span>
+            <input type="file" accept=".json,application/json" onchange={handleCollectionFileUpload} />
+          </label>
+        </div>
+        <textarea placeholder={t("import.pasteCollectionPlaceholder")} bind:value={collectionImportText} rows="6" class="body-input"></textarea>
+
+        {#if selectedProjectId}
+          <div class="radio-row">
+            <label class="radio-label">
+              <input type="radio" name="collectionTargetScreen" value="new" bind:group={collectionImportTarget} />
+              {t("import.newProject")}
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="collectionTargetScreen" value="current" bind:group={collectionImportTarget} />
+              {t("import.currentProject")}
+            </label>
+          </div>
+        {/if}
+
+        {#if collectionImportError}<p class="error">{collectionImportError}</p>{/if}
+
+        {#if collectionImportReport}
+          <div class="import-report-card">
+            <h4>{t("import.complete")}</h4>
+            <p>{t("import.project", { name: collectionImportReport.project_name })}</p>
+            <p>{t("import.requests", { count: collectionImportReport.requests_count })}</p>
+            <p>{t("import.variables", { count: collectionImportReport.variables_count })}</p>
+            <p>{t("import.sampleResponses", { count: collectionImportReport.sample_responses_count })}</p>
+            {#if collectionImportReport.warnings.length > 0}
+              <div class="warnings-box">
+                <h5>{t("import.compatNotes")}</h5>
+                <ul>
+                  {#each collectionImportReport.warnings as warn}<li>{warn}</li>{/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="params-row">
+          <button type="button" class="btn-primary" disabled={!collectionImportText.trim() || collectionImportLoading} onclick={importPostmanCollectionAction}>
+            {collectionImportLoading ? t("import.importing") : t("import.importCollection")}
+          </button>
+        </div>
+      {:else if importActiveTab === "environment"}
+        <p class="hint">{t("import.environmentHint")}</p>
+        <div class="file-dropzone">
+          <label class="file-label">
+            <span>{t("import.chooseJsonFile")}</span>
+            <input type="file" accept=".json,application/json" onchange={handleEnvironmentFileUpload} />
+          </label>
+        </div>
+        <textarea placeholder={t("import.pasteEnvironmentPlaceholder")} bind:value={environmentImportText} rows="4" class="body-input"></textarea>
+
+        {#if environmentImportError}<p class="error">{environmentImportError}</p>{/if}
+
+        {#if environmentImportReport}
+          <div class="import-report-card">
+            <h4>{t("import.environmentImported")}</h4>
+            <p>{t("import.environment", { name: environmentImportReport.environment_name })}</p>
+            <p>{t("import.variables", { count: environmentImportReport.variables_count })}</p>
+            {#if environmentImportReport.warnings.length > 0}
+              <div class="warnings-box">
+                <h5>{t("import.compatNotes")}</h5>
+                <ul>
+                  {#each environmentImportReport.warnings as warn}<li>{warn}</li>{/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="params-row">
+          <button type="button" class="btn-primary" disabled={!environmentImportText.trim() || environmentImportLoading} onclick={importPostmanEnvironmentAction}>
+            {environmentImportLoading ? t("import.importing") : t("import.importEnvironment")}
+          </button>
+        </div>
+      {:else if importActiveTab === "curl"}
+        <p class="hint">{t("import.curlHint")}</p>
+        {#if !selectedProjectId}
+          <p class="screen-empty-inline">{t("import.selectProjectFirst")}</p>
+        {:else}
+          <form onsubmit={importCurlCommand}>
+            <input placeholder={t("import.requestNamePlaceholder")} bind:value={curlImportName} />
+            <textarea
+              placeholder={t("import.curlPlaceholder")}
+              bind:value={curlImportText}
+              rows="6"
+              class="body-input"
+            ></textarea>
+            {#if curlImportError}<p class="error">{curlImportError}</p>{/if}
+            <div class="params-row">
+              <button type="submit" class="btn-primary">{t("import.importRequest")}</button>
+            </div>
+          </form>
+        {/if}
+      {:else if importActiveTab === "localWorkspace"}
+        <p class="hint">{t("import.localWorkspaceHint")}</p>
+        <input
+          type="text"
+          placeholder={t("import.localWorkspacePathPlaceholder")}
+          bind:value={localWorkspacePathInput}
+          class="url-input"
+        />
+
+        {#if localWorkspaceImportError}<p class="error">{localWorkspaceImportError}</p>{/if}
+
+        {#if localWorkspaceImportReport}
+          <div class="import-report-card">
+            <h4>{t("import.complete")}</h4>
+            <p>{t("import.localWorkspaceProjects", { count: localWorkspaceImportReport.projects_created })}</p>
+            <p>{t("import.localWorkspaceFolders", { count: localWorkspaceImportReport.folders_created })}</p>
+            <p>{t("import.requests", { count: localWorkspaceImportReport.requests_imported })}</p>
+            <p>{t("import.localWorkspaceSamples", { count: localWorkspaceImportReport.samples_imported })}</p>
+            <p>{t("import.localWorkspaceEnvironments", { count: localWorkspaceImportReport.environments_imported })}</p>
+            <p>{t("import.variables", { count: localWorkspaceImportReport.variables_imported })}</p>
+            {#if localWorkspaceImportReport.warnings.length > 0}
+              <div class="warnings-box">
+                <h5>{t("import.compatNotes")}</h5>
+                <ul>
+                  {#each localWorkspaceImportReport.warnings as warn}<li>{warn}</li>{/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="params-row">
+          <button
+            type="button"
+            class="btn-primary"
+            disabled={!localWorkspacePathInput.trim() || localWorkspaceImportLoading}
+            onclick={importLocalWorkspaceAction}
+          >
+            {localWorkspaceImportLoading ? t("import.importing") : t("import.importLocalWorkspace")}
+          </button>
+        </div>
+      {/if}
+    </div>
+  </section>
+{:else if activeScreen === "launcher"}
+  <section class="screen-page">
+    <div class="screen-page-header">
+      <span class="screen-kicker">{t("launcher.kicker")}</span>
+      <h1 class="screen-title">{t("launcher.title")}</h1>
+      <p class="screen-subtitle">{t("launcher.subtitle", { count: projects.length })}</p>
+    </div>
+
+    {#if projects.length === 0}
+      <div class="screen-empty">
+        <div class="empty-icon">{@render iconFolder()}</div>
+        <p>{t("launcher.noProjects")}</p>
+      </div>
+    {:else}
+      <div class="launcher-grid">
+        {#each projects as p (p.id)}
+          <button
+            type="button"
+            class="launcher-card"
+            class:active={p.id === selectedProjectId}
+            onclick={() => { selectProject(p.id); activeScreen = "workspace"; }}
+          >
+            <span class="screen-kicker" class:current={p.id === selectedProjectId}>{p.id === selectedProjectId ? t("launcher.openNow") : t("launcher.updated", { date: new Date(p.updated_at).toLocaleDateString() })}</span>
+            <div class="launcher-card-name">{p.name}</div>
+            <div class="hr"></div>
+            <div class="launcher-card-meta">
+              <span>{t("launcher.requestCount", { count: projectRequestCounts[p.id] ?? 0 })}</span>
+            </div>
+          </button>
+        {/each}
+      </div>
+    {/if}
+
+    <div class="screen-page-body" style="flex:none; display:flex; gap: var(--space-3);">
+      <button type="button" class="btn-primary" onclick={() => (activeScreen = "import")}>{t("launcher.importCollection")}</button>
+    </div>
+  </section>
+{:else if activeScreen === "history"}
+  {#if !selectedProjectId}
+    {@render noProjectPicker(t("rail.history"))}
+  {:else}
+    <section class="screen-page">
+      <div class="history-toolbar">
+        <span class="history-toolbar-project-label">{t("env.project")}</span>
+        {@render projectSwitcher()}
+        <div class="hr-v"></div>
+        <input class="history-search" placeholder={t("history.filterPlaceholder")} bind:value={historySearchQuery} />
+        <div class="hr-v"></div>
+        <span class="screen-empty-inline">{t("history.resultsCount", { shown: filteredProjectHistory.length, total: projectHistory.length })}</span>
+        <div class="response-stat-spacer"></div>
+        <button type="button" class="history-filter-chip" class:active={historyShowFailuresOnly} onclick={() => (historyShowFailuresOnly = !historyShowFailuresOnly)}>
+          {t("history.failuresOnly")}
+        </button>
+        <button type="button" class="btn-ghost btn-xs" onclick={refreshProjectHistory}>{t("history.refresh")}</button>
+      </div>
+
+      <div class="history-header-row">
+        <span>{t("history.colMethod")}</span>
+        <span>{t("history.colRequest")}</span>
+        <span>{t("history.colStatus")}</span>
+        <span>{t("history.colTime")}</span>
+        <span>{t("history.colWhen")}</span>
+      </div>
+
+      <div class="history-rows">
+        {#if historyLoading}
+          <p class="screen-empty-inline" style="padding: var(--space-4);">{t("history.loading")}</p>
+        {:else if filteredProjectHistory.length === 0}
+          <p class="screen-empty-inline" style="padding: var(--space-4);">
+            {projectHistory.length === 0 ? t("history.noRequestsSent") : t("history.noResultsMatch")}
+          </p>
+        {:else}
+          {#each filteredProjectHistory as h (h.id)}
+            <button
+              type="button"
+              class="history-row"
+              onclick={async () => { await openRequest(h.request_id); await openHistoryResponse(h.id); activeScreen = "workspace"; responseExpanded = true; }}
+            >
+              <span class="history-method">{h.method}</span>
+              <span class="history-path">{h.request_name} · {h.url}</span>
+              <span class:status-ok={h.status < 400} class:status-err={h.status >= 400}>{h.status}</span>
+              <span>{h.duration_ms} ms</span>
+              <span>{new Date(h.created_at).toLocaleString()}</span>
+            </button>
+          {/each}
+        {/if}
+      </div>
+    </section>
+  {/if}
+{:else if activeScreen === "settings"}
+  <section class="screen-page">
+    <div class="screen-page-header">
+      <span class="screen-kicker">{t("rail.settings")}</span>
+      <h1 class="screen-title">{t("settings.title")}</h1>
+      <p class="screen-subtitle">{t("settings.subtitle")}</p>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.autoSyncInterval")}</div>
+        <div class="screen-empty-inline">{t("settings.autoSyncHint")}</div>
+      </div>
+      <div class="seg">
+        {#each [[30000, "30s"], [60000, "60s"], [120000, "2m"], [300000, "5m"]] as [ms, label]}
+          <button type="button" class="seg-opt" class:active={autoSyncIntervalMs === ms} onclick={() => setAutoSyncIntervalMs(ms as number)}>{label}</button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.appearance")}</div>
+        <div class="screen-empty-inline">{t("settings.appearanceHint")}</div>
+      </div>
+      <div class="seg">
+        {#each THEME_OPTIONS as opt (opt.id)}
+          <button type="button" class="seg-opt" class:active={themeMode === opt.id} onclick={() => setThemeMode(opt.id)}>{t(opt.label)}</button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-block">
+      <p class="screen-subtitle">{t("theme.subtitle")}</p>
+      <div class="theme-compare">
+        {#each THEME_OPTIONS as opt (opt.id)}
+          <button type="button" class="theme-compare-col" class:active={themeMode === opt.id} onclick={() => setThemeMode(opt.id)}>
+            <div class="theme-compare-header">
+              <span class="screen-kicker">{t(opt.label)}</span>
+              {#if themeMode === opt.id}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
+            </div>
+            <div
+              class="theme-swatch"
+              data-theme={opt.id}
+              style="{surfaceStyleOverride(surfaceTint, opt.id)} {accentStyleOverride(accentColor)} {fontStyleOverride(headingFontOverride, bodyFontOverride)} {textColorStyleOverride(textColorOverride)}"
+            >
+              <div class="theme-swatch-topbar">
+                <span>{t("rail.brand")}</span>
+                <span class="theme-swatch-sync">SYNC</span>
+              </div>
+              <div class="theme-swatch-body">
+                <div class="theme-swatch-side">
+                  <div class="screen-kicker">Explorer</div>
+                  <div>List charges</div>
+                  <div>Create charge</div>
+                  <div class="theme-swatch-active">Refund charge</div>
+                </div>
+                <div class="theme-swatch-main">
+                  <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
+                  <div class="hr"></div>
+                  <div class="theme-swatch-status">200 OK</div>
+                  <div class="screen-empty-inline">214 ms · 1.2 KB</div>
+                </div>
+              </div>
+            </div>
+          </button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.accentColor")}</div>
+        <div class="screen-empty-inline">{t("settings.accentColorHint")}</div>
+      </div>
+      <div class="accent-picker">
+        {#each ACCENT_PRESETS as preset (preset.id)}
+          <button
+            type="button"
+            class="accent-swatch"
+            class:active={accentColor === preset.hex}
+            style="background: {preset.hex}"
+            title={t(`accent.${preset.id}`)}
+            onclick={() => setAccentColor(preset.hex)}
+          ></button>
+        {/each}
+        <label class="accent-swatch accent-swatch-custom" style={accentColor && !ACCENT_PRESETS.some((p) => p.hex === accentColor) ? `background: ${accentColor}` : ""} title={t("accent.custom")}>
+          <input type="color" value={accentColor ?? "#c1603f"} oninput={(e) => setAccentColor((e.currentTarget as HTMLInputElement).value)} />
+          {#if !accentColor || ACCENT_PRESETS.some((p) => p.hex === accentColor)}<span class="accent-swatch-plus">+</span>{/if}
+        </label>
+        {#if accentColor}
+          <button type="button" class="btn-ghost accent-reset" onclick={() => setAccentColor(null)}>{t("accent.reset")}</button>
+        {/if}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.surfaceTint")}</div>
+        <div class="screen-empty-inline">{surfaceTintAvailable ? t("settings.surfaceTintHint") : t("settings.surfaceTintUnavailable")}</div>
+      </div>
+      {#if surfaceTintAvailable}
+        <div class="accent-picker">
+          {#each SURFACE_TINTS as tint (tint.id)}
+            <button
+              type="button"
+              class="accent-swatch"
+              class:active={surfaceTint === tint.id}
+              style="background: {themeMode === 'dark' ? tint.dark.bg : tint.light.bg}"
+              title={t(`surfaceTint.${tint.id}`)}
+              onclick={() => setSurfaceTint(tint.id)}
+            ></button>
+          {/each}
+          <label class="accent-swatch accent-swatch-custom" style={isCustomSurfaceTint(surfaceTint) ? `background: ${surfaceTint}` : ""} title={t("accent.custom")}>
+            <input type="color" value={isCustomSurfaceTint(surfaceTint) ? surfaceTint : "#faf6ef"} oninput={(e) => setSurfaceTint((e.currentTarget as HTMLInputElement).value)} />
+            {#if !isCustomSurfaceTint(surfaceTint)}<span class="accent-swatch-plus">+</span>{/if}
+          </label>
+          {#if surfaceTint}
+            <button type="button" class="btn-ghost accent-reset" onclick={() => setSurfaceTint(null)}>{t("accent.reset")}</button>
+          {/if}
+        </div>
+      {/if}
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.headingFont")}</div>
+        <div class="screen-empty-inline">{t("settings.headingFontHint")}</div>
+      </div>
+      <select
+        class="url-input"
+        value={headingFontOverride ?? ""}
+        onchange={(e) => setHeadingFontOverride((e.currentTarget as HTMLSelectElement).value || null)}
+      >
+        <option value="">{t("settings.themeDefault")}</option>
+        {#each THEME_FONT_OPTIONS as font (font.id)}
+          <option value={font.id}>{font.label}</option>
+        {/each}
+      </select>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.bodyFont")}</div>
+        <div class="screen-empty-inline">{t("settings.bodyFontHint")}</div>
+      </div>
+      <select
+        class="url-input"
+        value={bodyFontOverride ?? ""}
+        onchange={(e) => setBodyFontOverride((e.currentTarget as HTMLSelectElement).value || null)}
+      >
+        <option value="">{t("settings.themeDefault")}</option>
+        {#each THEME_FONT_OPTIONS as font (font.id)}
+          <option value={font.id}>{font.label}</option>
+        {/each}
+      </select>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.textColor")}</div>
+        <div class="screen-empty-inline">{t("settings.textColorHint")}</div>
+        {#if textColorContrastWarning}<div class="warn-inline">{textColorContrastWarning}</div>{/if}
+      </div>
+      <div class="accent-picker">
+        <label class="accent-swatch accent-swatch-custom" style={textColorOverride ? `background: ${textColorOverride}` : ""} title={t("accent.custom")}>
+          <input type="color" value={textColorOverride ?? "#2b2620"} oninput={(e) => setTextColorOverride((e.currentTarget as HTMLInputElement).value)} />
+          {#if !textColorOverride}<span class="accent-swatch-plus">+</span>{/if}
+        </label>
+        {#if textColorOverride}
+          <button type="button" class="btn-ghost accent-reset" onclick={() => setTextColorOverride(null)}>{t("accent.reset")}</button>
+        {/if}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.uiScale")}</div>
+        <div class="screen-empty-inline">{t("settings.uiScaleHint")}</div>
+      </div>
+      <div class="seg">
+        {#each [[85, t("settings.scaleSmall")], [100, t("settings.scaleDefault")], [115, t("settings.scaleLarge")], [130, t("settings.scaleExtraLarge")]] as [pct, label]}
+          <button type="button" class="seg-opt" class:active={uiScale === pct} onclick={() => setUiScale(pct as number)}>{label}</button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.language")}</div>
+        <div class="screen-empty-inline">{t("settings.languageHint")}</div>
+      </div>
+      <div class="seg">
+        <button type="button" class="seg-opt" class:active={locale === "en"} onclick={() => setLocale("en")}>{t("settings.languageEnglish")}</button>
+        <button type="button" class="seg-opt" class:active={locale === "ar"} onclick={() => setLocale("ar")}>{t("settings.languageArabic")}</button>
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.shortcuts")}</div>
+        <div class="screen-empty-inline">{t("settings.shortcutsHint")}</div>
+      </div>
+      <div class="shortcuts-list">
+        {#each SHORTCUT_DEFS as def (def.id)}
+          <label class="shortcut-toggle-row">
+            <input
+              type="checkbox"
+              checked={shortcutsEnabled[def.id]}
+              onchange={(e) => setShortcutEnabled(def.id, (e.target as HTMLInputElement).checked)}
+            />
+            <span class="shortcut-label">{t(def.label)}</span>
+            <kbd class="shortcut-keys">{def.keys}</kbd>
+          </label>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.responseMemory")}</div>
+        <div class="screen-empty-inline">{t("settings.responseMemoryHint")}</div>
+      </div>
+      <div class="settings-screen-row-value">256 KB</div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.scriptTimeout")}</div>
+        <div class="screen-empty-inline">{t("settings.scriptTimeoutHint")}</div>
+      </div>
+      <div class="settings-screen-row-value">1.5s / 2s</div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.responseCache")}</div>
+        <div class="screen-empty-inline">{t("settings.responseCacheHint")}</div>
+      </div>
+      <div class="settings-screen-row-value">{t("settings.none")}</div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.historyRetention")}</div>
+        <div class="screen-empty-inline">{t("settings.historyRetentionHint")}</div>
+      </div>
+      <div class="settings-screen-row-value">{t("settings.unbounded")}</div>
+    </div>
+
+    {#if systemDiagnostics}
+      <div class="settings-screen-row">
+        <div>
+          <div class="settings-screen-row-label">{t("settings.currentProcess")}</div>
+          <div class="screen-empty-inline">{t("settings.currentProcessHint")}</div>
+        </div>
+        <div class="settings-screen-diagnostics-grid">
+          <span>{t("settings.memoryRss")}</span><strong>{formatByteSize(systemDiagnostics.process_rss_bytes)}</strong>
+          <span>{t("settings.database")}</span><strong>{formatByteSize(systemDiagnostics.db_size_bytes)}</strong>
+          <span>{t("settings.walFile")}</span><strong>{formatByteSize(systemDiagnostics.db_wal_size_bytes)}</strong>
+          <span>{t("settings.projects")}</span><strong>{systemDiagnostics.total_projects}</strong>
+          <span>{t("settings.requests")}</span><strong>{systemDiagnostics.total_requests}</strong>
+          <span>{t("settings.responsesStored")}</span><strong>{systemDiagnostics.total_responses}</strong>
+          <span>{t("settings.consoleEvents")}</span><strong>{systemDiagnostics.console_events_count}</strong>
+          <span>{t("settings.uptime")}</span><strong>{Math.floor(systemDiagnostics.uptime_seconds / 60)} min</strong>
+        </div>
+      </div>
+    {/if}
+  </section>
+{/if}
+  </div>
+
+  {#if paletteOpen}
+    <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closePalette(); }} onkeydown={(e) => { if (e.key === "Escape") closePalette(); }} role="dialog" aria-modal="true" tabindex="0">
+      <div class="palette">
+        <div class="palette-header">
+          <span class="screen-kicker">{t("palette.goTo")}</span>
+          <input class="palette-input" placeholder={t("palette.placeholder")} bind:value={paletteQuery} bind:this={paletteInputEl} />
+        </div>
+        <div class="palette-results">
+          {#each paletteItems as p, i (i)}
+            <button type="button" class="palette-item" onclick={p.onSelect}>
+              <span class="palette-item-method">{p.method ?? ""}</span>
+              <span class="palette-item-label">{p.label}</span>
+              <div class="response-stat-spacer"></div>
+              <span class="palette-item-hint">{p.hint}</span>
+            </button>
+          {:else}
+            <p class="screen-empty-inline">{t("palette.noMatches")}</p>
+          {/each}
+        </div>
+        <div class="palette-footer">
+          <span>{t("palette.openHint")}</span>
+          <span>{t("palette.dismissHint")}</span>
+        </div>
+      </div>
+    </div>
+  {/if}
+</div>
+
+<style>
+  /* "Softline" design system: warm parchment/ink grounds, soft rounded corners, a serif display
+     face (Newsreader) paired with a humanist sans (Work Sans) for UI text, hairline borders over
+     the old system's strong 2px architectural rules. Replaces the previous "Modernist" palette
+     (flat, zero-radius, Archivo) wholesale through the same custom-property names, so the remap
+     alone repaints the whole app. Light is the system's own default (not an OS-follow); dark is
+     a real, deliberate alternate palette toggled via `data-theme` — a dark espresso ground with
+     the same warm hue family, accents lifted one step for contrast.
+     Terracotta (--color-primary/--color-accent) is reserved for primary actions and the
+     active-nav mark only — it no longer doubles as danger or "no color" success, and HTTP
+     methods get their own hues (below) instead of staying flat ink, so a dense request list
+     stays scannable at the scale this app targets (thousands of requests).
+     Two further themes, "terminal" and "blueprint" (below the light/dark pair), swap the whole
+     structural language, not just color — different fonts, radius and rule-weight — so each
+     carries its own font/radius/shadow declarations instead of only colors. */
+  /* Self-hosted (LP-1403) — was a Google Fonts @import, which made this "local-first,
+     offline storage" app require network access just to render its own UI correctly on
+     first paint. These are the same five families/weights, downloaded once into
+     static/fonts/ (latin + latin-ext subsets only — Arabic UI text already falls back to
+     system-ui below, since none of these families cover Arabic glyphs either way). Several
+     collapse to one variable-font file across their whole weight range, so this is 14 files,
+     not the 20 the original @import weight list implied. */
+  @font-face {
+    font-family: 'Newsreader';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url('/fonts/newsreader-normal-400-800-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Newsreader';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url('/fonts/newsreader-normal-400-800-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Newsreader';
+    font-style: italic;
+    font-weight: 500 600;
+    font-display: swap;
+    src: url('/fonts/newsreader-italic-500-600-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Newsreader';
+    font-style: italic;
+    font-weight: 500 600;
+    font-display: swap;
+    src: url('/fonts/newsreader-italic-500-600-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Work Sans';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url('/fonts/work-sans-normal-400-700-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Work Sans';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url('/fonts/work-sans-normal-400-700-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url('/fonts/jetbrains-mono-normal-400-700-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url('/fonts/jetbrains-mono-normal-400-700-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Space Grotesk';
+    font-style: normal;
+    font-weight: 500 700;
+    font-display: swap;
+    src: url('/fonts/space-grotesk-normal-500-700-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Space Grotesk';
+    font-style: normal;
+    font-weight: 500 700;
+    font-display: swap;
+    src: url('/fonts/space-grotesk-normal-500-700-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Space Mono';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/fonts/space-mono-normal-400-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Space Mono';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/fonts/space-mono-normal-400-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Space Mono';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('/fonts/space-mono-normal-700-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Space Mono';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('/fonts/space-mono-normal-700-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+
+  :root {
+    --color-bg: #faf6ef;
+    --color-bg-secondary: #fff9f0;
+    --color-bg-tertiary: #f4ead9;
+    --color-bg-hover: color-mix(in srgb, #2b2620 6%, transparent);
+    --color-sidebar-bg: #fff9f0;
+    --color-panel-bg: #fff9f0;
+    --color-border: #ecdfd0;
+    --color-border-strong: color-mix(in srgb, #2b2620 22%, transparent);
+    --color-text: #2b2620;
+    --color-text-secondary: #6b5f4e;
+    --color-text-tertiary: #7b7060;
+    --color-primary: #b3593b;
+    --color-primary-hover: #984c32;
+    --color-primary-contrast: #fff9f0;
+    --color-accent: #b3593b;
+    --color-accent-hover: #984c32;
+    --color-accent-contrast: #fff9f0;
+    --color-success: #4d7a3f;
+    --color-success-bg: #e4f1e0;
+    --color-danger: #b0453f;
+    --color-danger-bg: #fbe1e1;
+    --color-warn: #8e6a1b;
+    --color-warn-bg: #fbecd2;
+    --color-focus: #b3593b;
+
+    /* Each HTTP method gets its own hue so a dense request list is scannable at a glance.
+       GET/DELETE deliberately reuse --color-success/--color-danger (read=safe, delete=danger
+       are the same signal in both places); the rest fill out the set without inventing
+       unrelated colors. */
+    --method-get: var(--color-success);
+    --method-post: #8e6a1b;
+    --method-put: #3a6d9c;
+    --method-patch: #327c7c;
+    --method-delete: var(--color-danger);
+    --method-head: #7c5aa6;
+    --method-options: #6b5f4e;
+    --method-trace: #7e6f54;
+
+    /* JSON response/body syntax highlighting — independent from the method/status palette above
+       so the two can evolve separately even though a couple of hues are shared by coincidence. */
+    --json-key: #8e6a1b;
+    --json-string: #4d7a3f;
+    --json-number: #7c5aa6;
+    --json-boolean: #3a6d9c;
+    --json-null: #7b7060;
+
+    /* Tonal ramps — warm parchment/ink steps: light (100-300) for tinted fills/hovers, 500 as a
+       role's base, dark (700-900) for text on tinted fills. */
+    --color-neutral-100: #fff9f0;
+    --color-neutral-200: #f4ead9;
+    --color-neutral-300: #ecdfd0;
+    --color-neutral-400: #d8cbb4;
+    --color-neutral-500: #a3937d;
+    --color-neutral-600: #9a8c78;
+    --color-neutral-700: #6b5f4e;
+    --color-neutral-800: #453c30;
+    --color-neutral-900: #2b2620;
+    --color-accent-100: #fdf1ea;
+    --color-accent-200: #fce0d0;
+    --color-accent-300: #f7c3a3;
+    --color-accent-400: #e8936a;
+    --color-accent-500: #c1603f;
+    --color-accent-600: #a84f32;
+    --color-accent-700: #833d27;
+    --color-accent-800: #5f2c1c;
+    --color-accent-900: #3d1c13;
+
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-6: 24px;
+    --space-8: 32px;
+
+    /* Type scale — every font-size in this file resolves to one of these 9 steps (collapsed
+       down from ~22 ad hoc one-off values). Root font-size is 12.5px, not the browser's 16px
+       default, so these rem values render smaller than they'd look in a typical stylesheet —
+       intentional, matches the information-dense reference tools (VS Code, DevTools), not a
+       bug to "fix" by inflating the base size. */
+    --text-2xs: 0.65rem;
+    --text-xs: 0.7rem;
+    --text-sm: 0.76rem;
+    --text-base: 0.8rem;
+    --text-md: 0.9rem;
+    --text-lg: 1.05rem;
+    --text-xl: 1.3rem;
+    --text-2xl: 2rem;
+    --text-3xl: 2.5rem;
+
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --shadow-sm: 0 1px 2px color-mix(in srgb, #3a2f22 12%, transparent);
+    --shadow-md: 0 10px 28px color-mix(in srgb, #3a2f22 14%, transparent);
+    --shadow-lg: 0 24px 56px color-mix(in srgb, #3a2f22 20%, transparent);
+    --font-sans: "Work Sans", system-ui, sans-serif;
+    --font-heading: "Newsreader", Georgia, serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    /* Width of the "strong" structural rules (rail edges, panel dividers) — 1px hairline by
+       default; the blueprint theme below lifts this back to a bold 2px. */
+    --border-strong-width: 1px;
+
+    color-scheme: light;
+    color: var(--color-text);
+    background: var(--color-bg);
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+  }
+
+  /* Not scoped to :root — also applies to nested [data-theme="dark"] elements (the Theme
+     screen's side-by-side comparison swatches), since custom properties inherit normally. */
+  [data-theme="dark"] {
+    --color-bg: #201a14;
+    --color-bg-secondary: #2b2219;
+    --color-bg-tertiary: #362b1e;
+    --color-bg-hover: color-mix(in srgb, #f7ecdc 8%, transparent);
+    --color-sidebar-bg: #201a14;
+    --color-panel-bg: #2b2219;
+    --color-border: #3d3223;
+    --color-border-strong: color-mix(in srgb, #f7ecdc 25%, transparent);
+    --color-text: #f7ecdc;
+    --color-text-secondary: #c9b89e;
+    --color-text-tertiary: #a3907a;
+    --color-primary: #e2835f;
+    --color-primary-hover: #ef9c7a;
+    --color-primary-contrast: #201a14;
+    --color-accent: #e2835f;
+    --color-accent-hover: #ef9c7a;
+    --color-accent-contrast: #201a14;
+    --color-success: #86cf72;
+    --color-success-bg: color-mix(in srgb, #86cf72 16%, transparent);
+    --color-danger: #e2796f;
+    --color-danger-bg: color-mix(in srgb, #e2796f 16%, transparent);
+    --color-warn: #d9a441;
+    --color-warn-bg: color-mix(in srgb, #d9a441 16%, transparent);
+    --color-focus: #e2835f;
+
+    --method-get: var(--color-success);
+    --method-post: #d9a441;
+    --method-put: #7fb0d9;
+    --method-patch: #6cc9c7;
+    --method-delete: var(--color-danger);
+    --method-head: #b79bdb;
+    --method-options: #c9b89e;
+    --method-trace: #c2ac82;
+
+    --json-key: #7fb0d9;
+    --json-string: #9adb85;
+    --json-number: #c6a8e8;
+    --json-boolean: #6cc9c7;
+    --json-null: #a3907a;
+
+    color-scheme: dark;
+  }
+
+  /* Mirrors the :root light values, scoped so a nested [data-theme="light"] element (the Theme
+     screen's comparison swatch) resets back to light even while the app itself is on dark. */
+  [data-theme="light"] {
+    --color-bg: #faf6ef;
+    --color-bg-secondary: #fff9f0;
+    --color-bg-tertiary: #f4ead9;
+    --color-bg-hover: color-mix(in srgb, #2b2620 6%, transparent);
+    --color-sidebar-bg: #fff9f0;
+    --color-panel-bg: #fff9f0;
+    --color-border: #ecdfd0;
+    --color-border-strong: color-mix(in srgb, #2b2620 22%, transparent);
+    --color-text: #2b2620;
+    --color-text-secondary: #6b5f4e;
+    --color-text-tertiary: #7b7060;
+    --color-primary: #b3593b;
+    --color-primary-hover: #984c32;
+    --color-primary-contrast: #fff9f0;
+    --color-accent: #b3593b;
+    --color-accent-hover: #984c32;
+    --color-accent-contrast: #fff9f0;
+    --color-success: #4d7a3f;
+    --color-success-bg: #e4f1e0;
+    --color-danger: #b0453f;
+    --color-danger-bg: #fbe1e1;
+    --color-warn: #8e6a1b;
+    --color-warn-bg: #fbecd2;
+    --color-focus: #b3593b;
+
+    --method-get: var(--color-success);
+    --method-post: #8e6a1b;
+    --method-put: #3a6d9c;
+    --method-patch: #327c7c;
+    --method-delete: var(--color-danger);
+    --method-head: #7c5aa6;
+    --method-options: #6b5f4e;
+    --method-trace: #7e6f54;
+
+    --json-key: #8e6a1b;
+    --json-string: #4d7a3f;
+    --json-number: #7c5aa6;
+    --json-boolean: #3a6d9c;
+    --json-null: #7b7060;
+
+    color-scheme: light;
+  }
+
+  /* "Terminal" — a dark, monospace dev-console alternate: quiet bracket-style chrome, zero
+     radius, a single teal accent. Overrides font/radius/shadow/rule-weight too, not just color,
+     since its structural language is genuinely different from the light/dark Softline pair. */
+  [data-theme="terminal"] {
+    --color-bg: #0b0f0e;
+    --color-bg-secondary: #0e1312;
+    --color-bg-tertiary: #131a18;
+    --color-bg-hover: color-mix(in srgb, #dceee6 8%, transparent);
+    --color-sidebar-bg: #0e1312;
+    --color-panel-bg: #0e1312;
+    --color-border: #23302c;
+    --color-border-strong: color-mix(in srgb, #dceee6 22%, transparent);
+    --color-text: #dceee6;
+    --color-text-secondary: #93b3a8;
+    --color-text-tertiary: #6f8a80;
+    --color-primary: #5eead4;
+    --color-primary-hover: #99f6e4;
+    --color-primary-contrast: #05201b;
+    --color-accent: #5eead4;
+    --color-accent-hover: #99f6e4;
+    --color-accent-contrast: #05201b;
+    --color-success: #5eead4;
+    --color-success-bg: color-mix(in srgb, #5eead4 16%, transparent);
+    --color-danger: #fb7185;
+    --color-danger-bg: color-mix(in srgb, #fb7185 16%, transparent);
+    --color-warn: #f2c14e;
+    --color-warn-bg: color-mix(in srgb, #f2c14e 16%, transparent);
+    --color-focus: #5eead4;
+
+    --method-get: var(--color-success);
+    --method-post: #f2c14e;
+    --method-put: #7dd3fc;
+    --method-patch: #5fd0c8;
+    --method-delete: var(--color-danger);
+    --method-head: #b98ff0;
+    --method-options: #93b3a8;
+    --method-trace: #8a9a8f;
+
+    --json-key: #5eead4;
+    --json-string: #a7f3d0;
+    --json-number: #c4b5fd;
+    --json-boolean: #f2c14e;
+    --json-null: #6f8a80;
+
+    --radius-sm: 0px;
+    --radius-md: 0px;
+    --radius-lg: 0px;
+    --shadow-sm: 0 1px 2px color-mix(in srgb, #000000 30%, transparent);
+    --shadow-md: 0 6px 20px color-mix(in srgb, #000000 40%, transparent);
+    --shadow-lg: 0 16px 40px color-mix(in srgb, #000000 50%, transparent);
+    --font-sans: "JetBrains Mono", ui-monospace, monospace;
+    --font-heading: "JetBrains Mono", ui-monospace, monospace;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --border-strong-width: 1px;
+
+    color-scheme: dark;
+  }
+
+  /* "Blueprint" — a light, technical-schematic alternate: pale grid-paper ground, bold black
+     rules, a single blue accent, Space Grotesk/Mono throughout. */
+  [data-theme="blueprint"] {
+    --color-bg: #eef2f6;
+    --color-bg-secondary: #f6f8fa;
+    --color-bg-tertiary: #e4e9ef;
+    --color-bg-hover: color-mix(in srgb, #14202f 6%, transparent);
+    --color-sidebar-bg: #f6f8fa;
+    --color-panel-bg: #ffffff;
+    --color-border: #cfd8e2;
+    --color-border-strong: color-mix(in srgb, #14202f 85%, transparent);
+    --color-text: #14202f;
+    --color-text-secondary: #5b6b80;
+    --color-text-tertiary: #666e78;
+    --color-primary: #2554e6;
+    --color-primary-hover: #1a3fb8;
+    --color-primary-contrast: #ffffff;
+    --color-accent: #2554e6;
+    --color-accent-hover: #1a3fb8;
+    --color-accent-contrast: #ffffff;
+    --color-success: #1a7a3d;
+    --color-success-bg: color-mix(in srgb, #1a7a3d 14%, transparent);
+    --color-danger: #c22b4d;
+    --color-danger-bg: color-mix(in srgb, #c22b4d 14%, transparent);
+    --color-warn: #99630b;
+    --color-warn-bg: color-mix(in srgb, #a3690c 14%, transparent);
+    --color-focus: #2554e6;
+
+    --method-get: var(--color-success);
+    --method-post: #99630b;
+    --method-put: var(--color-accent);
+    --method-patch: #0f7986;
+    --method-delete: var(--color-danger);
+    --method-head: #7c3aed;
+    --method-options: #5b6b80;
+    --method-trace: #796b51;
+
+    --json-key: #2554e6;
+    --json-string: #1a7a3d;
+    --json-number: #7c3aed;
+    --json-boolean: #99630b;
+    --json-null: #666e78;
+
+    --radius-sm: 0px;
+    --radius-md: 0px;
+    --radius-lg: 0px;
+    --shadow-sm: none;
+    --shadow-md: none;
+    --shadow-lg: none;
+    --font-sans: "Space Grotesk", system-ui, sans-serif;
+    --font-heading: "Space Grotesk", system-ui, sans-serif;
+    --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --border-strong-width: 2px;
+
+    color-scheme: light;
+  }
+
+  /* Faint graph-paper grid, only for the blueprint theme's own "technical schematic" identity —
+     everywhere else the canvas stays a flat fill. */
+  .app-shell[data-theme="blueprint"] {
+    background-image:
+      repeating-linear-gradient(0deg, rgba(20, 32, 47, 0.06) 0 1px, transparent 1px 24px),
+      repeating-linear-gradient(90deg, rgba(20, 32, 47, 0.06) 0 1px, transparent 1px 24px);
+  }
+
+  :global(body) {
+    margin: 0;
+    background: var(--color-bg);
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  /* Icon library sizing — every icon scales with its own context's font-size (and therefore
+     with `uiScale`, same as the rest of the app's rem-based sizing) instead of a fixed px size. */
+  .icon {
+    width: 1em;
+    height: 1em;
+    flex: none;
+    vertical-align: -0.125em;
+  }
+
+  .app-shell {
+    display: flex;
+    height: 100vh;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+  }
+
+  .screens-rail {
+    width: 220px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    border-right: var(--border-strong-width) solid var(--color-border-strong);
+    background: var(--color-bg);
+    overflow: hidden;
+    transition: width 0.15s ease;
+  }
+
+  .screens-rail.collapsed {
+    width: 52px;
+  }
+
+  .rail-brand {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-3) var(--space-3) var(--space-4);
+    font-family: var(--font-heading);
+    font-style: italic;
+    font-weight: 600;
+    font-size: var(--text-lg);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .screens-rail.collapsed .rail-brand {
+    justify-content: center;
+    padding: var(--space-4) var(--space-2) var(--space-3) var(--space-2);
+  }
+
+  .rail-screens {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .rail-screen {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-left: 4px solid transparent;
+    padding: 0.65rem var(--space-4);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .screens-rail.collapsed .rail-screen {
+    justify-content: center;
+    padding: 0.65rem 0;
+  }
+
+  .rail-screen-icon {
+    font-size: var(--text-lg);
+    flex: none;
+  }
+
+  .rail-screen-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .rail-screen:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .rail-screen.active {
+    background: var(--color-bg-secondary);
+    border-left-color: var(--color-accent);
+    font-weight: 800;
+  }
+
+  .rail-budget {
+    flex: none;
+    border-top: var(--border-strong-width) solid var(--color-border-strong);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .rail-budget-label {
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
+  }
+
+  .rail-budget-value {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-lg);
+  }
+
+  .rail-budget-meta {
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+  }
+
+  .screen-area {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    font-family: var(--font-sans);
+    color: var(--color-text);
+    background: var(--color-bg);
+    overflow: hidden;
+  }
+
+  /* — Generic full-page screens (Response/Environments/Git/Import/Launcher/History/
+     Settings/Theme) — one consistent kicker+title header pattern, reused everywhere. — */
+  .screen-page {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .screen-page-header {
+    flex: none;
+    padding: var(--space-8) var(--space-6) var(--space-4);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .screen-kicker {
+    display: block;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
+    margin-bottom: 4px;
+  }
+
+  .screen-title-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .project-picker-select {
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+  }
+
+  .project-picker-select-sm {
+    font-size: var(--text-sm);
+    padding: 0.25rem 0.4rem;
+  }
+
+  .screen-title {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-2xl);
+    line-height: 1.1;
+    margin: 0;
+  }
+
+  .screen-subtitle {
+    font-size: var(--text-md);
+    color: var(--color-text-secondary);
+    max-width: 640px;
+    margin-top: 4px;
+  }
+
+  /* Same icon-over-message shape as .empty-state (main workspace/response empty states) — this
+     variant doesn't need flex:1 on a parent, since it centers its own content regardless of
+     what container it's dropped into (a screen-page section, not always a flex column). */
+  .screen-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-8) var(--space-6);
+    color: var(--color-text-tertiary);
+    font-size: var(--text-md);
+    text-align: center;
+  }
+
+  .screen-empty-inline {
+    color: var(--color-text-tertiary);
+    font-size: var(--text-base);
+  }
+
+  .screen-page-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--space-6);
+  }
+
+  /* — Environments screen — */
+  .env-screen {
+    height: 100%;
+    display: flex;
+  }
+
+  .env-screen-side {
+    width: 260px;
+    flex: none;
+    border-right: var(--border-strong-width) solid var(--color-border-strong);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .env-screen-side-header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-4) var(--space-3);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .env-screen-project-row {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .env-screen-project-label {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-tertiary);
+  }
+
+  .env-screen-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .env-screen-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-left: 4px solid transparent;
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--space-3) var(--space-4);
+    font: inherit;
+    font-size: var(--text-base);
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .env-screen-item:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .env-screen-item.active {
+    background: var(--color-bg-secondary);
+    border-left-color: var(--color-accent);
+    font-weight: 800;
+  }
+
+  .env-screen-item-row {
+    display: flex;
+    align-items: center;
+    border-left: 4px solid transparent;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .env-screen-group-label {
+    padding: var(--space-2) var(--space-3) 2px;
+    font-size: var(--text-2xs);
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
+  }
+
+  .env-screen-item-row:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .env-screen-item-row:hover .icon-btn-ghost,
+  .env-screen-item-row:focus-within .icon-btn-ghost {
+    display: inline-block;
+  }
+
+  .env-screen-item-row.active {
+    background: var(--color-bg-secondary);
+    border-left-color: var(--color-accent);
+  }
+
+  .env-screen-item-row.active .env-screen-item {
+    font-weight: 800;
+  }
+
+  .env-screen-item-row .env-screen-item {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    padding: var(--space-3) var(--space-2) var(--space-3) calc(var(--space-4) - 4px);
+  }
+
+  .env-screen-item-row .icon-btn-ghost {
+    flex: none;
+    margin-right: var(--space-2);
+  }
+
+  .env-screen-rename-form {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .hr {
+    height: 2px;
+    border: 0;
+    margin: var(--space-3) 0;
+    background: var(--color-border-strong);
+  }
+
+  /* — Launcher screen — */
+  .launcher-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .launcher-card {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--space-4);
+    cursor: pointer;
+    font: inherit;
+    color: var(--color-text);
+  }
+
+  .launcher-card:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .launcher-card.active {
+    background: var(--color-bg-secondary);
+  }
+
+  .screen-kicker.current {
+    color: var(--color-accent-700);
+  }
+
+  .launcher-card-name {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-lg);
+    margin: 2px 0 4px;
+  }
+
+  .launcher-card-meta {
+    display: flex;
+    gap: var(--space-3);
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+  }
+
+  .history-toolbar-project-label {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-tertiary);
+  }
+
+  /* — History screen — */
+  .history-toolbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-6);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .history-search {
+    flex: none;
+    width: 360px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+    padding: 0.4rem 0.6rem;
+    font: inherit;
+    font-size: var(--text-base);
+    color: var(--color-text);
+  }
+
+  .hr-v {
+    width: 2px;
+    height: 22px;
+    background: var(--color-border-strong);
+  }
+
+  .history-filter-chip {
+    font-size: var(--text-xs);
+    font-weight: 800;
+    padding: 5px 10px;
+    border: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .history-filter-chip.active {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    color: var(--color-accent-contrast);
+  }
+
+  .history-header-row,
+  .history-row {
+    display: grid;
+    grid-template-columns: 70px 2fr 80px 90px 160px;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-6);
+  }
+
+  .history-header-row {
+    flex: none;
+    font-size: var(--text-2xs);
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .history-rows {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .history-row {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    font: inherit;
+    font-size: var(--text-base);
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .history-row:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .history-method {
+    font-size: var(--text-xs);
+    font-weight: 800;
+    letter-spacing: 0.04em;
+  }
+
+  .history-path {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* — Settings screen — */
+  .settings-screen-row {
+    display: grid;
+    grid-template-columns: 1.3fr 1.6fr;
+    align-items: center;
+    gap: var(--space-6);
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .settings-screen-row-label {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-md);
+    margin-bottom: 2px;
+  }
+
+  .settings-screen-block {
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .settings-screen-row-value {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-md);
+    color: var(--color-text-secondary);
+  }
+
+  .settings-screen-diagnostics-grid {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    row-gap: 4px;
+    column-gap: var(--space-3);
+    font-size: var(--text-base);
+  }
+
+  .settings-screen-diagnostics-grid span {
+    color: var(--color-text-tertiary);
+  }
+
+  .seg {
+    display: flex;
+    width: 100%;
+    overflow: hidden;
+    border: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .seg-opt {
+    display: inline-flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 12px;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    border-left: var(--border-strong-width) solid var(--color-border-strong);
+    color: var(--color-text);
+    font-family: inherit;
+  }
+
+  .seg-opt:first-child {
+    border-left: none;
+  }
+
+  .seg-opt.active {
+    background: var(--color-accent);
+    color: var(--color-accent-contrast);
+  }
+
+  .seg-opt:not(.active):hover {
+    background: var(--color-bg-hover);
+  }
+
+  .shortcuts-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .shortcut-toggle-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-base);
+    cursor: pointer;
+  }
+
+  .shortcut-label {
+    flex: 1;
+  }
+
+  .shortcut-keys {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 2px 6px;
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    background: var(--color-bg-secondary);
+    color: var(--color-text-secondary);
+  }
+
+  /* — Theme screen — */
+  .theme-compare {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    padding: var(--space-6);
+    gap: var(--space-6);
+  }
+
+  .theme-compare-col {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 2px solid transparent;
+    padding: var(--space-3);
+    margin: calc(var(--space-3) * -1);
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .theme-compare-col:hover {
+    border-color: var(--color-border);
+  }
+
+  .theme-compare-col.active {
+    border-color: var(--color-accent);
+  }
+
+  .theme-active-badge {
+    font-size: var(--text-2xs);
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-accent-700);
+    border: 1px solid var(--color-accent);
+    padding: 2px 8px;
+  }
+
+  .theme-compare-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-3);
+  }
+
+  .accent-picker {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .accent-swatch {
+    width: 1.7rem;
+    height: 1.7rem;
+    flex: none;
+    border-radius: 999px;
+    border: var(--border-strong-width) solid transparent;
+    box-shadow: 0 0 0 1px var(--color-border);
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .accent-swatch.active {
+    border-color: var(--color-text);
+  }
+
+  .accent-swatch-custom {
+    position: relative;
+    background: var(--color-bg-tertiary);
+    overflow: hidden;
+  }
+
+  .accent-swatch-custom input[type="color"] {
+    position: absolute;
+    inset: -4px;
+    width: calc(100% + 8px);
+    height: calc(100% + 8px);
+    padding: 0;
+    border: none;
+    cursor: pointer;
+    opacity: 0;
+  }
+
+  .accent-swatch-plus {
+    pointer-events: none;
+    color: var(--color-text-secondary);
+    font-size: var(--text-md);
+    line-height: 1;
+  }
+
+  .accent-reset {
+    font-size: var(--text-sm);
+  }
+
+  .theme-swatch {
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    background: var(--color-bg);
+    color: var(--color-text);
+  }
+
+  .theme-swatch-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.7rem 0.9rem;
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+
+  .theme-swatch-sync {
+    background: var(--color-accent);
+    color: var(--color-accent-contrast);
+    font-size: var(--text-2xs);
+    padding: 3px 8px;
+  }
+
+  .theme-swatch-body {
+    display: flex;
+  }
+
+  .theme-swatch-side {
+    width: 38%;
+    flex: none;
+    border-right: 1px solid var(--color-border);
+    padding: 0.9rem;
+    font-size: var(--text-base);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .theme-swatch-active {
+    color: var(--color-accent);
+    font-weight: 800;
+  }
+
+  .theme-swatch-main {
+    flex: 1;
+    padding: 0.9rem;
+  }
+
+  .theme-swatch-path {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .theme-swatch-status {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-xl);
+  }
+
+  /* — Git screen: real 3-way conflict view — */
+  .conflict-3way {
+    display: flex;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+  }
+
+  .conflict-3way-col {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .conflict-3way-pre {
+    max-height: 220px;
+    font-size: var(--text-xs);
+  }
+
+  /* — Response screen — */
+  .response-screen-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
+  .response-screen-side {
+    width: 300px;
+    flex: none;
+    border-right: var(--border-strong-width) solid var(--color-border-strong);
+    overflow-y: auto;
+  }
+
+  .response-screen-stat-block {
+    padding: var(--space-4) var(--space-4);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .response-screen-status {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-2xl);
+  }
+
+  .response-screen-path {
+    font-size: var(--text-base);
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+
+  .response-screen-metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .response-screen-metric {
+    padding: var(--space-3) var(--space-4);
+    border-right: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .response-screen-metric-value {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: var(--text-lg);
+  }
+
+  .response-screen-tests {
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .response-screen-test-row {
+    display: flex;
+    gap: var(--space-3);
+    font-size: var(--text-base);
+    padding: 4px 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .response-screen-test-row span:first-child {
+    font-weight: 800;
+    width: 36px;
+    flex: none;
+  }
+
+  .response-screen-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .response-screen-content {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: var(--space-4);
+  }
+
+  .screen-body-view {
+    max-height: none;
+  }
+
+  /* — Command palette — */
+  .palette {
+    width: 620px;
+    max-width: 92vw;
+    background: var(--color-bg);
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .palette-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  .palette-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    font: inherit;
+    font-size: var(--text-lg);
+    color: var(--color-text);
+    outline: none;
+  }
+
+  .palette-results {
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+
+  .palette-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--space-3) var(--space-4);
+    font: inherit;
+    font-size: var(--text-md);
+    cursor: pointer;
+  }
+
+  .palette-item:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .palette-item-method {
+    width: 48px;
+    flex: none;
+    font-size: var(--text-2xs);
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    color: var(--color-accent);
+  }
+
+  .palette-item-hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+  }
+
+  .palette-footer {
+    display: flex;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+  }
+
+  .palette-trigger {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 260px;
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    padding: 0.4rem 0.7rem;
+    font: inherit;
+    font-size: var(--text-base);
+    color: var(--color-text-secondary);
+    cursor: text;
+    text-align: left;
+  }
+
+  .palette-trigger:hover {
+    border-color: var(--color-border-strong);
+  }
+
+  .palette-trigger span:first-child {
+    flex: 1;
+  }
+
+  .palette-kbd {
+    font-size: var(--text-2xs);
+    font-weight: 800;
+    border: 1px solid var(--color-border);
+    padding: 1px 5px;
+  }
+
+  /* ---------- Topbar ---------- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.5rem 0.9rem;
+    background: var(--color-bg);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .brand {
+    font-weight: 700;
+    font-size: var(--text-md);
+    color: var(--color-primary);
+    white-space: nowrap;
+  }
+
+  .topbar-left,
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .topbar-center {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    min-width: 0;
+  }
+
+  .env-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .env-select {
+    max-width: 180px;
+  }
+
+  .env-select-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+  }
+
+  .env-select-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .env-picker-menu {
+    min-width: 15rem;
+    max-width: 18rem;
+    inset-inline-start: 0;
+    inset-inline-end: auto;
+  }
+
+  .env-picker-search {
+    width: 100%;
+    margin-bottom: 0.25rem;
+  }
+
+  .env-picker-list {
+    overflow-y: auto;
+    max-height: 16rem;
+  }
+
+  /* ---------- Buttons & inputs ---------- */
+  button {
+    font-family: inherit;
+    font-size: var(--text-base);
+    cursor: pointer;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg);
+    color: var(--color-text);
+    border-radius: var(--radius-sm);
+    padding: 0.35rem 0.7rem;
+    transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+  }
+
+  button:hover {
+    background: var(--color-bg-hover);
+  }
+
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  input,
+  select,
+  textarea {
+    font-family: inherit;
+    font-size: var(--text-base);
+    color: var(--color-text);
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 0.35rem 0.55rem;
+  }
+
+  input:focus,
+  select:focus,
+  textarea:focus,
+  button:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -1px;
+  }
+
+  .btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--color-text-secondary);
+    font-weight: 500;
+  }
+
+  .btn-ghost:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+  }
+
+  .btn-secondary {
+    background: transparent;
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    color: var(--color-text);
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--color-bg-hover);
+  }
+
+  .btn-secondary:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+
+  .btn-xs {
+    padding: 0.2rem 0.5rem;
+    font-size: var(--text-xs);
+  }
+
+  .btn-xs.active {
+    background: var(--color-accent);
+    color: var(--color-accent-contrast);
+  }
+
+  /* Orange is the brand mark only (logo, "+"/add affordances) — the actual primary action
+     color in real Postman is blue (Send, and anything analogous to it). Conflating the two
+     was the biggest color mismatch against the reference. */
+  .btn-primary {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: var(--color-primary-contrast);
+    font-weight: 600;
+  }
+
+  .btn-primary:hover {
+    background: var(--color-primary-hover);
+    border-color: var(--color-primary-hover);
+  }
+
+  .btn-save {
+    font-size: var(--text-sm);
+    color: var(--color-text-tertiary);
+    background: transparent;
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    white-space: nowrap;
+  }
+
+  .btn-save:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-text-tertiary);
+  }
+
+  .btn-save.is-unsaved {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+  }
+
+  .btn-save.is-error {
+    color: var(--color-danger);
+    border-color: var(--color-danger);
+  }
+
+  .btn-send {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    color: var(--color-accent-contrast);
+    font-weight: 600;
+  }
+
+  .btn-send:hover {
+    background: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+  }
+
+  .btn-cancel {
+    background: var(--color-danger);
+    border-color: var(--color-danger);
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .btn-icon-add {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: #fff;
+    font-weight: 700;
+    padding: 0.35rem 0.6rem;
+    flex-shrink: 0;
+  }
+
+  .icon-btn {
+    background: transparent;
+    border: none;
+    padding: 0.2rem 0.35rem;
+    color: var(--color-text-tertiary);
+    border-radius: var(--radius-sm);
+  }
+
+  .icon-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+  }
+
+  .icon-btn.active {
+    color: var(--color-accent);
+  }
+
+  .btn-code-toggle {
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+
+  .icon-btn-ghost {
+    display: none;
+  }
+
+  /* ---------- Banners ---------- */
+  .success-banner,
+  .error-banner,
+  .warn-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.45rem 0.9rem;
+    font-size: var(--text-base);
+    flex-shrink: 0;
+  }
+
+  .success-banner {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+  }
+
+  .error-banner {
+    background: var(--color-danger-bg);
+    color: var(--color-danger);
+  }
+
+  .warn-banner {
+    background: var(--color-warn-bg);
+    color: var(--color-warn);
+    border-radius: var(--radius-sm);
+    margin: 0.5rem 0.9rem 0;
+  }
+
+  .missing-vars-banner {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .missing-var-chip {
+    display: inline-block;
+    cursor: default;
+    border-bottom: 1px dotted var(--color-warn);
+  }
+
+  /* A plain CSS :hover popover nested inside either the banner or the (overflow-clipped) URL
+     bar would get clipped by an ancestor eventually — the URL bar's overlay in particular
+     needs real overflow-x clipping for long URLs, and CSS has no "clip X, don't clip Y" (a
+     non-"visible" axis paired with "visible" silently becomes "auto", which still clips). So
+     this is a single shared, JS-positioned, fixed-position portal instead — see
+     showMissingVarPopover/scheduleHideMissingVarPopover — rendered once at the bottom of the
+     request editor and reused by both the banner chips and the URL bar tokens.  */
+  .missing-var-popover-portal {
+    display: flex;
+    position: fixed;
+    background: var(--color-bg);
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    padding: var(--space-2);
+    gap: 4px;
+    z-index: 1000;
+    color: var(--color-text);
+  }
+
+  .missing-var-popover-portal input {
+    font-size: var(--text-base);
+  }
+
+  .var-popover-scope {
+    align-self: center;
+    font-size: var(--text-2xs);
+    color: var(--color-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  /* Shared inline autocomplete dropdown (LP-1401) — {{variable}} suggestions and pm/console API
+     script suggestions both render through this one fixed-position portal, positioned at the
+     caret via caretScreenPosition() rather than the field's own bounding box. */
+  .autocomplete-portal {
+    position: fixed;
+    z-index: 1000;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    min-width: 200px;
+    max-width: 360px;
+    max-height: 240px;
+    overflow-y: auto;
+    background: var(--color-bg);
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+  }
+
+  .autocomplete-item {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 8px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .autocomplete-item.active,
+  .autocomplete-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .autocomplete-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .autocomplete-detail {
+    flex-shrink: 0;
+    font-family: var(--font-sans);
+    font-size: var(--text-2xs);
+    color: var(--color-text-tertiary);
+    white-space: nowrap;
+  }
+
+  /* Highlights {{variables}} directly inside the URL bar, in place, instead of only in the
+     warning banner below — an invisible-text "ghost" input sits on top of a styled overlay
+     that renders the same string with each {{var}} as its own token; the overlay is
+     pointer-events:none everywhere except on a missing token, so typing/clicking still goes
+     to the real input underneath except when hovering a token that needs a value. */
+  .url-input-shell {
+    position: relative;
+    flex: 1;
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+  }
+
+  .url-token-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    white-space: pre;
+    overflow: hidden;
+    pointer-events: none;
+    padding: 0.35rem 0.55rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-base);
+    color: var(--color-text);
+  }
+
+  .url-token-text {
+    white-space: pre;
+  }
+
+  .url-token-var {
+    white-space: pre;
+    color: var(--color-accent);
+  }
+
+  .url-token-var.missing {
+    pointer-events: auto;
+    color: var(--color-warn);
+    border-bottom: 1px dotted var(--color-warn);
+    cursor: default;
+  }
+
+  .url-input-ghost {
+    position: relative;
+    z-index: 1;
+    color: transparent;
+    caret-color: var(--color-text);
+  }
+
+  .dismiss-btn {
+    background: none;
+    border: none;
+    color: inherit;
+    padding: 0 0.3rem;
+  }
+
+  .warn-inline {
+    color: var(--color-warn);
+    font-size: var(--text-sm);
+  }
+
+  .hint {
+    color: var(--color-text-tertiary);
+    font-size: var(--text-base);
+    padding: 0.2rem 0;
+  }
+
+  .error {
+    color: var(--color-danger);
+    font-size: var(--text-base);
+  }
+
+  /* ---------- Workspace layout ---------- */
+  .workspace {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .sidebar {
+    width: 300px;
+    flex-shrink: 0;
+    background: var(--color-sidebar-bg);
+    border-right: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .sidebar-resize-handle {
+    width: 5px;
+    flex-shrink: 0;
+    margin-left: -3px;
+    cursor: col-resize;
+    z-index: 1;
+    background: transparent;
+  }
+
+  .sidebar-resize-handle:hover,
+  .sidebar-resize-handle.resizing {
+    background: var(--color-accent);
+  }
+
+  .sidebar-header {
+    padding: 0.7rem 0.9rem 0.3rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .sidebar-workspace-row {
+    padding: 0.6rem 0.9rem 0;
+  }
+
+  .sidebar-workspace-menu {
+    display: block;
+  }
+
+  .workspace-switcher-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+    font-weight: 600;
+  }
+
+  .workspace-switcher-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workspace-picker-menu {
+    min-width: 100%;
+    inset-inline-start: 0;
+    inset-inline-end: auto;
+  }
+
+  .workspace-picker-item {
+    padding: 0;
+  }
+
+  .workspace-picker-item-btn {
+    flex: 1;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.4rem 0.5rem;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .sidebar-expand-btn {
+    flex: none;
+    width: 18px;
+    align-self: flex-start;
+    margin-top: 6px;
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--color-border);
+    color: var(--color-text-tertiary);
+    cursor: pointer;
+    font-size: var(--text-xs);
+  }
+
+  .sidebar-expand-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+  }
+
+  .sidebar-title {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-tertiary);
+  }
+
+  .sidebar-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .project-list {
+    flex: 1;
+    overflow-y: auto;
+    padding-bottom: 1rem;
+  }
+
+  .project-node {
+    border-bottom: 1px solid transparent;
+  }
+
+  .project-row {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.1rem 0.5rem 0.1rem 0.7rem;
+    /* Flat, not rounded — a dense project/folder/request tree reads as a list, not a stack of
+       cards, even under the Softline theme's generally-rounded language. */
+    border-radius: 0;
+    margin: 0 0.4rem;
+  }
+
+  .project-row:hover {
+    background: var(--color-bg-hover);
+  }
+
+  /* Accent bar (inset box-shadow, not a border, so it never shifts the row's content by its own
+     width) plus an accent-tinted fill — a clearer selected-state than a flat neutral tint alone. */
+  .project-row.active {
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    box-shadow: inset 3px 0 0 var(--color-accent);
+  }
+
+  .project-row.active .folder-icon {
+    color: var(--color-accent);
+  }
+
+  .project-link {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.4rem 0.1rem;
+    font-weight: 500;
+    color: var(--color-text);
+    min-width: 0;
+  }
+
+  .project-link:hover {
+    background: none;
+  }
+
+  .folder-icon {
+    flex-shrink: 0;
+  }
+
+  .project-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .project-row-actions {
+    display: none;
+    gap: 0.1rem;
+    flex-shrink: 0;
+  }
+
+  .project-row:hover .project-row-actions,
+  .project-row:focus-within .project-row-actions,
+  .project-row-actions.force-visible {
+    display: flex;
+  }
+
+  .project-requests {
+    padding: 0.3rem 0.5rem 0.6rem 1.3rem;
+    border-left: 2px solid var(--color-border);
+    margin: 0 0.9rem 0.4rem 1.1rem;
+  }
+
+  .project-search-box {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: none;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .project-search-input {
+    flex: 1;
+    width: 100%;
+  }
+
+  .request-search-box {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0.4rem;
+  }
+
+  .request-search-input {
+    flex: 1;
+    width: 100%;
+  }
+
+  .menu-wrap {
+    position: relative;
+    flex: none;
+  }
+
+  .dropdown-backdrop {
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+    z-index: 55;
+    cursor: default;
+  }
+
+  .dropdown-menu {
+    position: absolute;
+    top: calc(100% + 0.2rem);
+    inset-inline-end: 0;
+    z-index: 56;
+    min-width: 10rem;
+    background: var(--color-bg);
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+    padding: 0.25rem;
+  }
+
+  .dropdown-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.4rem 0.5rem;
+    font-size: var(--text-base);
+    color: var(--color-text);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .dropdown-menu-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .dropdown-menu-item.active {
+    font-weight: 700;
+    color: var(--color-accent);
+  }
+
+  .sort-dir-indicator {
+    flex: none;
+  }
+
+  .request-count-badge {
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+    white-space: nowrap;
+  }
+
+  .request-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .request-item {
+    display: flex;
+    align-items: center;
+    border-radius: 0;
+  }
+
+  .folder-node {
+    margin-bottom: 2px;
+  }
+
+  .folder-row {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    border-radius: 0;
+  }
+
+  .folder-row:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .folder-row:hover .project-row-actions,
+  .folder-row:focus-within .project-row-actions {
+    display: flex;
+  }
+
+  .folder-link {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.3rem 0.1rem;
+    font-size: var(--text-base);
+    font-weight: 500;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .folder-children {
+    padding: 0.1rem 0 0.2rem 1.1rem;
+    border-left: 2px solid var(--color-border);
+    margin-left: 0.5rem;
+  }
+
+  .request-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .request-item.active {
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    box-shadow: inset 3px 0 0 var(--color-accent);
+    font-weight: 600;
+  }
+
+  .request-link {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.3rem 0.2rem;
+    min-width: 0;
+    color: var(--color-text);
+  }
+
+  .request-link:hover {
+    background: none;
+  }
+
+  .request-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-base);
+  }
+
+  .request-item:hover .icon-btn-ghost,
+  .request-item:focus-within .icon-btn-ghost {
+    display: inline-block;
+  }
+
+  .request-item-wrapper {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .tree-expand-btn {
+    flex: none;
+    width: 1rem;
+    background: none;
+    border: none;
+    color: var(--color-text-tertiary);
+    cursor: pointer;
+    font-size: var(--text-2xs);
+  }
+
+  .sample-tree-list {
+    list-style: none;
+    margin: 0;
+    padding: 0.1rem 0 0.2rem 1.6rem;
+    border-left: 2px solid var(--color-border);
+    margin-left: 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .sample-tree-item {
+    display: flex;
+    align-items: center;
+    border-radius: var(--radius-sm);
+  }
+
+  .sample-tree-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .sample-tree-item:hover .icon-btn-ghost,
+  .sample-tree-item:focus-within .icon-btn-ghost {
+    display: inline-block;
+  }
+
+  .sample-tree-link {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.3rem 0.2rem;
+    min-width: 0;
+    color: var(--color-text);
+  }
+
+  .sample-tree-link:hover {
+    background: none;
+  }
+
+  .status-chip {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 700;
+  }
+
+  .sample-tree-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-sm);
+  }
+
+  .request-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .empty {
+    color: var(--color-text-tertiary);
+    font-size: var(--text-base);
+    padding: 0.3rem 0.9rem;
+    list-style: none;
+  }
+
+  /* ---------- Method badges (Postman color language) ---------- */
+  .method-badge,
+  .tab-method-badge,
+  .method,
+  .method-select {
+    font-weight: 700;
+    font-size: var(--text-xs);
+    letter-spacing: 0.02em;
+  }
+
+  /* Method shown as a tinted pill in the sidebar tree — the Softline system's chip treatment.
+     `currentColor` picks up whichever .method-* color class is paired on the same element, so
+     the tint always matches without an separate background rule per method. */
+  .method-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.8rem;
+    flex-shrink: 0;
+    border-radius: 999px;
+    padding: 0.1rem 0;
+    background: color-mix(in srgb, currentColor 14%, transparent);
+  }
+
+  .tab-method-badge {
+    display: inline-block;
+    width: auto;
+    text-align: left;
+    flex-shrink: 0;
+    background: none;
+  }
+
+  .method-select {
+    width: 6.5rem;
+    flex-shrink: 0;
+    font-weight: 700;
+    background: var(--color-bg);
+  }
+
+  .method-get { color: var(--method-get); }
+  .method-post { color: var(--method-post); }
+  .method-put { color: var(--method-put); }
+  .method-patch { color: var(--method-patch); }
+  .method-delete { color: var(--method-delete); }
+  .method-head { color: var(--method-head); }
+  .method-options { color: var(--method-options); }
+  .method-trace { color: var(--method-trace); }
+
+  /* ---------- Main content ---------- */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow-y: auto;
+    background: var(--color-bg);
+  }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .empty-icon {
+    font-size: var(--text-3xl);
+    opacity: 0.5;
+  }
+
+  .detail {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  /* ---------- Request tabs bar ---------- */
+  /* Wraps the scrollable tab strip plus the fixed "N tabs" overflow trigger, so the trigger
+     stays reachable once there are more open tabs than fit — a plain horizontal scrollbar alone
+     doesn't hold up once a workspace has 100+ open tabs. */
+  .request-tabs-row {
+    display: flex;
+    align-items: stretch;
+    background: var(--color-sidebar-bg);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .request-tabs-bar {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    gap: 0;
+    padding: 0 0.4rem;
+    overflow-x: auto;
+  }
+
+  .tab-overflow-menu {
+    flex: none;
+    position: relative;
+    border-left: 1px solid var(--color-border);
+  }
+
+  .tab-overflow-trigger {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    height: 100%;
+    padding: 0 0.6rem;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+
+  .tab-overflow-trigger::-webkit-details-marker {
+    display: none;
+  }
+
+  .tab-overflow-trigger:hover {
+    color: var(--color-text);
+    background: var(--color-bg-hover);
+  }
+
+  .tab-overflow-menu[open] .tab-overflow-trigger {
+    color: var(--color-text);
+  }
+
+  .tab-overflow-list {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 20;
+    min-width: 240px;
+    max-width: 320px;
+    max-height: 420px;
+    overflow-y: auto;
+    background: var(--color-panel-bg);
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    box-shadow: var(--shadow-md);
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-1);
+  }
+
+  .tab-overflow-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 0.35rem 0.5rem;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .tab-overflow-item .request-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tab-overflow-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .tab-overflow-item.active {
+    background: var(--color-bg-hover);
+    font-weight: 600;
+  }
+
+  .request-tab-pill {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--color-border);
+    border-top: 2px solid transparent;
+    padding: 0 0.15rem 0 0.6rem;
+    max-width: 200px;
+  }
+
+  .request-tab-pill.active {
+    background: var(--color-bg);
+    border-top-color: var(--color-accent);
+  }
+
+  .tab-pill-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: none;
+    border: none;
+    padding: 0.45rem 0.2rem;
+    min-width: 0;
+    color: var(--color-text-secondary);
+  }
+
+  .request-tab-pill.active .tab-pill-btn {
+    color: var(--color-text);
+  }
+
+  .tab-pill-btn:hover {
+    background: none;
+    color: var(--color-text);
+  }
+
+  .tab-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-sm);
+    max-width: 110px;
+  }
+
+  .dirty-dot {
+    color: var(--method-post);
+    font-size: var(--text-md);
+    line-height: 0;
+  }
+
+  .tab-close-btn {
+    background: none;
+    border: none;
+    padding: 0.15rem 0.35rem;
+    color: var(--color-text-tertiary);
+    font-size: var(--text-2xs);
+    opacity: 0;
+  }
+
+  .request-tab-pill:hover .tab-close-btn {
+    opacity: 1;
+  }
+
+  .tab-close-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-danger);
+  }
+
+  /* ---------- Request bar ---------- */
+  .breadcrumb-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.9rem 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-tertiary);
+  }
+
+  .breadcrumb-icon {
+    opacity: 0.7;
+  }
+
+  .breadcrumb-sep {
+    color: var(--color-text-tertiary);
+  }
+
+  .breadcrumb-current {
+    color: var(--color-text);
+    font-weight: 600;
+  }
+
+  .breadcrumb-current-btn {
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .breadcrumb-current-btn:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .breadcrumb-edit-hint {
+    opacity: 0;
+    font-size: var(--text-xs);
+  }
+
+  .breadcrumb-current-btn:hover .breadcrumb-edit-hint {
+    opacity: 0.6;
+  }
+
+  /* Floats as its own card on the canvas-tinted `.detail` background — the Softline system's
+     "cards, not edge-to-edge panels" composition — rather than a full-bleed strip. */
+  .request-bar {
+    margin: 0.7rem 0.9rem 0;
+    padding: 0.6rem 0.9rem 0.5rem;
+    background: var(--color-panel-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .request-bar-row {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.4rem;
+  }
+
+  .request-bar-row.secondary {
+    align-items: center;
+  }
+
+  /* One seamless pill (method + url), like the reference — not two separate boxed
+     controls sitting side by side. */
+  .url-pill {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    background: var(--color-panel-bg);
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    /* No overflow:hidden — the method-select/url-input children paint no background of their
+       own (they sit transparent on this pill's fill), so there's nothing to corner-clip, and
+       hiding overflow would clip the missing-variable popover that hangs below the URL bar. */
+  }
+
+  .url-pill:focus-within {
+    border-color: var(--color-focus);
+  }
+
+  .url-pill-divider {
+    width: 1px;
+    align-self: stretch;
+    background: var(--color-border);
+    margin: 0.4rem 0;
+  }
+
+  .url-pill .method-select {
+    border: none;
+    background: transparent;
+    border-radius: 0;
+  }
+
+  .url-pill .url-input {
+    border: none;
+    background: transparent;
+    border-radius: 0;
+  }
+
+  .url-pill .url-input:focus {
+    outline: none;
+  }
+
+  .url-input {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: var(--text-base);
+  }
+
+  .send-action {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .url-preview-bar {
+    padding: 0.3rem 0.9rem;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    background: var(--color-bg-secondary);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .preview-label {
+    color: var(--color-text-tertiary);
+  }
+
+  code {
+    font-family: var(--font-mono);
+    background: var(--color-bg-hover);
+    padding: 0.05rem 0.3rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-base);
+  }
+
+  /* ---------- Editor tab strip ---------- */
+  .editor-tabs {
+    display: flex;
+    gap: 1rem;
+    padding: 0 0.9rem;
+    border-bottom: 1px solid var(--color-border);
+    overflow-x: auto;
+  }
+
+  /* Shared "panel tab" grammar (.editor-tab and .response-subtab) — one consistent
+     treatment for tabs that switch a sub-view within an already-bounded panel, distinct from
+     .request-tab-pill's document-tab treatment (top border + background fill, for open
+     requests). Active state stays neutral text + a colored underline, not accent-tinted text —
+     matches how DevTools' own panel tabs (Elements/Console/Network) behave. */
+  .editor-tab,
+  .response-subtab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 0.5rem 0.7rem;
+    font-size: var(--text-base);
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    white-space: nowrap;
+  }
+
+  .editor-tab.active,
+  .response-subtab.active {
+    color: var(--color-text);
+    border-bottom-color: var(--color-accent);
+    font-weight: 600;
+  }
+
+  .editor-tab:hover,
+  .response-subtab:hover {
+    background: none;
+    color: var(--color-text);
+  }
+
+  .tab-badge {
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+    font-size: var(--text-2xs);
+    font-weight: 700;
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+  }
+
+  .tab-badge-warn {
+    background: var(--color-warn-bg);
+    color: var(--color-warn);
+    font-size: var(--text-2xs);
+    font-weight: 700;
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+  }
+
+  .tab-dot {
+    color: var(--color-primary);
+  }
+
+  .tab-content {
+    padding: 0.8rem 0.9rem;
+  }
+
+  /* Request editor (top) and docked response (bottom), stacked with a draggable divider —
+     each scrolls independently instead of the old single-column layout where the response
+     was just one more thing you scrolled past below a potentially long params/headers list. */
+  .editor-body-row {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .editor-pane {
+    flex: 1 1 auto;
+    min-height: 80px;
+    overflow-y: auto;
+  }
+
+  .response-pane-resize-handle {
+    flex: none;
+    height: 7px;
+    margin: -3px 0;
+    background: transparent;
+    cursor: row-resize;
+    position: relative;
+    z-index: 1;
+  }
+
+  .response-pane-resize-handle::before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--color-border);
+  }
+
+  .response-pane-resize-handle:hover::before,
+  .response-pane-resize-handle.resizing::before {
+    top: 2px;
+    height: 3px;
+    background: var(--color-accent);
+  }
+
+  .response-pane-resize-handle:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  /* Same floating-card treatment as .request-bar (see comment there) — margin is horizontal
+     and bottom only, so the JS-driven `responsePaneHeight` (an explicit height, not flex-grow)
+     still governs the box's actual height without the margin skewing that math. */
+  .response-pane {
+    flex: none;
+    min-height: 160px;
+    max-height: calc(100% - 80px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    margin: 0 0.9rem 0.9rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    background: var(--color-panel-bg);
+  }
+
+  .response-pane.collapsed {
+    min-height: 0;
+  }
+
+  .response-pane-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: none;
+    padding: 0.3rem 0.6rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .response-pane.collapsed .response-pane-bar {
+    border-bottom: none;
+  }
+
+  .response-pane-bar-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+  }
+
+  .response-pane .response-loading,
+  .response-pane .response-empty-state {
+    flex: 1;
+  }
+
+  .response-pane .response {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .response-pane .response-subtab-content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .response-pane .body-view {
+    height: 100%;
+    max-height: none;
+  }
+
+  .response-preview-frame {
+    width: 100%;
+    height: 100%;
+    min-height: 260px;
+    background: #fff;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+
+  /* Docked to the right edge of the whole window (sibling of <main>, not nested in the
+     scrollable response pane) — stays visible regardless of which editor tab is open or how
+     far the request/response area is scrolled. Mirrors the left project sidebar's treatment. */
+  .right-sidebar {
+    width: 340px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    border-left: var(--border-strong-width) solid var(--color-border-strong);
+    background: var(--color-bg);
+    overflow: hidden;
+  }
+
+  .right-sidebar-header {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    flex: none;
+    padding: var(--space-2) var(--space-2);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+  }
+
+  /* Code is the sidebar's one real feature now (Info is a small icon toggle beside it, not an
+     equal-weight tab) — a static label reads better here than a tab control with only one
+     meaningful state. */
+  .right-sidebar-title {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.35rem 0.6rem;
+    color: var(--color-text);
+    font-size: var(--text-base);
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .bottom-panel {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--space-4);
+    background: var(--color-panel-bg);
+  }
+
+  .bottom-panel .params-row {
+    flex-wrap: wrap;
+  }
+
+  .bottom-panel-code {
+    max-height: none;
+  }
+
+  .info-list-grid {
+    grid-template-columns: max-content 1fr;
+    column-gap: var(--space-4);
+  }
+
+  .info-list {
+    display: grid;
+    grid-template-columns: auto;
+    row-gap: 0.5rem;
+    margin: 0;
+    font-size: var(--text-base);
+  }
+
+  .info-list dt {
+    color: var(--color-text-tertiary);
+    text-transform: uppercase;
+    font-size: var(--text-xs);
+    letter-spacing: 0.03em;
+    margin-bottom: 0.1rem;
+  }
+
+  .info-list dd {
+    color: var(--color-text);
+    margin: 0 0 0.4rem;
+    word-break: break-all;
+  }
+
+  /* Defensive default: any bare heading dropped into the detail/response area (e.g. new
+     feature sections not yet given their own class) inherits the same muted label style
+     as the rest of the system instead of a jarring browser-default heading. */
+  .detail h3 {
+    font-size: var(--text-base);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-tertiary);
+    margin: 1rem 0.9rem 0.4rem;
+    font-weight: 700;
+  }
+
+
+  /* ---------- Params/headers tables ---------- */
+  .params-table {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .params-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .params-row-spacer {
+    display: inline-block;
+    width: 14px;
+    flex: none;
+  }
+
+  .params-row input:not([type="checkbox"]) {
+    flex: 1;
+    min-width: 80px;
+  }
+
+  .radio-label,
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: var(--text-base);
+    white-space: nowrap;
+  }
+
+  .radio-row {
+    display: flex;
+    gap: 1rem;
+  }
+
+  .body-input {
+    width: 100%;
+    font-family: var(--font-mono);
+    font-size: var(--text-base);
+    resize: vertical;
+  }
+
+  .body-mode-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+  }
+
+  .raw-type-select {
+    max-width: 140px;
+  }
+
+  .graphql-editor h4,
+  .params-table h4 {
+    font-size: var(--text-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-tertiary);
+    margin: 0.3rem 0 0.1rem;
+  }
+
+  .settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(200px, 1fr));
+    gap: 0.7rem;
+  }
+
+  .settings-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: var(--text-base);
+  }
+
+  .settings-row span {
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+  }
+
+  .var-key {
+    font-weight: 600;
+    min-width: 100px;
+  }
+
+  .var-val {
+    flex: 1;
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .badge {
+    font-size: var(--text-2xs);
+    background: var(--color-bg-hover);
+    color: var(--color-text-secondary);
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+  }
+
+  .badge-local {
+    background: color-mix(in srgb, var(--method-put) 16%, transparent);
+    color: var(--method-put);
+  }
+
+  .badge-warn {
+    background: var(--color-warn-bg);
+    color: var(--color-warn);
+  }
+
+  /* ---------- Response panel ---------- */
+  .response {
+    padding: 0.7rem 0.9rem 1rem;
+  }
+
+  .response-loading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem 0.9rem;
+    color: var(--color-text-secondary);
+    font-size: var(--text-base);
+  }
+
+  .response-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 2rem 0.9rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .spinner {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    border-top-color: var(--color-accent);
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .response-stat-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding-bottom: 0.6rem;
+  }
+
+  .response-stat-status {
+    font-weight: 700;
+    font-size: var(--text-md);
+  }
+
+  .response-stat-item {
+    font-size: var(--text-base);
+    color: var(--color-text-secondary);
+  }
+
+  .response-stat-label {
+    color: var(--color-text-tertiary);
+    text-transform: uppercase;
+    font-size: var(--text-2xs);
+    letter-spacing: 0.03em;
+    margin-right: 0.2rem;
+  }
+
+  .response-stat-spacer {
+    flex: 1;
+  }
+
+  .status-ok { color: var(--color-success); }
+  .status-err { color: var(--color-danger); }
+
+  .response-subtabs {
+    display: flex;
+    align-items: center;
+    gap: 0.1rem;
+    border-bottom: 1px solid var(--color-border);
+    overflow-x: auto;
+  }
+
+  .response-subtab,
+  .response-format-toggle {
+    flex-shrink: 0;
+  }
+
+  /* .response-subtab base + hover + active styles live with .editor-tab above (shared panel-tab
+     grammar). */
+
+  .response-subtab-content {
+    padding-top: 0.6rem;
+  }
+
+  .response-format-toggle {
+    display: flex;
+    gap: 2px;
+    background: var(--color-bg-hover);
+    border-radius: var(--radius-sm);
+    padding: 2px;
+    margin-left: auto;
+  }
+
+  .btn-toggle {
+    border: none;
+    background: none;
+    padding: 0.2rem 0.6rem;
+    font-size: var(--text-xs);
+    border-radius: var(--radius-sm);
+  }
+
+  .btn-toggle.active {
+    background: var(--color-bg);
+    box-shadow: var(--shadow-sm);
+    font-weight: 600;
+  }
+
+  .test-results-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .test-result-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    font-size: var(--text-base);
+    padding: 0.25rem 0;
+  }
+
+  .test-result-icon {
+    font-weight: 700;
+    width: 1rem;
+    flex-shrink: 0;
+  }
+
+  .test-pass .test-result-icon { color: var(--color-success); }
+  .test-fail .test-result-icon { color: var(--color-danger); }
+
+  .test-result-name {
+    color: var(--color-text);
+  }
+
+  .test-result-error {
+    color: var(--color-danger);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  .headers-list {
+    padding: 0.3rem 0 0.3rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .header-line {
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+  }
+
+  .body-view {
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-base);
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+  }
+
+  .json-key { color: var(--json-key); }
+  .json-string { color: var(--json-string); }
+  .json-number { color: var(--json-number); }
+  .json-boolean { color: var(--json-boolean); }
+  .json-null { color: var(--json-null); font-style: italic; }
+
+  .response-history-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .response-history-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.35rem 0.2rem;
+    color: var(--color-text);
+    font-size: var(--text-base);
+    cursor: pointer;
+  }
+
+  .response-history-row:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .response-history-duration { font-weight: 500; }
+  .response-history-time { color: var(--color-text-tertiary); }
+
+  /* ---------- Console drawer ---------- */
+  .console-drawer {
+    flex-shrink: 0;
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+    display: flex;
+    flex-direction: column;
+    min-height: 120px;
+  }
+
+  .console-resize-handle {
+    flex: none;
+    height: 7px;
+    margin: -3px 0;
+    background: transparent;
+    cursor: row-resize;
+    position: relative;
+    z-index: 1;
+  }
+
+  .console-resize-handle::before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--color-border);
+  }
+
+  .console-resize-handle:hover::before,
+  .console-resize-handle.resizing::before {
+    top: 2px;
+    height: 3px;
+    background: var(--color-accent);
+  }
+
+  .console-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.4rem 0.7rem;
+    border-bottom: 1px solid var(--color-border);
+    flex-wrap: wrap;
+  }
+
+  .console-title-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .console-title {
+    font-weight: 700;
+    font-size: var(--text-base);
+  }
+
+  .console-count-badge {
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+  }
+
+  .console-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+
+  .console-select,
+  .console-search {
+    font-size: var(--text-xs);
+    padding: 0.25rem 0.4rem;
+  }
+
+  .console-check-label {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  .console-btn,
+  .console-close-btn {
+    font-size: var(--text-xs);
+    padding: 0.25rem 0.5rem;
+  }
+
+  .console-body {
+    flex: 1;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+  }
+
+  .console-empty {
+    padding: 1rem;
+    color: var(--color-text-tertiary);
+    font-size: var(--text-base);
+    font-family: var(--font-sans);
+  }
+
+  .console-events-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .console-row {
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .console-row.error-row { background: var(--color-danger-bg); }
+  .console-row.warn-row { background: var(--color-warn-bg); }
+
+  .console-row-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.7rem;
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+
+  .evt-expander {
+    width: 0.9rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .evt-time {
+    color: var(--color-text-tertiary);
+    flex-shrink: 0;
+  }
+
+  .evt-level {
+    font-weight: 700;
+    padding: 0 0.3rem;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .level-info { color: var(--method-put); }
+  .level-warn { color: var(--color-warn); }
+  .level-error { color: var(--color-danger); }
+  .level-debug { color: var(--color-text-tertiary); }
+
+  .evt-type {
+    color: var(--color-text-secondary);
+    flex-shrink: 0;
+  }
+
+  .evt-cid {
+    color: var(--color-text-tertiary);
+    flex-shrink: 0;
+  }
+
+  .evt-msg {
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .console-row-details {
+    padding: 0.4rem 0.7rem 0.7rem 2.1rem;
+  }
+
+  .details-actions {
+    margin-bottom: 0.3rem;
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .detail-kv-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 0.75rem;
+    row-gap: 0.2rem;
+    margin-bottom: 0.5rem;
+    font-size: var(--text-xs);
+  }
+
+  .detail-k {
+    color: var(--color-text-tertiary);
+    text-align: right;
+  }
+
+  .detail-v {
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    word-break: break-word;
+  }
+
+  .detail-v-wrap {
+    white-space: pre-wrap;
+  }
+
+  .detail-header-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 0.5rem;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+  }
+
+  .detail-header-table th {
+    text-align: left;
+    color: var(--color-text-tertiary);
+    font-weight: 500;
+    padding: 0.15rem 0.5rem 0.15rem 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .detail-header-table td {
+    padding: 0.15rem 0.5rem 0.15rem 0;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text);
+  }
+
+  .detail-header-table tr.disabled-row td {
+    color: var(--color-text-tertiary);
+    text-decoration: line-through;
+  }
+
+  .detail-list-label {
+    margin: 0 0 0.2rem;
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+  }
+
+  .detail-plain-list {
+    margin: 0 0 0.5rem;
+    padding-left: 1.1rem;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+  }
+
+  .console-mini-btn {
+    font-size: var(--text-xs);
+    padding: 0.15rem 0.4rem;
+  }
+
+  .console-json-view {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem;
+    font-size: var(--text-xs);
+    max-height: 200px;
+    overflow: auto;
+    margin: 0;
+  }
+
+  /* ---------- Footer status bar ---------- */
+  .app-status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.25rem 0.9rem;
+    background: var(--color-bg-secondary);
+    border-top: 1px solid var(--color-border);
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+  }
+
+  .console-toggle-btn {
+    background: none;
+    border: none;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.15rem 0.4rem;
+    color: var(--color-text-secondary);
+    font-size: var(--text-xs);
+  }
+
+  .console-toggle-btn.active {
+    color: var(--color-primary);
+    font-weight: 600;
+  }
+
+  .status-badge-error {
+    background: var(--color-danger);
+    color: #fff;
+    border-radius: 999px;
+    padding: 0 0.35rem;
+    font-size: var(--text-2xs);
+  }
+
+  .status-badge-warn {
+    background: var(--color-warn);
+    color: #fff;
+    border-radius: 999px;
+    padding: 0 0.35rem;
+    font-size: var(--text-2xs);
+  }
+
+  .status-right {
+    display: flex;
+    gap: 1rem;
+    color: var(--color-text-tertiary);
+  }
+
+  /* ---------- Modals ---------- */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 20, 25, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    padding: 2rem;
+  }
+
+  .modal {
+    background: var(--color-bg);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+    padding: 1rem 1.2rem 1.2rem;
+    width: 520px;
+    max-width: 100%;
+    max-height: 85vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .modal-wide {
+    width: 720px;
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.2rem;
+  }
+
+  .modal-header h3 {
+    margin: 0;
+    font-size: var(--text-md);
+  }
+
+  .file-dropzone {
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.6rem;
+    text-align: center;
+  }
+
+  .file-label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    cursor: pointer;
+    font-size: var(--text-base);
+    color: var(--color-text-secondary);
+  }
+
+  .import-report-card {
+    background: var(--color-success-bg);
+    border-radius: var(--radius-md);
+    padding: 0.6rem 0.8rem;
+    font-size: var(--text-base);
+  }
+
+  .import-report-card h4 {
+    margin: 0 0 0.3rem;
+  }
+
+  .warnings-box {
+    margin-top: 0.4rem;
+    font-size: var(--text-sm);
+  }
+
+  .warnings-box h5 {
+    margin: 0.2rem 0;
+  }
+
+  .request-form {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  /* ---------- Modal system (backdrop / container / tabs / body / footer) ---------- */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 20, 25, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    padding: 2rem;
+  }
+
+  .modal-container {
+    background: var(--color-bg);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+    padding: 1rem 1.2rem 1.2rem;
+    width: 560px;
+    max-width: 100%;
+    max-height: 85vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .modal-container.modal-wide {
+    width: 760px;
+  }
+
+  .modal-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .modal-sub {
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+    font-weight: 400;
+  }
+
+  .modal-close-btn {
+    background: none;
+    border: none;
+    color: var(--color-text-tertiary);
+    font-size: var(--text-md);
+    padding: 0.15rem 0.4rem;
+    border-radius: var(--radius-sm);
+  }
+
+  .modal-close-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-danger);
+  }
+
+  .modal-tabs {
+    display: flex;
+    gap: 1rem;
+    border-bottom: 1px solid var(--color-border);
+    margin: 0.2rem 0 0.4rem;
+    overflow-x: auto;
+  }
+
+  .modal-tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 0.5rem 0.1rem;
+    color: var(--color-text-secondary);
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    white-space: nowrap;
+  }
+
+  .modal-tab-btn:hover {
+    background: none;
+    color: var(--color-text);
+  }
+
+  .modal-tab-btn.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+    font-weight: 700;
+  }
+
+  .tab-badge-alert {
+    background: var(--color-danger);
+    color: #fff;
+    font-size: var(--text-2xs);
+    font-weight: 700;
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+  }
+
+  .modal-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.4rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--color-border);
+  }
+
+  .action-alert {
+    padding: 0.4rem 0.7rem;
+    border-radius: var(--radius-md);
+    font-size: var(--text-base);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+  }
+
+  .action-alert.success {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+  }
+
+  .action-alert.error {
+    background: var(--color-danger-bg);
+    color: var(--color-danger);
+  }
+
+  .action-alert.warning {
+    background: var(--color-warn-bg);
+    color: var(--color-warn);
+  }
+
+  .action-alert .btn-xs {
+    flex-shrink: 0;
+  }
+
+  /* ---------- Git status pill (footer) ---------- */
+  .git-status-pill {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: var(--color-bg-hover);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    padding: 0.1rem 0.6rem;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .git-status-pill:hover {
+    background: var(--color-bg);
+  }
+
+  .git-status-pill.git-has-conflict {
+    border-color: var(--color-danger);
+    color: var(--color-danger);
+  }
+
+  .git-status-pill.git-kind-ahead,
+  .git-status-pill.git-kind-behind,
+  .git-status-pill.git-kind-modified {
+    border-color: var(--color-warn);
+    color: var(--color-warn);
+  }
+
+  .git-status-pill.git-kind-clean {
+    border-color: var(--color-success);
+    color: var(--color-success);
+  }
+
+  .git-icon {
+    font-weight: 700;
+  }
+
+  .git-alert {
+    color: var(--color-danger);
+    font-weight: 600;
+  }
+
+  .git-ahead,
+  .git-behind {
+    font-weight: 600;
+  }
+
+  /* ---------- Git panel content ---------- */
+  .git-panel-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .git-panel-section h4 {
+    margin: 0.2rem 0 0;
+    font-size: var(--text-base);
+  }
+
+  .git-panel-section h5 {
+    margin: 0.2rem 0;
+    font-size: var(--text-base);
+  }
+
+  .legacy-git-banner {
+    padding: 0.7rem 0.9rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-tertiary);
+  }
+
+  .legacy-git-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .legacy-git-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.4rem 0.6rem;
+    background: var(--color-panel-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+
+  .legacy-git-row-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+
+  .form-row-stacked {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .form-row-stacked label {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .input-with-actions {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .path-input {
+    flex: 1;
+    font-family: var(--font-mono);
+  }
+
+  .alert-box-warning {
+    background: var(--color-warn-bg);
+    color: var(--color-warn);
+    border-radius: var(--radius-md);
+    padding: 0.6rem 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    font-size: var(--text-base);
+  }
+
+  .git-status-card {
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-md);
+    padding: 0.6rem 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .status-summary-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: var(--text-base);
+    flex-wrap: wrap;
+  }
+
+  .status-label {
+    color: var(--color-text-tertiary);
+    font-size: var(--text-sm);
+  }
+
+  .status-sep {
+    color: var(--color-border);
+  }
+
+  .git-badge-kind {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    padding: 0.05rem 0.4rem;
+    border-radius: var(--radius-sm);
+    background: var(--color-bg-hover);
+  }
+
+  .git-badge-kind.kind-clean { color: var(--color-success); }
+  .git-badge-kind.kind-ahead,
+  .git-badge-kind.kind-behind,
+  .git-badge-kind.kind-modified { color: var(--color-warn); }
+  .git-badge-kind.kind-conflict { color: var(--color-danger); }
+
+  .badge-ahead,
+  .badge-behind {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-warn);
+    background: var(--color-warn-bg);
+    border-radius: var(--radius-sm);
+    padding: 0.05rem 0.4rem;
+  }
+
+  .files-changed-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .file-category {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .working-tree-clean {
+    margin: 0;
+    color: var(--color-success);
+    font-size: var(--text-base);
+  }
+
+  .git-commit-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .commit-input-row {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .commit-input-row input {
+    flex: 1;
+  }
+
+  .quick-git-actions {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+
+  .icon-btn-text {
+    background: none;
+    border: none;
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+    padding: 0.2rem 0.3rem;
+  }
+
+  .icon-btn-text:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+  }
+
+  .auto-sync-box {
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.7rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .clean-box {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.7rem;
+  }
+
+  .clean-box p { margin: 0; }
+
+  .conflict-alert-box {
+    background: var(--color-danger-bg);
+    color: var(--color-danger);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.7rem;
+    font-size: var(--text-base);
+  }
+
+  .conflict-alert-box p { margin: 0; }
+
+  .conflicts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .conflict-item-card {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.7rem;
+  }
+
+  .conflict-item-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .conflict-filename {
+    font-family: var(--font-mono);
+    font-size: var(--text-base);
+    font-weight: 600;
+  }
+
+  .conflict-choices {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .btn-choice {
+    font-size: var(--text-xs);
+  }
+
+  .btn-choice.local {
+    border-color: var(--method-put);
+    color: var(--method-put);
+  }
+
+  .btn-choice.remote {
+    border-color: var(--method-get);
+    color: var(--method-get);
+  }
+
+  .github-profile-card {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.7rem;
+  }
+
+  .github-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+  }
+
+  .github-profile-info {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: 0.05rem;
+  }
+
+  .badge-success {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 0.1rem 0.5rem;
+  }
+
+  .repo-permissions-card {
+    background: var(--color-bg-secondary);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.7rem;
+  }
+
+  .perm-badges {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin: 0.3rem 0;
+  }
+
+  .perm-badge {
+    font-size: var(--text-xs);
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: var(--color-danger-bg);
+    color: var(--color-danger);
+  }
+
+  .perm-badge.perm-granted {
+    background: var(--color-success-bg);
+    color: var(--color-success);
+  }
+
+  .projectfile-options {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+  }
+
+  .json-preview-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .json-preview-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .toolbar-actions {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .code-area,
+  .diff-viewer {
+    width: 100%;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+  }
+
+  .diff-viewer {
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.7rem;
+    max-height: 420px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+  }
+
+  .history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 420px;
+    overflow-y: auto;
+  }
+
+  .history-item {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.4rem 0.6rem;
+  }
+
+  .commit-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-sm);
+  }
+
+  .commit-hash {
+    color: var(--color-primary);
+    font-weight: 700;
+  }
+
+  .commit-author {
+    color: var(--color-text-secondary);
+  }
+
+  .commit-date {
+    color: var(--color-text-tertiary);
+  }
+
+  .commit-msg {
+    margin: 0.2rem 0 0;
+    font-size: var(--text-base);
+  }
+
+  /* ---------- Phase 08: AI & Source Intelligence Styles ---------- */
+  .field-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.2rem;
+  }
+
+  .field-header-row h4,
+  .field-header-row h3 {
+    margin: 0;
+  }
+
+  .field-header-row .hint {
+    margin: 0;
+  }
+
+  /* — Scripts tab: Pre/Post side selector instead of two long-labeled stacked textareas. — */
+  .scripts-layout {
+    display: flex;
+    gap: var(--space-4);
+    min-height: 0;
+  }
+
+  .scripts-side {
+    flex: none;
+    width: 100px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-right: var(--border-strong-width) solid var(--color-border-strong);
+    padding-right: var(--space-3);
+  }
+
+  .scripts-side-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: transparent;
+    border: none;
+    border-left: 3px solid transparent;
+    padding: var(--space-2) var(--space-2);
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .scripts-side-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .scripts-side-item.active {
+    color: var(--color-text);
+    border-left-color: var(--color-accent);
+    background: var(--color-bg-hover);
+  }
+
+  .scripts-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .scripts-textarea {
+    flex: 1;
+    min-height: 280px;
+  }
+
+  .action-feedback-inline {
+    font-size: var(--text-sm);
+    color: var(--color-primary);
+    margin: 0.2rem 0;
+    font-weight: 500;
+  }
+
+  .text-success {
+    color: var(--color-success, #22c55e) !important;
+  }
+
+  .sample-responses-section {
+    border-top: 1px solid var(--color-border);
+    padding: 0.8rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .sample-responses-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .sample-response-card {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-subtle, rgba(255, 255, 255, 0.02));
+    overflow: hidden;
+  }
+
+  .sample-response-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.4rem 0.6rem;
+    cursor: pointer;
+    user-select: none;
+    font-size: var(--text-base);
+  }
+
+  .sample-name {
+    font-weight: 600;
+    flex: 1;
+  }
+
+  .badge-sample {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    color: var(--color-primary);
+    font-size: var(--text-2xs);
+    font-weight: 700;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+  }
+
+  .badge-framework {
+    background: color-mix(in srgb, #3b82f6 20%, transparent);
+    color: #3b82f6;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+  }
+
+  .badge-openapi {
+    background: color-mix(in srgb, #10b981 20%, transparent);
+    color: #10b981;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+  }
+
+  .badge-auth {
+    background: color-mix(in srgb, #f59e0b 20%, transparent);
+    color: #f59e0b;
+    font-size: var(--text-xs);
+    padding: 0.1rem 0.35rem;
+    border-radius: 999px;
+  }
+
+  .btn-delete-icon {
+    background: none;
+    border: none;
+    color: var(--color-text-tertiary);
+    cursor: pointer;
+    padding: 0.1rem 0.3rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+  }
+
+  .btn-delete-icon:hover {
+    color: var(--color-danger);
+    background: var(--color-bg-hover);
+  }
+
+  .ai-context-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    background: var(--color-bg-subtle, rgba(255, 255, 255, 0.02));
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.8rem;
+  }
+
+  .ai-prompt-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .ai-preview-card {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.8rem;
+    background: var(--color-bg-subtle, rgba(255, 255, 255, 0.03));
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .preview-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .preview-name {
+    font-weight: 700;
+    font-size: var(--text-md);
+  }
+
+  .preview-url {
+    font-family: monospace;
+    font-size: var(--text-base);
+    color: var(--color-text-secondary);
+  }
+
+  .preview-desc {
+    margin: 0;
+  }
+
+  .preview-meta-row {
+    display: flex;
+    gap: 1rem;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .preview-body-pre {
+    max-height: 180px;
+    overflow: auto;
+    font-size: var(--text-sm);
+    padding: 0.5rem;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+
+  .source-scan-bar {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .source-summary-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .source-badges-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .source-filter-row input {
+    width: 100%;
+  }
+
+  .discovered-endpoints-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    max-height: 380px;
+    overflow-y: auto;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: 0.4rem;
+  }
+
+  .discovered-endpoint-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg);
+  }
+
+  .discovered-endpoint-card:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .ep-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .ep-path {
+    font-family: monospace;
+    font-size: var(--text-base);
+    font-weight: 600;
+  }
+
+  .ep-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ep-file {
+    font-family: monospace;
+  }
+
+  .ep-summary {
+    color: var(--color-text-secondary);
+  }
+
+  .btn-xs-primary {
+    padding: 0.15rem 0.45rem;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    background: var(--color-primary);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .btn-xs-primary:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+
+  .ai-settings-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+  }
+
+  .settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .password-input-row {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .password-input-row input {
+    flex: 1;
+  }
+
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--color-primary);
+    cursor: pointer;
+    text-decoration: underline;
+    padding: 0;
+    font: inherit;
+  }
+</style>

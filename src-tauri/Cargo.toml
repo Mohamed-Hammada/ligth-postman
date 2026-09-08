@@ -1,0 +1,60 @@
+[package]
+name = "postman-client"
+version = "0.1.0"
+description = "Lightweight, local-first API client with offline storage and AI assistance"
+authors = ["Mohamed Hammada"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "postman_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Only for importing Postman's local-files workspace format (collections/*/**/*.request.yaml,
+# environments/*.environment.yaml) — everything else in this app is JSON/SQLite.
+serde_yaml = "0.9"
+rusqlite = { version = "0.31", features = ["bundled"] }
+thiserror = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+tauri-plugin-log = "2"
+# reqwest: mature async HTTP/1.1+HTTP/2 client with TLS, streaming bodies, per-request
+# timeouts and proxy support — chosen over hyper (too low-level, would mean reimplementing
+# redirects/TLS/proxy) and over blocking clients like ureq (would block the async runtime).
+# rustls instead of the default native-tls avoids an OpenSSL system dependency on Linux.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart"] }
+# Needed directly (not just transitively via reqwest/tauri) for task::spawn + AbortHandle
+# (request cancellation) and async file IO (large-response disk spillover).
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "io-util"] }
+# StreamExt::next() to consume reqwest's bytes_stream() chunk-by-chunk for bounded buffering.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# HTTP Basic auth needs base64(username:password) — already pulled in transitively by the
+# TLS stack; declaring it directly instead of guessing at a re-export path.
+base64 = "0.22"
+url = "2"
+regex = "1"
+boa_engine = { version = "0.22", default-features = false }
+# Real process RSS memory reading for the diagnostics/resource-budget widget — replaces a
+# hardcoded placeholder constant. Only the "system" feature (process listing) is needed.
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

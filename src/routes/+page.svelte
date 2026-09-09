@@ -156,6 +156,7 @@
 
   let aiConfigured = $state(false);
   let showAiPanel = $state(false);
+  let rightPanel = $state<"code" | "info" | null>(null);
   let aiActiveTab = $state<"generate" | "source" | "settings">("generate");
   let aiPrompt = $state("");
   let aiGenerating = $state(false);
@@ -2408,6 +2409,72 @@
               </div>
             {/if}
           </div>
+          </div>
+
+          <div class="right-rail">
+            <button
+              type="button"
+              class="rail-icon"
+              class:active={rightPanel === "code"}
+              title="Code Snippet"
+              onclick={() => (rightPanel = rightPanel === "code" ? null : "code")}
+            >&lt;/&gt;</button>
+            <button
+              type="button"
+              class="rail-icon"
+              class:active={rightPanel === "info"}
+              title="Info"
+              onclick={() => (rightPanel = rightPanel === "info" ? null : "info")}
+            >ⓘ</button>
+          </div>
+
+          {#if rightPanel === "code"}
+            <div class="right-panel">
+              <h3 class="right-panel-title">Code Snippet</h3>
+              <div class="params-row">
+                <select bind:value={snippetTarget}>
+                  <option value="bash">cURL (Bash / POSIX)</option>
+                  <option value="powershell">cURL (PowerShell)</option>
+                  <option value="windows_cmd">cURL (Windows CMD)</option>
+                  <option value="python">Python (requests)</option>
+                  <option value="javascript">JavaScript (fetch)</option>
+                </select>
+              </div>
+              <div class="params-row">
+                <select bind:value={snippetMode}>
+                  <option value="placeholder">Placeholder (safe)</option>
+                  <option value="resolved">Resolved (real values)</option>
+                </select>
+              </div>
+              <button type="button" class="btn-primary" onclick={copyAsCurl}>Generate Snippet</button>
+              {#if snippetError}
+                <p class="error">{snippetError}</p>
+              {/if}
+              {#if snippet}
+                <pre class="body-view">{snippet}</pre>
+                <button type="button" onclick={copySnippetToClipboard}>Copy to clipboard</button>
+              {/if}
+            </div>
+          {:else if rightPanel === "info" && selectedRequest}
+            <div class="right-panel">
+              <h3 class="right-panel-title">Request Info</h3>
+              <dl class="info-list">
+                <dt>ID</dt>
+                <dd>{selectedRequest.id}</dd>
+                <dt>Project ID</dt>
+                <dd>{selectedRequest.project_id}</dd>
+                <dt>Created</dt>
+                <dd>{new Date(selectedRequest.created_at).toLocaleString()}</dd>
+                <dt>Updated</dt>
+                <dd>{new Date(selectedRequest.updated_at).toLocaleString()}</dd>
+                <dt>Headers</dt>
+                <dd>{selectedRequest.headers.length}</dd>
+                <dt>Query Params</dt>
+                <dd>{selectedRequest.query_params.length}</dd>
+              </dl>
+            </div>
+          {/if}
+          </div>
 
           {#if responseHistory.length}
             <h2>History</h2>
@@ -4335,6 +4402,95 @@
 
   .tab-content {
     padding: 0.8rem 0.9rem;
+  }
+
+  .editor-body-row {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .editor-main-col {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+  }
+
+  .right-rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    width: 40px;
+    flex-shrink: 0;
+    padding-top: 0.5rem;
+    border-left: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+  }
+
+  .rail-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border: none;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 0.85rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .rail-icon:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
+  }
+
+  .rail-icon.active {
+    background: var(--color-bg-hover);
+    color: var(--color-accent);
+  }
+
+  .right-panel {
+    width: 280px;
+    flex-shrink: 0;
+    overflow-y: auto;
+    padding: 0.8rem 0.9rem;
+    border-left: 1px solid var(--color-border);
+    background: var(--color-panel-bg);
+  }
+
+  .right-panel-title {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-tertiary);
+    margin: 0 0 0.6rem;
+    font-weight: 700;
+  }
+
+  .info-list {
+    display: grid;
+    grid-template-columns: auto;
+    row-gap: 0.5rem;
+    margin: 0;
+    font-size: 0.78rem;
+  }
+
+  .info-list dt {
+    color: var(--color-text-tertiary);
+    text-transform: uppercase;
+    font-size: 0.68rem;
+    letter-spacing: 0.03em;
+    margin-bottom: 0.1rem;
+  }
+
+  .info-list dd {
+    color: var(--color-text);
+    margin: 0 0 0.4rem;
+    word-break: break-all;
   }
 
   /* Defensive default: any bare heading dropped into the detail/response area (e.g. new

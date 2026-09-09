@@ -27,17 +27,19 @@ pub struct UpdateProjectInput {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeaderEntry {
     pub key: String,
     pub value: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// Query parameters are kept separate from `url` (never baked in) so serialization is
 /// runtime-only — a disabled param, or a param whose value resolves from a variable, must
 /// be re-derivable every time without ever rewriting the stored request (README §41 style).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryParam {
     pub key: String,
     pub value: String,
@@ -60,7 +62,7 @@ pub enum ApiKeyLocation {
 /// would be exactly the placeholder behavior this pack forbids. Add it when Collections exist.
 /// Every field is stored as the raw template — `{{token}}` is resolved at send/codegen time
 /// by `canonical_request::build`, same as headers/body/query params.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Auth {
     None,
@@ -73,6 +75,211 @@ impl Default for Auth {
     fn default() -> Self {
         Auth::None
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormDataPart {
+    pub key: String,
+    pub value: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub is_file: bool,
+    #[serde(default)]
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UrlEncodedItem {
+    pub key: String,
+    pub value: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RequestBody {
+    None,
+    Raw {
+        #[serde(default = "default_raw_content_type")]
+        content_type: String,
+        data: String,
+    },
+    #[serde(alias = "formdata", alias = "form-data")]
+    FormData {
+        items: Vec<FormDataPart>,
+    },
+    #[serde(alias = "urlencoded", alias = "x-www-form-urlencoded")]
+    UrlEncoded {
+        items: Vec<UrlEncodedItem>,
+    },
+    #[serde(rename = "graphql", alias = "graph_ql", alias = "graph_q_l")]
+    GraphQL {
+        query: String,
+        #[serde(default)]
+        variables: Option<String>,
+    },
+    Binary {
+        #[serde(default)]
+        file_path: Option<String>,
+    },
+}
+
+fn default_raw_content_type() -> String {
+    "application/json".to_string()
+}
+
+impl RequestBody {
+    /// Renders the body into a wire string (with variable templates intact) and returns
+    /// an optional auto-derived Content-Type header if none was explicitly configured.
+    #[allow(dead_code)]
+    pub fn to_wire_representation(&self) -> (Option<String>, Option<String>) {
+        match self {
+            RequestBody::None => (None, None),
+            RequestBody::Raw { content_type, data } => {
+                let ct = if content_type.is_empty() { "application/json" } else { content_type.as_str() };
+                (Some(data.clone()), Some(ct.to_string()))
+            }
+            RequestBody::FormData { items } => {
+                // Encode enabled text parts into key=value lines as fallback representation
+                let text_parts: Vec<String> = items
+                    .iter()
+                    .filter(|p| p.enabled && !p.is_file)
+                    .map(|p| format!("{}={}", p.key, p.value))
+                    .collect();
+                if text_parts.is_empty() {
+                    (None, Some("multipart/form-data".into()))
+                } else {
+                    (Some(text_parts.join("&")), Some("multipart/form-data".into()))
+                }
+            }
+            RequestBody::UrlEncoded { items } => {
+                let parts: Vec<String> = items
+                    .iter()
+                    .filter(|p| p.enabled)
+                    .map(|p| format!("{}={}", p.key, p.value))
+                    .collect();
+                (Some(parts.join("&")), Some("application/x-www-form-urlencoded".into()))
+            }
+            RequestBody::GraphQL { query, variables } => {
+                let json_obj = serde_json::json!({
+                    "query": query,
+                    "variables": variables.as_deref().and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok()).unwrap_or(serde_json::Value::Null)
+                });
+                (Some(json_obj.to_string()), Some("application/json".into()))
+            }
+            RequestBody::Binary { file_path } => {
+                (file_path.clone(), Some("application/octet-stream".into()))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RequestSettings {
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub follow_redirects: Option<bool>,
+    #[serde(default)]
+    pub max_redirects: Option<u32>,
+    #[serde(default)]
+    pub verify_ssl: Option<bool>,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub http_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cookie {
+    pub id: String,
+    pub project_id: String,
+    pub domain: String,
+    pub path: String,
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub expires: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default)]
+    pub http_only: bool,
+    #[serde(default)]
+    pub same_site: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewCookieInput {
+    pub project_id: String,
+    pub domain: String,
+    #[serde(default = "default_cookie_path")]
+    pub path: String,
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub expires: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default)]
+    pub http_only: bool,
+    #[serde(default)]
+    pub same_site: Option<String>,
+}
+
+fn default_cookie_path() -> String {
+    "/".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseCookie {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub expires: Option<String>,
+    #[serde(default)]
+    pub http_only: bool,
+    #[serde(default)]
+    pub secure: bool,
+    #[serde(default)]
+    pub same_site: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SampleResponse {
+    pub id: String,
+    pub request_id: String,
+    pub name: String,
+    pub status: u16,
+    pub status_text: String,
+    pub headers: Vec<HeaderEntry>,
+    pub body: Option<String>,
+    pub content_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewSampleResponseInput {
+    pub request_id: String,
+    pub name: String,
+    pub status: u16,
+    pub status_text: String,
+    #[serde(default)]
+    pub headers: Vec<HeaderEntry>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
 }
 
 /// Lightweight row for lists — never carries headers/body (README §4/§20 lazy loading).
@@ -98,11 +305,19 @@ pub struct RequestFull {
     pub query_params: Vec<QueryParam>,
     pub auth: Auth,
     pub body: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub settings: Option<RequestSettings>,
+    #[serde(default)]
+    pub pre_request_script: Option<String>,
+    #[serde(default)]
+    pub post_request_script: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewRequestInput {
     pub project_id: String,
     pub name: String,
@@ -116,6 +331,14 @@ pub struct NewRequestInput {
     pub auth: Auth,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub settings: Option<RequestSettings>,
+    #[serde(default)]
+    pub pre_request_script: Option<String>,
+    #[serde(default)]
+    pub post_request_script: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +399,7 @@ pub struct Variable {
     pub value: String,
     pub enabled: bool,
     pub is_secret: bool,
+    pub is_local: bool,
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -193,6 +417,7 @@ pub struct VariableView {
     pub value: String,
     pub enabled: bool,
     pub is_secret: bool,
+    pub is_local: bool,
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -211,6 +436,7 @@ impl From<Variable> for VariableView {
             value,
             enabled: v.enabled,
             is_secret: v.is_secret,
+            is_local: v.is_local,
             description: v.description,
             created_at: v.created_at,
             updated_at: v.updated_at,
@@ -235,6 +461,8 @@ pub struct NewVariableInput {
     #[serde(default)]
     pub is_secret: bool,
     #[serde(default)]
+    pub is_local: bool,
+    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -253,6 +481,8 @@ pub struct UpdateVariableInput {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub is_secret: Option<bool>,
+    #[serde(default)]
+    pub is_local: Option<bool>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -284,6 +514,8 @@ pub struct ResponseMeta {
     pub status: u16,
     pub status_text: String,
     pub headers: Vec<HeaderEntry>,
+    pub content_type: Option<String>,
+    pub cookies: Vec<ResponseCookie>,
     pub duration_ms: u64,
     pub body_size: u64,
     pub created_at: DateTime<Utc>,
@@ -298,7 +530,7 @@ pub struct ResponseBodyPayload {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct UpdateRequestInput {
     pub id: String,
     #[serde(default)]
@@ -317,4 +549,20 @@ pub struct UpdateRequestInput {
     pub body: Option<String>,
     #[serde(default)]
     pub clear_body: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub clear_description: bool,
+    #[serde(default)]
+    pub settings: Option<RequestSettings>,
+    #[serde(default)]
+    pub clear_settings: bool,
+    #[serde(default)]
+    pub pre_request_script: Option<String>,
+    #[serde(default)]
+    pub clear_pre_request_script: bool,
+    #[serde(default)]
+    pub post_request_script: Option<String>,
+    #[serde(default)]
+    pub clear_post_request_script: bool,
 }

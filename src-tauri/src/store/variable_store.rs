@@ -60,6 +60,7 @@ pub fn create_variable(conn: &Connection, input: NewVariableInput) -> Result<Var
         value: input.value,
         enabled: input.enabled,
         is_secret: input.is_secret,
+        is_local: input.is_local,
         description: input.description,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -67,8 +68,8 @@ pub fn create_variable(conn: &Connection, input: NewVariableInput) -> Result<Var
 
     conn.execute(
         "INSERT INTO variables
-            (id, scope, project_id, environment_id, request_id, key, value, enabled, is_secret, description, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            (id, scope, project_id, environment_id, request_id, key, value, enabled, is_secret, is_local, description, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             variable.id,
             variable.scope.as_str(),
@@ -79,6 +80,7 @@ pub fn create_variable(conn: &Connection, input: NewVariableInput) -> Result<Var
             variable.value,
             variable.enabled,
             variable.is_secret,
+            variable.is_local,
             variable.description,
             variable.created_at.to_rfc3339(),
             variable.updated_at.to_rfc3339()
@@ -129,7 +131,7 @@ pub fn list_variables_for_scope(
         VariableScope::Request => "request_id",
     };
     let sql = format!(
-        "SELECT id, scope, project_id, environment_id, request_id, key, value, enabled, is_secret, description, created_at, updated_at
+        "SELECT id, scope, project_id, environment_id, request_id, key, value, enabled, is_secret, is_local, description, created_at, updated_at
          FROM variables WHERE scope = ?1 AND {column} = ?2 ORDER BY key ASC"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -139,7 +141,7 @@ pub fn list_variables_for_scope(
 
 pub fn get_variable(conn: &Connection, id: &str) -> Result<Variable, AppError> {
     conn.query_row(
-        "SELECT id, scope, project_id, environment_id, request_id, key, value, enabled, is_secret, description, created_at, updated_at
+        "SELECT id, scope, project_id, environment_id, request_id, key, value, enabled, is_secret, is_local, description, created_at, updated_at
          FROM variables WHERE id = ?1",
         params![id],
         row_to_variable,
@@ -166,6 +168,7 @@ pub fn update_variable(conn: &Connection, input: UpdateVariableInput) -> Result<
     let value = input.value.unwrap_or(existing.value);
     let enabled = input.enabled.unwrap_or(existing.enabled);
     let is_secret = input.is_secret.unwrap_or(existing.is_secret);
+    let is_local = input.is_local.unwrap_or(existing.is_local);
     let description = if input.clear_description {
         None
     } else {
@@ -175,9 +178,9 @@ pub fn update_variable(conn: &Connection, input: UpdateVariableInput) -> Result<
 
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "UPDATE variables SET key = ?1, value = ?2, enabled = ?3, is_secret = ?4, description = ?5, updated_at = ?6
-         WHERE id = ?7",
-        params![key, value, enabled, is_secret, description, updated_at.to_rfc3339(), existing.id],
+        "UPDATE variables SET key = ?1, value = ?2, enabled = ?3, is_secret = ?4, is_local = ?5, description = ?6, updated_at = ?7
+         WHERE id = ?8",
+        params![key, value, enabled, is_secret, is_local, description, updated_at.to_rfc3339(), existing.id],
     )?;
     tx.commit()?;
 
@@ -191,6 +194,7 @@ pub fn update_variable(conn: &Connection, input: UpdateVariableInput) -> Result<
         value,
         enabled,
         is_secret,
+        is_local,
         description,
         created_at: existing.created_at,
         updated_at,
@@ -237,8 +241,8 @@ fn load_enabled_map(conn: &Connection, column: &str, scope_ref: &str) -> Result<
 
 fn row_to_variable(row: &rusqlite::Row) -> rusqlite::Result<Variable> {
     let scope_raw: String = row.get(1)?;
-    let created_at: String = row.get(10)?;
-    let updated_at: String = row.get(11)?;
+    let created_at: String = row.get(11)?;
+    let updated_at: String = row.get(12)?;
     Ok(Variable {
         id: row.get(0)?,
         scope: parse_scope(&scope_raw),
@@ -249,7 +253,8 @@ fn row_to_variable(row: &rusqlite::Row) -> rusqlite::Result<Variable> {
         value: row.get(6)?,
         enabled: row.get(7)?,
         is_secret: row.get(8)?,
-        description: row.get(9)?,
+        is_local: row.get(9)?,
+        description: row.get(10)?,
         created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
         updated_at: updated_at.parse().unwrap_or_else(|_| Utc::now()),
     })
@@ -276,6 +281,7 @@ mod tests {
             value: "value".into(),
             enabled: true,
             is_secret: false,
+            is_local: false,
             description: None,
         }
     }
@@ -318,6 +324,8 @@ mod tests {
                 query_params: vec![],
                 auth: crate::models::Auth::None,
                 body: None,
+                description: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -348,6 +356,7 @@ mod tests {
                 value: Some("https://new.example.com".into()),
                 enabled: None,
                 is_secret: None,
+                is_local: None,
                 description: None,
                 clear_description: false,
             },
@@ -399,5 +408,36 @@ mod tests {
         let (global, _env, _req) = load_scope_maps(&conn, &project_id, None, None).unwrap();
         assert!(global.contains_key("enabledVar"));
         assert!(!global.contains_key("disabledVar"));
+    }
+
+    #[test]
+    fn local_variable_flag_roundtrips_cleanly() {
+        let conn = db::open_in_memory().unwrap();
+        let project_id = seed_project(&conn);
+
+        let mut input = base_input(VariableScope::Global, "localSecret");
+        input.project_id = Some(project_id);
+        input.is_local = true;
+        let created = create_variable(&conn, input).unwrap();
+        assert!(created.is_local);
+
+        let fetched = get_variable(&conn, &created.id).unwrap();
+        assert!(fetched.is_local);
+
+        let updated = update_variable(
+            &conn,
+            UpdateVariableInput {
+                id: created.id,
+                key: None,
+                value: None,
+                enabled: None,
+                is_secret: None,
+                is_local: Some(false),
+                description: None,
+                clear_description: false,
+            },
+        )
+        .unwrap();
+        assert!(!updated.is_local);
     }
 }

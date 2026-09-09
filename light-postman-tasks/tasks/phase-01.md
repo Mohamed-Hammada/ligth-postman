@@ -67,16 +67,16 @@ URL encoding, disabled params, and runtime-only URL construction.
 
 ---
 
-## [ ] LP-0106 — Header entry model
+## [x] LP-0106 — Header entry model
 
 Ordered key/value/description/enabled entries and duplicate-header policy.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `HeaderEntry` has `key`, `value`, `enabled`, and `description: Option<String>`. Duplicate headers preserve order, resolve templates independently, and remain distinct in `CanonicalRequest`.
+- [x] Relevant tests pass — `canonical_request::tests::duplicate_headers_preserve_order_and_resolve_independently`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — frontend Headers table supports add, remove, toggle, description, and persistence.
+- [x] PROJECT_MAP.md updated
 
 ---
 
@@ -95,158 +95,158 @@ None, Bearer, Basic, API Key, inheritance foundation, OAuth2 extension point.
 
 ---
 
-## [ ] LP-0108 — Body model
+## [x] LP-0108 — Body model
 
 None, form-data, x-www-form-urlencoded, raw, binary, GraphQL.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `models::RequestBody` supports `None`, `Raw { content_type, data }`, `FormData { items }`, `UrlEncoded { items }`, `BinaryFile { path, filename }`, `GraphQL { query, variables }`.
+- [x] Relevant tests pass — serialization and wire representation unit tests.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Raw and GraphQL body editing supported in UI.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0109 — Raw body content types
+## [x] LP-0109 — Raw body content types
 
 JSON, text, XML, HTML, JavaScript metadata.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `RequestBody::Raw` contains `content_type` specification; wire generator auto-derives Content-Type headers when not explicitly overridden.
+- [x] Relevant tests pass — `codegen` and `canonical_request` tests verify Content-Type resolution.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Body raw editor and JSON template button.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0110 — Multipart/file body foundation
+## [x] LP-0110 — Multipart/file body foundation
 
 Represent file parts without assuming everything is a string.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `FormDataPart` supports text or file parts (`key`, `value`, `filename`, `content_type`, `enabled`).
+- [x] Relevant tests pass — `models::RequestBody` wire representation tests pass.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0111 — GraphQL body foundation
+## [x] LP-0111 — GraphQL body foundation
 
 Query and variables represented separately.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `RequestBody::GraphQL { query, variables }` with dedicated UI query and variables editors in Body tab that serialize cleanly to JSON.
+- [x] Relevant tests pass — wire representation and JSON serialization verified.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Body GraphQL sub-tab tested with automatic sync to request body.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0112 — Request settings model
+## [x] LP-0112 — Request settings model
 
 Timeout, redirects, TLS, proxy, HTTP version, response limits, streaming, retry extension points.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `RequestSettings` struct with `timeout_ms`, `follow_redirects`, `max_redirects`, `verify_ssl`, `proxy_url`, `http_version`. Stored as JSON column in `requests` table. Wired to `execution.rs` and `http_engine.rs`.
+- [x] Relevant tests pass — `request_store::tests::update_can_update_and_clear_settings_and_scripts`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Request Editor Settings tab.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0113 — Cookie model foundation
+## [x] LP-0113 — Cookie model foundation
 
 Cookie jar entities with domain/path/expiry/Secure/HttpOnly/SameSite.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `Cookie` domain entity, `cookies` database table with foreign key cascade to `projects`, CRUD operations (`create_cookie`, `list_cookies_for_project`, `delete_cookie`), `parse_cookie_header` in HTTP engine.
+- [x] Relevant tests pass — `store::request_store::tests::cookies_crud`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Response cookies displayed in response viewer.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0114 — Request documentation
+## [x] LP-0114 — Request documentation
 
 Optional description/documentation field.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `description: Option<String>` added to `RequestFull`, `NewRequestInput`, and `UpdateRequestInput` (with `clear_description: bool`). Stored in SQLite via migration 7 (`ALTER TABLE requests ADD COLUMN description TEXT`).
+- [x] Relevant tests pass — `request_store::tests::update_can_set_and_clear_description`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Description input field integrated into the UI under the URL bar, saving and loading with the request.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0115 — Script extension points
+## [x] LP-0115 — Script extension points
 
 Pre-request and post-request/test script fields without sandbox implementation.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `pre_request_script` and `post_request_script` fields in `RequestFull`, `NewRequestInput`, and `UpdateRequestInput`. Stored in DB via migration 8. Exposed via Tauri API.
+- [x] Relevant tests pass — `request_store::tests::update_can_update_and_clear_settings_and_scripts`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Scripts tab with pre-request and post-request code textareas.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0116 — Response domain boundary
+## [x] LP-0116 — Response domain boundary
 
 Status, headers, cookies, body, content type, size, duration, timestamps.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `ResponseMeta` includes `content_type` and parsed `cookies: Vec<ResponseCookie>`. Extracted on response persistence and exposed via `getResponse`/`sendRequest`.
+- [x] Relevant tests pass — `store::response_store::tests::create_list_get_round_trip_for_inline_body`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Response headers and cookies details view.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0117 — Sample response model
+## [x] LP-0117 — Sample response model
 
 Separate generated sample responses from real execution history.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `SampleResponse` model and `sample_responses` table created in migration 8. `create_sample_response`, `list_sample_responses`, `delete_sample_response` CRUD implemented and exposed via Tauri.
+- [x] Relevant tests pass — `store::request_store::tests::sample_responses_crud_and_cascade_delete`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0118 — Persistence migrations for Request v2
+## [x] LP-0118 — Persistence migrations for Request v2
 
 Normalize where useful; preserve lazy-loading and migration safety.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — Migration 8 in `db.rs` adds `settings`, `pre_request_script`, `post_request_script` columns to `requests` and creates `sample_responses` and `cookies` tables with foreign keys and cascade rules.
+- [x] Relevant tests pass — `db::tests::migrations_apply_cleanly_and_are_idempotent`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0119 — Round-trip and validation tests
+## [x] LP-0119 — Round-trip and validation tests
 
 Cover all new request structures and migration correctness.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — Unit tests for settings, scripts, sample responses, cookies, and migrations.
+- [x] Relevant tests pass — 89/89 backend tests pass.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`, `npm run build`.
+- [x] Runtime smoke test completed when user-facing.
+- [x] PROJECT_MAP.md updated
 
 ---

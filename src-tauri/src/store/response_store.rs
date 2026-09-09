@@ -4,7 +4,9 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::http_engine::BodyCapture;
-use crate::models::{HeaderEntry, ResponseBodyPayload, ResponseMeta, ResponseSummary};
+use crate::models::{
+    HeaderEntry, ResponseBodyPayload, ResponseCookie, ResponseMeta, ResponseSummary,
+};
 
 /// How much of a disk-backed body `get_response_body` will actually read back over the
 /// Tauri IPC boundary — independent of how much was captured to disk in the first place.
@@ -20,20 +22,35 @@ pub struct NewResponseInput {
     pub body: BodyCapture,
 }
 
+fn extract_metadata(headers: &[HeaderEntry]) -> (Option<String>, Vec<ResponseCookie>) {
+    let content_type = headers
+        .iter()
+        .find(|h| h.key.eq_ignore_ascii_case("content-type"))
+        .map(|h| h.value.clone());
+
+    let cookies = headers
+        .iter()
+        .filter(|h| h.key.eq_ignore_ascii_case("set-cookie"))
+        .filter_map(|h| crate::http_engine::parse_cookie_header(&h.value))
+        .collect();
+
+    (content_type, cookies)
+}
+
 pub fn create_response(conn: &Connection, input: NewResponseInput) -> Result<ResponseMeta, AppError> {
     let id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
+    let (storage, inline_blob, disk_path) = match input.body {
+        BodyCapture::Inline(bytes) => ("inline", Some(bytes), None),
+        BodyCapture::Spilled { path, .. } => {
+            ("disk", None, Some(path.to_string_lossy().to_string()))
+        }
+    };
     let headers_json = serde_json::to_string(&input.headers)
         .map_err(|err| AppError::Validation(format!("invalid headers: {err}")))?;
 
-    let (storage, inline_blob, disk_path): (&str, Option<Vec<u8>>, Option<String>) = match input.body {
-        BodyCapture::Inline(bytes) => ("inline", Some(bytes), None),
-        BodyCapture::Spilled { path, .. } => ("disk", None, Some(path.to_string_lossy().into_owned())),
-    };
-
     conn.execute(
-        "INSERT INTO responses
-            (id, request_id, status, status_text, headers, duration_ms, body_size, body_storage, body_inline, body_path, created_at)
+        "INSERT INTO responses (id, request_id, status, status_text, headers, duration_ms, body_size, body_storage, body_inline, body_path, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             id,
@@ -50,12 +67,16 @@ pub fn create_response(conn: &Connection, input: NewResponseInput) -> Result<Res
         ],
     )?;
 
+    let (content_type, cookies) = extract_metadata(&input.headers);
+
     Ok(ResponseMeta {
         id,
         request_id: input.request_id,
         status: input.status,
         status_text: input.status_text,
         headers: input.headers,
+        content_type,
+        cookies,
         duration_ms: input.duration_ms,
         body_size: input.body_size,
         created_at,
@@ -91,12 +112,16 @@ pub fn get_response(conn: &Connection, id: &str) -> Result<ResponseMeta, AppErro
         |row| {
             let headers_json: String = row.get(4)?;
             let created_at: String = row.get(7)?;
+            let headers: Vec<HeaderEntry> = serde_json::from_str(&headers_json).unwrap_or_default();
+            let (content_type, cookies) = extract_metadata(&headers);
             Ok(ResponseMeta {
                 id: row.get(0)?,
                 request_id: row.get(1)?,
                 status: row.get(2)?,
                 status_text: row.get(3)?,
-                headers: serde_json::from_str(&headers_json).unwrap_or_default(),
+                headers,
+                content_type,
+                cookies,
                 duration_ms: row.get(5)?,
                 body_size: row.get(6)?,
                 created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
@@ -206,6 +231,8 @@ mod tests {
                 query_params: vec![],
                 auth: crate::models::Auth::None,
                 body: None,
+                description: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -223,7 +250,7 @@ mod tests {
                 request_id: request_id.clone(),
                 status: 200,
                 status_text: "OK".into(),
-                headers: vec![HeaderEntry { key: "Content-Type".into(), value: "text/plain".into(), enabled: true }],
+                headers: vec![HeaderEntry { key: "Content-Type".into(), value: "text/plain".into(), enabled: true, description: None }],
                 duration_ms: 42,
                 body_size: 5,
                 body: BodyCapture::Inline(b"hello".to_vec()),

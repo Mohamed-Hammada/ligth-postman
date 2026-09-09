@@ -6,13 +6,14 @@ use rusqlite::Connection;
 use tauri::State;
 
 use crate::ai::{AiProvider, ClaudeProvider, GeneratedApiDefinition};
+use crate::canonical_request;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionInput};
 use crate::models::{
-    Environment, NewEnvironmentInput, NewProjectInput, NewRequestInput, NewVariableInput,
-    Project, RequestFull, RequestSummary, ResponseBodyPayload, ResponseMeta, ResponseSummary,
-    UpdateEnvironmentInput, UpdateProjectInput, UpdateRequestInput, UpdateVariableInput,
-    VariableScope, VariableView,
+    Auth, Environment, HeaderEntry, NewEnvironmentInput, NewProjectInput, NewRequestInput,
+    NewVariableInput, Project, RequestFull, RequestSummary, ResponseBodyPayload,
+    ResponseMeta, ResponseSummary, UpdateEnvironmentInput, UpdateProjectInput,
+    UpdateRequestInput, UpdateVariableInput, VariableScope, VariableView,
 };
 use crate::resolver::{self, ScopeChain};
 use crate::store::{environment_store, project_store, request_store, response_store, variable_store};
@@ -31,6 +32,10 @@ pub struct AppState {
     /// `None` when `ANTHROPIC_API_KEY` isn't set — AI is an opt-in feature, its absence is
     /// not a startup failure (LP-0803).
     pub ai_provider: Option<ClaudeProvider>,
+    pub console: std::sync::Arc<crate::console::ConsoleBuffer>,
+    pub job_manager: std::sync::Arc<crate::background_jobs::BackgroundJobManager>,
+    pub start_time: std::time::Instant,
+    pub db_path: Option<PathBuf>,
 }
 
 #[tauri::command]
@@ -222,6 +227,7 @@ pub async fn send_request(
         &state.db,
         &state.http_client,
         &state.response_body_dir,
+        Some(&state.console),
         ExecutionInput {
             request_id: request_id.clone(),
             environment_id,
@@ -309,11 +315,66 @@ pub fn resolve_preview(
     Ok(resolver::resolve_template(&template, &chain))
 }
 
+/// Evaluates unresolved variables across all request locations (URL, headers, query params, auth, body) (LP-0208).
+#[tauri::command]
+pub fn diagnose_request(
+    state: State<AppState>,
+    request_id: String,
+    environment_id: Option<String>,
+) -> Result<canonical_request::RequestDiagnostics, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let req = request_store::get_request(&conn, &request_id)?;
+    let (global, environment, request) =
+        variable_store::load_scope_maps(&conn, &req.project_id, environment_id.as_deref(), Some(&req.id))?;
+    let chain = ScopeChain {
+        global: Some(&global),
+        environment: Some(&environment),
+        request: Some(&request),
+        ..Default::default()
+    };
+    Ok(canonical_request::diagnose(&req, &chain))
+}
+
+fn resolve_ai_provider(state: &AppState) -> Result<ClaudeProvider, AppError> {
+    if let Some(ref p) = state.ai_provider {
+        return Ok(p.clone());
+    }
+    let conn = state.db.lock().expect("db mutex poisoned");
+    ClaudeProvider::from_db_or_env(state.http_client.clone(), &conn).ok_or_else(|| {
+        AppError::Validation(
+            "AI is not configured. Please configure your Anthropic API key in AI Settings or set ANTHROPIC_API_KEY.".into(),
+        )
+    })
+}
+
 /// Lets the frontend show/hide the AI entry point without ever exposing whether (or what)
 /// key is configured.
 #[tauri::command]
 pub fn is_ai_configured(state: State<AppState>) -> bool {
-    state.ai_provider.is_some()
+    if state.ai_provider.is_some() {
+        return true;
+    }
+    let conn = state.db.lock().expect("db mutex poisoned");
+    ClaudeProvider::from_db_or_env(state.http_client.clone(), &conn).is_some()
+}
+
+#[tauri::command]
+pub fn get_ai_settings(state: State<AppState>) -> Result<crate::ai::AiSettings, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::ai::get_ai_settings(&conn)
+}
+
+#[tauri::command]
+pub fn save_ai_settings(state: State<AppState>, input: crate::ai::UpdateAiSettingsInput) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::ai::save_ai_settings(&conn, &input)
+}
+
+#[tauri::command]
+pub async fn test_ai_connection(state: State<'_, AppState>) -> Result<String, AppError> {
+    let provider = resolve_ai_provider(&state)?;
+    let test_def = provider.generate_api("ping endpoint").await?;
+    Ok(format!("AI connection verified: generated '{}' ({})", test_def.name, test_def.method))
 }
 
 /// Prompt -> structured definition -> validated (LP-0805). Nothing is persisted here — the
@@ -324,12 +385,183 @@ pub async fn generate_api_with_ai(
     state: State<'_, AppState>,
     prompt: String,
 ) -> Result<GeneratedApiDefinition, AppError> {
-    let provider = state.ai_provider.as_ref().ok_or_else(|| {
-        AppError::Validation("AI is not configured — set the ANTHROPIC_API_KEY environment variable".into())
-    })?;
+    let provider = resolve_ai_provider(&state)?;
     let definition = provider.generate_api(&prompt).await?;
     log::info!("AI generated an API definition: {}", definition.name);
     Ok(definition)
+}
+
+#[tauri::command]
+pub async fn generate_api_with_project_context(
+    state: State<'_, AppState>,
+    project_id: String,
+    prompt: String,
+    include_existing_requests: bool,
+    include_variable_names: bool,
+) -> Result<GeneratedApiDefinition, AppError> {
+    let context = {
+        let conn = state.db.lock().expect("db mutex poisoned");
+        let proj = project_store::get_project(&conn, &project_id)?;
+
+        let existing_endpoints = if include_existing_requests {
+            let reqs = request_store::list_requests(&conn, &project_id)?;
+            reqs.into_iter().map(|r| format!("{} {} ({})", r.method, r.url, r.name)).collect()
+        } else {
+            Vec::new()
+        };
+
+        let variable_keys = if include_variable_names {
+            let vars = variable_store::list_variables_for_scope(&conn, VariableScope::Global, &project_id)?;
+            vars.into_iter()
+                .filter(|v| !v.is_secret)
+                .map(|v| v.key)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        crate::ai::ProjectAiContext {
+            project_name: proj.name,
+            existing_endpoints,
+            variable_keys,
+        }
+    };
+
+    let enriched_prompt = crate::ai::build_project_context_prompt(&prompt, &context);
+    let provider = resolve_ai_provider(&state)?;
+    let def = provider.generate_api(&enriched_prompt).await?;
+    log::info!("AI generated API with project context: {}", def.name);
+    Ok(def)
+}
+
+#[tauri::command]
+pub async fn generate_sample_response_with_ai(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<crate::models::SampleResponse, AppError> {
+    let (method, url, body, desc) = {
+        let conn = state.db.lock().expect("db mutex poisoned");
+        let req = request_store::get_request(&conn, &request_id)?;
+        (req.method, req.url, req.body, req.description)
+    };
+
+    let provider = resolve_ai_provider(&state)?;
+    let sample = provider
+        .generate_sample_response(&method, &url, body.as_deref(), desc.as_deref())
+        .await?;
+
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let input = crate::models::NewSampleResponseInput {
+        request_id,
+        name: sample.description.clone().unwrap_or_else(|| format!("Sample {}", sample.status)),
+        status: sample.status,
+        status_text: format!("HTTP {}", sample.status),
+        headers: sample.headers,
+        body: Some(sample.body),
+        content_type: Some("application/json".to_string()),
+    };
+    let created = request_store::create_sample_response(&conn, input)?;
+    Ok(created)
+}
+
+#[tauri::command]
+pub async fn generate_tests_and_docs_with_ai(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<crate::ai::GeneratedTestsAndDocs, AppError> {
+    let (method, url, body) = {
+        let conn = state.db.lock().expect("db mutex poisoned");
+        let req = request_store::get_request(&conn, &request_id)?;
+        (req.method, req.url, req.body)
+    };
+
+    let provider = resolve_ai_provider(&state)?;
+    let result = provider
+        .generate_tests_and_docs(&method, &url, body.as_deref())
+        .await?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn scan_source_project(directory: String) -> Result<crate::source_analyzer::SourceProjectReport, AppError> {
+    crate::source_analyzer::scan_source_project(&directory)
+}
+
+#[tauri::command]
+pub fn get_project_source_directory(
+    state: State<AppState>,
+    project_id: String,
+) -> Result<Option<String>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::source_analyzer::get_project_source_association(&conn, &project_id)
+}
+
+#[tauri::command]
+pub fn set_project_source_directory(
+    state: State<AppState>,
+    project_id: String,
+    directory: String,
+    framework: Option<String>,
+) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::source_analyzer::set_project_source_association(&conn, &project_id, &directory, framework.as_deref())
+}
+
+#[tauri::command]
+pub fn import_discovered_endpoint(
+    state: State<AppState>,
+    project_id: String,
+    endpoint: crate::source_analyzer::DiscoveredEndpoint,
+) -> Result<RequestSummary, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let url = if endpoint.path.starts_with("http") {
+        endpoint.path
+    } else {
+        format!("{{{{baseUrl}}}}{}", endpoint.path)
+    };
+
+    let mut headers = vec![
+        HeaderEntry {
+            key: "Accept".to_string(),
+            value: "application/json".to_string(),
+            enabled: true,
+            description: None,
+        }
+    ];
+
+    if let Some(hint) = endpoint.auth_hint {
+        headers.push(HeaderEntry {
+            key: "Authorization".to_string(),
+            value: "Bearer {{token}}".to_string(),
+            enabled: true,
+            description: Some(hint),
+        });
+    }
+
+    let input = NewRequestInput {
+        project_id,
+        name: endpoint.name,
+        method: endpoint.method,
+        url,
+        headers,
+        query_params: Vec::new(),
+        auth: Auth::None,
+        body: None,
+        description: endpoint.description,
+        settings: None,
+        pre_request_script: None,
+        post_request_script: None,
+    };
+
+    let created = request_store::create_request(&conn, input)?;
+    Ok(RequestSummary {
+        id: created.id,
+        project_id: created.project_id,
+        name: created.name,
+        method: created.method,
+        url: created.url,
+        updated_at: created.updated_at,
+    })
 }
 
 /// LP-0605 (snippet UI backend). Builds the request's own scope chain the same way
@@ -340,6 +572,7 @@ pub fn generate_curl_snippet(
     request_id: String,
     environment_id: Option<String>,
     mode: crate::codegen::SnippetMode,
+    target: Option<crate::codegen::SnippetTarget>,
 ) -> Result<String, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
     let request = request_store::get_request(&conn, &request_id)?;
@@ -351,5 +584,345 @@ pub fn generate_curl_snippet(
         request: Some(&request_vars),
         ..Default::default()
     };
-    crate::codegen::generate_snippet(&request, &chain, mode)
+    crate::codegen::generate_snippet(&request, &chain, mode, target.unwrap_or_default())
 }
+
+#[tauri::command]
+pub fn import_curl(command: String) -> Result<crate::curl_importer::ParsedCurlRequest, AppError> {
+    crate::curl_importer::parse_curl(&command)
+}
+
+#[tauri::command]
+pub fn create_sample_response(
+    state: State<AppState>,
+    input: crate::models::NewSampleResponseInput,
+) -> Result<crate::models::SampleResponse, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    request_store::create_sample_response(&conn, input)
+}
+
+#[tauri::command]
+pub fn list_sample_responses(
+    state: State<AppState>,
+    request_id: String,
+) -> Result<Vec<crate::models::SampleResponse>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    request_store::list_sample_responses(&conn, &request_id)
+}
+
+#[tauri::command]
+pub fn delete_sample_response(state: State<AppState>, id: String) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    request_store::delete_sample_response(&conn, &id)
+}
+
+#[tauri::command]
+pub fn create_cookie(
+    state: State<AppState>,
+    input: crate::models::NewCookieInput,
+) -> Result<crate::models::Cookie, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    request_store::create_cookie(&conn, input)
+}
+
+#[tauri::command]
+pub fn list_cookies_for_project(
+    state: State<AppState>,
+    project_id: String,
+) -> Result<Vec<crate::models::Cookie>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    request_store::list_cookies_for_project(&conn, &project_id)
+}
+
+#[tauri::command]
+pub fn delete_cookie(state: State<AppState>, id: String) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    request_store::delete_cookie(&conn, &id)
+}
+
+#[tauri::command]
+pub fn import_postman_collection(
+    state: State<AppState>,
+    collection_json: String,
+    project_id: Option<String>,
+) -> Result<crate::postman_compat::CollectionImportReport, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::postman_compat::import_collection(&conn, &collection_json, project_id)
+}
+
+#[tauri::command]
+pub fn import_postman_environment(
+    state: State<AppState>,
+    environment_json: String,
+    project_id: String,
+) -> Result<crate::postman_compat::EnvironmentImportReport, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::postman_compat::import_environment(&conn, &environment_json, &project_id)
+}
+
+#[tauri::command]
+pub fn export_postman_collection(
+    state: State<AppState>,
+    project_id: String,
+) -> Result<String, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::postman_compat::export_project_collection(&conn, &project_id)
+}
+
+#[tauri::command]
+pub fn export_postman_environment(
+    state: State<AppState>,
+    environment_id: String,
+) -> Result<String, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::postman_compat::export_environment(&conn, &environment_id)
+}
+
+#[tauri::command]
+pub fn get_console_events(
+    state: State<AppState>,
+    limit: Option<usize>,
+    level: Option<String>,
+    request_id: Option<String>,
+) -> Result<Vec<crate::console::ConsoleEvent>, AppError> {
+    Ok(state.console.get_events(limit, level.as_deref(), request_id.as_deref()))
+}
+
+#[tauri::command]
+pub fn clear_console_events(state: State<AppState>) -> Result<(), AppError> {
+    state.console.clear();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn export_console_events(state: State<AppState>) -> Result<String, AppError> {
+    state.console.export_json().map_err(|e| AppError::Storage(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 07: Git, GitHub, Project File & Sync Commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn export_project_file(
+    state: State<AppState>,
+    project_id: String,
+    include_secrets: Option<bool>,
+) -> Result<String, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::project_file::export_project_to_json(&conn, &project_id, include_secrets.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn import_project_file(
+    state: State<AppState>,
+    file_content: String,
+    target_project_id: Option<String>,
+) -> Result<crate::models::Project, AppError> {
+    let mut conn = state.db.lock().expect("db mutex poisoned");
+    crate::project_file::import_project_from_json(&mut conn, &file_content, target_project_id.as_deref())
+}
+
+#[tauri::command]
+pub fn save_project_to_repo(
+    state: State<AppState>,
+    project_id: String,
+    directory: String,
+    include_secrets: Option<bool>,
+) -> Result<String, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let path = std::path::Path::new(&directory);
+    let saved = crate::git_sync::GitService::export_to_repo(
+        &conn,
+        &project_id,
+        path,
+        include_secrets.unwrap_or(false),
+    )?;
+    Ok(saved.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn load_project_from_repo(
+    state: State<AppState>,
+    directory: String,
+    target_project_id: Option<String>,
+) -> Result<crate::models::Project, AppError> {
+    let mut conn = state.db.lock().expect("db mutex poisoned");
+    let path = std::path::Path::new(&directory);
+    crate::git_sync::GitService::import_from_repo(&mut conn, path, target_project_id.as_deref())
+}
+
+#[tauri::command]
+pub fn get_git_status(directory: String) -> Result<crate::git_sync::GitStatus, AppError> {
+    let path = std::path::Path::new(&directory);
+    crate::git_sync::GitService::get_status(path)
+}
+
+#[tauri::command]
+pub fn git_init_repository(directory: String) -> Result<(), AppError> {
+    let path = std::path::Path::new(&directory);
+    crate::git_sync::GitService::init_repo(path)
+}
+
+#[tauri::command]
+pub fn git_commit_changes(directory: String, message: String) -> Result<String, AppError> {
+    let path = std::path::Path::new(&directory);
+    crate::git_sync::GitService::stage_all(path)?;
+    crate::git_sync::GitService::commit(path, &message)
+}
+
+#[tauri::command]
+pub fn git_get_diff(directory: String) -> Result<String, AppError> {
+    let path = std::path::Path::new(&directory);
+    crate::git_sync::GitService::diff(path)
+}
+
+#[tauri::command]
+pub fn git_get_log(
+    directory: String,
+    limit: Option<usize>,
+) -> Result<Vec<crate::git_sync::GitCommit>, AppError> {
+    let path = std::path::Path::new(&directory);
+    crate::git_sync::GitService::log(path, limit.unwrap_or(20))
+}
+
+#[tauri::command]
+pub fn git_pull_repository(
+    directory: String,
+    remote: Option<String>,
+    branch: Option<String>,
+) -> Result<String, AppError> {
+    let path = std::path::Path::new(&directory);
+    let r = remote.as_deref().unwrap_or("origin");
+    let b = branch.as_deref().unwrap_or("main");
+    crate::git_sync::GitService::pull(path, r, b)
+}
+
+#[tauri::command]
+pub fn git_push_repository(
+    directory: String,
+    remote: Option<String>,
+    branch: Option<String>,
+) -> Result<String, AppError> {
+    let path = std::path::Path::new(&directory);
+    let r = remote.as_deref().unwrap_or("origin");
+    let b = branch.as_deref().unwrap_or("main");
+    crate::git_sync::GitService::push(path, r, b)
+}
+
+#[tauri::command]
+pub fn git_resolve_conflict(
+    directory: String,
+    file: String,
+    choice: String,
+) -> Result<(), AppError> {
+    let path = std::path::Path::new(&directory);
+    crate::git_sync::GitService::resolve_conflict(path, &file, &choice)
+}
+
+#[tauri::command]
+pub fn get_project_git_settings(
+    state: State<AppState>,
+    project_id: String,
+) -> Result<Option<crate::git_sync::ProjectGitSettings>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::git_sync::get_project_git_settings(&conn, &project_id)
+}
+
+#[tauri::command]
+pub fn save_project_git_settings(
+    state: State<AppState>,
+    settings: crate::git_sync::ProjectGitSettings,
+) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::git_sync::save_project_git_settings(&conn, &settings)
+}
+
+#[tauri::command]
+pub async fn verify_github_token(token: String) -> Result<crate::github_auth::GitHubUser, AppError> {
+    crate::github_auth::GitHubService::verify_token(&token).await
+}
+
+#[tauri::command]
+pub async fn get_github_repo_info(
+    token: String,
+    owner: String,
+    repo: String,
+) -> Result<crate::github_auth::GitHubRepoInfo, AppError> {
+    crate::github_auth::GitHubService::get_repo_info(&token, &owner, &repo).await
+}
+
+#[tauri::command]
+pub fn run_script_sandbox(
+    script: String,
+    environment: Option<HashMap<String, String>>,
+    variables: Option<HashMap<String, String>>,
+    response_status: Option<u16>,
+    response_status_text: Option<String>,
+    response_headers: Option<Vec<(String, String)>>,
+    response_body: Option<String>,
+) -> Result<crate::script_engine::ScriptExecutionResult, String> {
+    let env = environment.unwrap_or_default();
+    let vars = variables.unwrap_or_default();
+
+    if let Some(status) = response_status {
+        let status_text = response_status_text.unwrap_or_else(|| "OK".into());
+        let headers = response_headers.unwrap_or_default();
+        let body = response_body.unwrap_or_default();
+        Ok(crate::script_engine::execute_post_request_script(
+            &script, &env, &vars, status, &status_text, &headers, &body, 2000,
+        ))
+    } else {
+        Ok(crate::script_engine::execute_pre_request_script(&script, &env, &vars, 2000))
+    }
+}
+
+#[tauri::command]
+pub fn get_system_diagnostics(
+    state: State<AppState>,
+) -> Result<crate::diagnostics::SystemDiagnostics, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let console_count = state.console.get_events(None, None, None).len();
+    let ai_configured = state.ai_provider.is_some() || crate::ai::get_ai_settings(&conn)?.is_configured;
+    let uptime = state.start_time.elapsed().as_secs();
+
+    crate::diagnostics::collect_system_diagnostics(
+        &conn,
+        state.db_path.as_deref(),
+        console_count,
+        ai_configured,
+        uptime,
+    )
+}
+
+#[tauri::command]
+pub fn submit_background_job(
+    state: State<AppState>,
+    name: String,
+    priority_level: u8,
+) -> Result<String, AppError> {
+    let priority = match priority_level {
+        2 => crate::background_jobs::JobPriority::High,
+        0 => crate::background_jobs::JobPriority::Low,
+        _ => crate::background_jobs::JobPriority::Normal,
+    };
+    let (id, _) = state.job_manager.submit_job(name, priority);
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn list_background_jobs(
+    state: State<AppState>,
+) -> Result<Vec<crate::background_jobs::JobSummary>, AppError> {
+    Ok(state.job_manager.list_jobs())
+}
+
+#[tauri::command]
+pub fn cancel_background_job(
+    state: State<AppState>,
+    job_id: String,
+) -> Result<bool, AppError> {
+    Ok(state.job_manager.cancel_job(&job_id))
+}
+
+

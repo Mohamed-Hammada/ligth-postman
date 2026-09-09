@@ -203,6 +203,8 @@ mod tests {
                 query_params: vec![],
                 auth: crate::models::Auth::None,
                 body: None,
+                description: None,
+                ..Default::default()
             },
         )
         .unwrap();

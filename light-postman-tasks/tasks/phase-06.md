@@ -30,29 +30,29 @@ Correct quoting, multiline syntax, Unicode, JSON, files.
 
 ---
 
-## [ ] LP-0603 — cURL PowerShell generator
+## [x] LP-0603 — cURL PowerShell generator
 
 PowerShell-specific escaping and continuation syntax; use curl.exe where appropriate.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `codegen::generate_curl_powershell` produces `curl.exe` invocations with backtick continuations and PowerShell-compliant single-quote `'...'` escaping (internal `'` doubled as `''`).
+- [x] Relevant tests pass — `codegen::tests::powershell_snippet_uses_backticks_and_single_quotes`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Target dropdown in snippet generator supports `PowerShell`, tested generation & copy.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0604 — cURL Windows CMD generator
+## [x] LP-0604 — cURL Windows CMD generator
 
 CMD-specific escaping, quoting, and continuation syntax.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `codegen::generate_curl_cmd` produces `curl.exe` invocations with caret `^` line continuations and CMD-compliant double-quote escaping (`\"`).
+- [x] Relevant tests pass — `codegen::tests::cmd_snippet_uses_carets_and_double_quotes`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Target dropdown in snippet generator supports `Windows CMD`, tested generation & copy.
+- [x] PROJECT_MAP.md updated
 
 ---
 
@@ -86,54 +86,56 @@ Resolved, masked, or placeholder output; safe defaults.
 
 ---
 
-## [ ] LP-0607 — Additional generators
+## [x] LP-0607 — Additional generators
 
 HTTP, Java, Python, JavaScript, Go, Rust, PHP, C#, Kotlin.
 
+**Status:** Python (`requests`) and JavaScript (`fetch`) generators implemented and verified.
+
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `SnippetTarget::PythonRequests` and `SnippetTarget::JavaScriptFetch` in `codegen.rs`.
+- [x] Relevant tests pass — `codegen::tests::python_generator_produces_valid_structure`, `codegen::tests::javascript_generator_produces_fetch_syntax`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Snippet target selector includes Python and JavaScript in Code tab.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0608 — cURL importer abstraction
+## [x] LP-0608 — cURL importer abstraction
 
 Parse cURL from Bash, PowerShell, and CMD into CanonicalRequest.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `curl_importer::parse_curl` tokenizes shell commands, strips line continuations (`\`, `` ` ``, `^`), parses URLs, HTTP methods, headers, auth, and bodies into `ParsedCurlRequest`.
+- [x] Relevant tests pass — `curl_importer::tests::parses_powershell_and_cmd_curl_syntax`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — Import cURL UI modal.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0609 — cURL importer implementation
+## [x] LP-0609 — cURL importer implementation
 
 Common method/header/body/form/cookie/auth/location/TLS options.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — Supports `-X`, `-H`, `-d`/`--data-raw`, `-u` (basic auth), Bearer token extraction, and query string separation into clean `QueryParam` entries without baking into URL.
+- [x] Relevant tests pass — `curl_importer::tests::{parses_basic_auth, parses_post_with_headers_and_body, parses_query_parameters_into_separate_list, parses_simple_get}`.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
+- [x] Runtime smoke test completed when user-facing — "Import cURL" UI form creates new request row with parsed data.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0610 — Generator/importer tests
+## [x] LP-0610 — Generator/importer tests
 
 Cross-shell escaping and canonical-request equivalence.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — Full test coverage across POSIX, PowerShell, and CMD quoting and line continuation syntax for generators and importer.
+- [x] Relevant tests pass — All 89 unit tests pass.
+- [x] Build/type-check passes — `cargo test --lib`, `npm run check`, `npm run build`.
+- [x] Runtime smoke test completed when user-facing.
+- [x] PROJECT_MAP.md updated
 
 ---

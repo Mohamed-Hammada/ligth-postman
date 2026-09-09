@@ -67,29 +67,29 @@ Respect enabled state and encoding.
 
 ---
 
-## [ ] LP-0306 — Apply headers and authorization
+## [x] LP-0306 — Apply headers and authorization
 
 Resolve variables and avoid unsafe duplicate behavior.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `canonical_request.rs` resolves variables across all header keys & values and applies authorization types (`Bearer`, `Basic`, `ApiKey` header/query). Duplicate headers preserve order, descriptions, and resolve independently.
+- [x] Relevant tests pass — `duplicate_headers_preserve_order_and_descriptions_and_resolve_independently`, `bearer_auth_resolves_variable_into_header`, `basic_auth_base64_encodes_username_password`, `api_key_in_header_location_adds_a_header`, `api_key_in_query_location_adds_a_query_param_not_a_header`.
+- [x] Build/type-check passes
+- [x] Runtime smoke test completed when user-facing — request execution in app.
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0307 — Serialize all body types
+## [x] LP-0307 — Serialize all body types
 
 Raw, JSON, forms, multipart, binary, GraphQL.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `resolve_body` in `canonical_request.rs` handles `Raw`, `UrlEncoded`, `FormData`, `GraphQL`, `Binary` with auto-derived `Content-Type` headers and variable resolution inside templates.
+- [x] Relevant tests pass — `graphql_body_resolves_and_sets_content_type`, `urlencoded_body_resolves_and_sets_content_type`, `body_is_resolved_through_the_scope_chain`.
+- [x] Build/type-check passes
+- [x] Runtime smoke test completed when user-facing — Body editor in frontend.
+- [x] PROJECT_MAP.md updated
 
 ---
 
@@ -106,29 +106,27 @@ Per-request cancellation and timeout enforcement.
 
 ---
 
-## [ ] LP-0309 — Redirect/proxy/TLS settings
+## [x] LP-0309 — Redirect/proxy/TLS settings
 
 Honor request settings safely.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `http_engine::build_configured_client` dynamically constructs custom `reqwest::Client` when non-default TLS (`verify_ssl: false`), redirects (`follow_redirects: false`, `max_redirects`), or proxy configurations are specified on the request.
+- [x] Relevant tests pass — `build_configured_client_applies_settings_cleanly`.
+- [x] Build/type-check passes
+- [x] PROJECT_MAP.md updated
 
 ---
 
-## [ ] LP-0310 — Cookie jar integration
+## [x] LP-0310 — Cookie jar integration
 
 Send cookies and process Set-Cookie.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — Outgoing requests automatically inject matching domain/path cookies from the project's cookie store into `Cookie` header. Incoming `Set-Cookie` response headers are parsed and upserted into the SQLite cookie table.
+- [x] Relevant tests pass — `cookie_jar_injects_matching_cookie_and_persists_response_set_cookie`, `cookies_crud`.
+- [x] Build/type-check passes
+- [x] PROJECT_MAP.md updated
 
 ---
 

@@ -93,6 +93,81 @@ const MIGRATIONS: &[(i64, &str)] = &[
         6,
         r#"ALTER TABLE requests ADD COLUMN auth TEXT NOT NULL DEFAULT '{"type":"none"}';"#,
     ),
+    (
+        7,
+        "ALTER TABLE requests ADD COLUMN description TEXT;",
+    ),
+    (
+        8,
+        "ALTER TABLE requests ADD COLUMN settings TEXT;
+        ALTER TABLE requests ADD COLUMN pre_request_script TEXT;
+        ALTER TABLE requests ADD COLUMN post_request_script TEXT;
+        CREATE TABLE sample_responses (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            status INTEGER NOT NULL,
+            status_text TEXT NOT NULL,
+            headers TEXT NOT NULL DEFAULT '[]',
+            body TEXT,
+            content_type TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_sample_responses_request_id ON sample_responses(request_id);
+        CREATE TABLE cookies (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            domain TEXT NOT NULL,
+            path TEXT NOT NULL DEFAULT '/',
+            name TEXT NOT NULL,
+            value TEXT NOT NULL,
+            expires TEXT,
+            secure INTEGER NOT NULL DEFAULT 0,
+            http_only INTEGER NOT NULL DEFAULT 0,
+            same_site TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_cookies_project_id ON cookies(project_id);",
+    ),
+    (
+        9,
+        "ALTER TABLE variables ADD COLUMN is_local INTEGER NOT NULL DEFAULT 0;",
+    ),
+    (
+        10,
+        "CREATE TABLE project_git_settings (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            repo_path TEXT,
+            remote_url TEXT,
+            branch TEXT NOT NULL DEFAULT 'main',
+            auto_sync INTEGER NOT NULL DEFAULT 0,
+            github_token TEXT,
+            last_sync_at TEXT
+        );
+        CREATE TABLE sync_queue (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            operation TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_sync_queue_project_id ON sync_queue(project_id);",
+    ),
+    (
+        11,
+        "CREATE TABLE app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE project_source_associations (
+            project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+            source_directory TEXT NOT NULL,
+            framework TEXT,
+            detected_at TEXT NOT NULL
+        );",
+    ),
 ];
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {
@@ -119,7 +194,7 @@ fn configure(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_migrations(conn: &Connection) -> Result<(), AppError> {
+pub fn run_migrations(conn: &Connection) -> Result<(), AppError> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,

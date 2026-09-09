@@ -15,7 +15,7 @@ use reqwest::{Client, Method};
 use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
-use crate::models::HeaderEntry;
+use crate::models::{HeaderEntry, RequestSettings, ResponseCookie};
 
 pub struct HttpRequestSpec {
     pub method: String,
@@ -24,6 +24,42 @@ pub struct HttpRequestSpec {
     pub headers: Vec<HeaderEntry>,
     pub body: Option<String>,
     pub timeout_ms: u64,
+    pub settings: Option<RequestSettings>,
+}
+
+pub fn build_configured_client(settings: &RequestSettings) -> Result<Client, AppError> {
+    let mut builder = reqwest::Client::builder();
+
+    if settings.verify_ssl == Some(false) {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+
+    if settings.follow_redirects == Some(false) {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    } else if let Some(max) = settings.max_redirects {
+        if max > 0 {
+            builder = builder.redirect(reqwest::redirect::Policy::limited(max as usize));
+        }
+    }
+
+    if let Some(proxy_str) = &settings.proxy_url {
+        let trimmed = proxy_str.trim();
+        if !trimmed.is_empty() {
+            let proxy = reqwest::Proxy::all(trimmed)
+                .map_err(|e| AppError::Validation(format!("invalid proxy URL '{trimmed}': {e}")))?;
+            builder = builder.proxy(proxy);
+        }
+    }
+
+    if let Some(ver) = &settings.http_version {
+        if ver == "HTTP/1.1" {
+            builder = builder.http1_only();
+        }
+    }
+
+    builder
+        .build()
+        .map_err(|err| AppError::Network(format!("failed to configure HTTP client: {err}")))
 }
 
 pub enum BodyCapture {
@@ -41,6 +77,10 @@ pub struct HttpResult {
     pub status: u16,
     pub status_text: String,
     pub headers: Vec<HeaderEntry>,
+    #[allow(dead_code)]
+    pub content_type: Option<String>,
+    #[allow(dead_code)]
+    pub cookies: Vec<ResponseCookie>,
     pub duration_ms: u64,
     pub body_size: u64,
     pub body: BodyCapture,
@@ -57,7 +97,24 @@ pub async fn execute(
     let method = Method::from_bytes(spec.method.as_bytes())
         .map_err(|_| AppError::Validation(format!("invalid HTTP method '{}'", spec.method)))?;
 
-    let mut builder = client
+    let custom_client = if let Some(settings) = &spec.settings {
+        if settings.verify_ssl == Some(false)
+            || settings.follow_redirects == Some(false)
+            || (settings.max_redirects.is_some() && settings.max_redirects != Some(10))
+            || settings.proxy_url.is_some()
+            || settings.http_version.is_some()
+        {
+            Some(build_configured_client(settings)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let active_client = custom_client.as_ref().unwrap_or(client);
+
+    let mut builder = active_client
         .request(method, &spec.url)
         .timeout(Duration::from_millis(spec.timeout_ms));
 
@@ -75,15 +132,31 @@ pub async fn execute(
 
     let status = response.status();
     let status_text = status.canonical_reason().unwrap_or("").to_string();
-    let headers = response
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let headers: Vec<HeaderEntry> = response
         .headers()
         .iter()
         .map(|(k, v)| HeaderEntry {
             key: k.to_string(),
             value: v.to_str().unwrap_or("").to_string(),
             enabled: true,
+            description: None,
         })
         .collect();
+
+    let mut cookies = Vec::new();
+    for val in response.headers().get_all(reqwest::header::SET_COOKIE) {
+        if let Ok(cookie_str) = val.to_str() {
+            if let Some(cookie) = parse_cookie_header(cookie_str) {
+                cookies.push(cookie);
+            }
+        }
+    }
 
     let (body, body_size) = capture_body(response, max_inline_bytes, spill_dir).await?;
 
@@ -91,9 +164,58 @@ pub async fn execute(
         status: status.as_u16(),
         status_text,
         headers,
+        content_type,
+        cookies,
         duration_ms: started.elapsed().as_millis() as u64,
         body_size,
         body,
+    })
+}
+
+pub fn parse_cookie_header(header: &str) -> Option<ResponseCookie> {
+    let mut parts = header.split(';').map(|p| p.trim());
+    let first = parts.next()?;
+    let (name, value) = match first.find('=') {
+        Some(idx) => (first[..idx].trim().to_string(), first[idx + 1..].trim().to_string()),
+        None => (first.to_string(), String::new()),
+    };
+
+    let mut domain = None;
+    let mut path = None;
+    let mut expires = None;
+    let mut http_only = false;
+    let mut secure = false;
+    let mut same_site = None;
+
+    for part in parts {
+        let (k, v) = match part.find('=') {
+            Some(idx) => (part[..idx].trim(), part[idx + 1..].trim()),
+            None => (part.trim(), ""),
+        };
+        if k.eq_ignore_ascii_case("domain") {
+            domain = Some(v.to_string());
+        } else if k.eq_ignore_ascii_case("path") {
+            path = Some(v.to_string());
+        } else if k.eq_ignore_ascii_case("expires") {
+            expires = Some(v.to_string());
+        } else if k.eq_ignore_ascii_case("httponly") {
+            http_only = true;
+        } else if k.eq_ignore_ascii_case("secure") {
+            secure = true;
+        } else if k.eq_ignore_ascii_case("samesite") {
+            same_site = Some(v.to_string());
+        }
+    }
+
+    Some(ResponseCookie {
+        name,
+        value,
+        domain,
+        path,
+        expires,
+        http_only,
+        secure,
+        same_site,
     })
 }
 
@@ -134,7 +256,11 @@ async fn capture_body(
     }
 
     let capture = match spill {
-        Some((_, path)) => BodyCapture::Spilled { path, size: total_size },
+        Some((mut file, path)) => {
+            file.flush().await.map_err(|err| AppError::Storage(err.to_string()))?;
+            drop(file);
+            BodyCapture::Spilled { path, size: total_size }
+        }
         None => BodyCapture::Inline(buffer),
     };
     Ok((capture, total_size))
@@ -188,7 +314,7 @@ mod tests {
     }
 
     fn spec(url: String) -> HttpRequestSpec {
-        HttpRequestSpec { method: "GET".into(), url, headers: vec![], body: None, timeout_ms: 5000 }
+        HttpRequestSpec { method: "GET".into(), url, headers: vec![], body: None, timeout_ms: 5000, settings: None }
     }
 
     #[tokio::test]
@@ -255,5 +381,26 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(AppError::Network(_))));
+    }
+
+    #[test]
+    fn build_configured_client_applies_settings_cleanly() {
+        let settings = RequestSettings {
+            timeout_ms: Some(3000),
+            follow_redirects: Some(false),
+            max_redirects: Some(3),
+            verify_ssl: Some(false),
+            proxy_url: None,
+            http_version: Some("HTTP/1.1".into()),
+        };
+        let client = build_configured_client(&settings);
+        assert!(client.is_ok(), "configured client should build successfully");
+
+        let bad_proxy = RequestSettings {
+            proxy_url: Some("invalid proxy URI %%".into()),
+            ..Default::default()
+        };
+        let err_client = build_configured_client(&bad_proxy);
+        assert!(matches!(err_client, Err(AppError::Validation(_))));
     }
 }

@@ -200,6 +200,7 @@ mod tests {
                 value: "https://staging.example.com".into(),
                 enabled: true,
                 is_secret: false,
+                is_local: false,
                 description: None,
             },
         )

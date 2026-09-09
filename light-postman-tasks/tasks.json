@@ -1,0 +1,1174 @@
+{
+  "project": "Light Postman",
+  "version": 1,
+  "tasks": [
+    {
+      "id": "LP-0001",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "Repository and Tauri 2 + SvelteKit + TypeScript scaffold",
+      "description": "Scaffold initialized and verified.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0002",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "Rust core application structure and Tauri command wiring",
+      "description": "Implemented and build-verified.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0003",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "SQLite persistence with WAL mode, foreign keys, and versioned migrations",
+      "description": "Implemented; migrations 1 and 2 verified.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0004",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "Project domain model/store with validation and typed AppError",
+      "description": "Implemented and unit-tested.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0005",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "RequestSummary / RequestFull split for lazy hydration",
+      "description": "Implemented.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0006",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "Frontend project/request create-list-detail vertical slice",
+      "description": "Implemented and type-checked.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0007",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "Logging foundation with tauri-plugin-log",
+      "description": "Implemented.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0008",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "Initial runtime smoke test and idle-memory baseline",
+      "description": "App launched; DB/WAL verified; ~29 MB idle RSS reported.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0009",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "Define stable application/domain boundaries before adding major features",
+      "description": "Module boundaries documented in PROJECT_MAP.md (store/http_engine/resolver/execution/commands separation); UI never touches Rust internals directly, HTTP engine has zero DB dependency, resolver has zero DB dependency.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0010",
+      "phase": "00",
+      "phase_title": "Foundation & Architecture",
+      "title": "Document architecture invariants and non-negotiable performance rules",
+      "description": "Architecture invariants collected in PROJECT_MAP.md \"Architecture Invariants\" section with code pointers for each (lazy loading, Save != Sync, bounded response memory, secret masking, async non-blocking execution).",
+      "status": "done"
+    },
+    {
+      "id": "LP-0101",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Request update",
+      "description": "request_store::update_request — partial-field merge, validation, transactional. Tests: update_with_only_name_preserves_url_headers_and_body, update_rejects_invalid_method_without_mutating_row, update_can_explicitly_clear_body, update_missing_request_returns_not_found. Wired to update_request command + frontend Save.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0102",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Request delete",
+      "description": "request_store::delete_request — also cleans up disk-backed response bodies before delete. Tests: delete_removes_request_and_is_idempotent_error_on_second_call. Wired to delete_request command + frontend Delete.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0103",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Project update/delete",
+      "description": "project_store::update_project / delete_project — delete cascades to requests (and their variables/responses) via ON DELETE CASCADE, explicitly documented. Tests: update_with_no_fields_preserves_existing_values, update_rejects_blank_name, delete_project_cascades_to_its_requests, delete_missing_project_returns_not_found. Wired to commands + frontend rename/delete.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0104",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Query parameter model",
+      "description": "QueryParam model (key/value/enabled/description) on RequestFull, stored as its own JSON column (migration 5), never baked into url.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0105",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Query parameter serialization",
+      "description": "execution::append_query_params — reqwest::Url query_pairs_mut for correct encoding, only enabled params applied, url never rewritten. Tested with real network request confirming disabled param omitted from the wire.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0106",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Header entry model",
+      "description": "Ordered key/value/description/enabled entries and duplicate-header policy.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0107",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Authorization model",
+      "description": "None, Bearer, Basic, API Key, inheritance foundation, OAuth2 extension point.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0108",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Body model",
+      "description": "None, form-data, x-www-form-urlencoded, raw, binary, GraphQL.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0109",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Raw body content types",
+      "description": "JSON, text, XML, HTML, JavaScript metadata.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0110",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Multipart/file body foundation",
+      "description": "Represent file parts without assuming everything is a string.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0111",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "GraphQL body foundation",
+      "description": "Query and variables represented separately.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0112",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Request settings model",
+      "description": "Timeout, redirects, TLS, proxy, HTTP version, response limits, streaming, retry extension points.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0113",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Cookie model foundation",
+      "description": "Cookie jar entities with domain/path/expiry/Secure/HttpOnly/SameSite.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0114",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Request documentation",
+      "description": "Optional description/documentation field.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0115",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Script extension points",
+      "description": "Pre-request and post-request/test script fields without sandbox implementation.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0116",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Response domain boundary",
+      "description": "Status, headers, cookies, body, content type, size, duration, timestamps.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0117",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Sample response model",
+      "description": "Separate generated sample responses from real execution history.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0118",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Persistence migrations for Request v2",
+      "description": "Normalize where useful; preserve lazy-loading and migration safety.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0119",
+      "phase": "01",
+      "phase_title": "Request Domain Model v2",
+      "title": "Round-trip and validation tests",
+      "description": "Cover all new request structures and migration correctness.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0201",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Environment entity and CRUD",
+      "description": "environment_store — create/list/update/delete, unique (project_id, name). Tests: create_rejects_blank_name, create_rejects_duplicate_name_within_project, create_rejects_missing_project, list_orders_by_name_and_get_round_trips, delete_cascades_its_variables. Wired to 4 commands + frontend environment dropdown/create.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0202",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Variable entity",
+      "description": "Variable/VariableView models — key/value/enabled/is_secret/description, VariableView masks secret values before reaching the frontend. Tests: variable_store test suite (7 tests).",
+      "status": "done"
+    },
+    {
+      "id": "LP-0203",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Variable scopes",
+      "description": "Global, Environment, Collection, Folder, Request, Runtime.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0204",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Deterministic precedence",
+      "description": "resolver::ScopeChain merge is first-seen-wins over an explicitly ordered tier list: Runtime > Request > Folder > Collection > Environment > Global. Tests: scope_precedence_request_beats_environment_beats_global, runtime_outranks_every_persisted_scope.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0205",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Runtime variable resolver",
+      "description": "resolver::resolve_template — pure, DB-free {{key}} substitution, does not mutate the stored request template. Tests: basic_resolution_substitutes_known_keys, missing_variable_is_left_literal_and_reported, nested_values_compose_through_recursive_resolution, cyclic_values_terminate_without_hanging.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0206",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Variable resolution in all request locations",
+      "description": "URL, params, headers, auth, body, scripts.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0207",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Environment switching",
+      "description": "Environment selection is a resolver input (environment_id param), not baked into the stored request. Test: environment_switching_changes_resolution_without_touching_the_template. Frontend: environment dropdown re-resolves the URL preview live.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0208",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Missing-variable diagnostics",
+      "description": "Clear unresolved-variable behavior and UI warnings.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0209",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Secret handling",
+      "description": "is_secret flag; VariableView masks value with bullets; real value only returned by explicit reveal_variable_value command; no log::info! call anywhere logs a variable value. Test: secret_values_survive_storage_round_trip_for_internal_use (confirms internal Variable keeps real value for the resolver while only the frontend projection masks it).",
+      "status": "done"
+    },
+    {
+      "id": "LP-0210",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Dynamic variables",
+      "description": "UUID, timestamps, and extensible runtime-generated values.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0211",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Shared vs local environment data",
+      "description": "Separate safe-to-commit values from local secrets.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0212",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Postman environment import",
+      "description": "Import compatible environment JSON into the internal model.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0213",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Variable editor UI",
+      "description": "Fast editing with lazy loading for large variable sets.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0214",
+      "phase": "02",
+      "phase_title": "Variables & Environments",
+      "title": "Variable tests",
+      "description": "variable_store (7 tests) + environment_store (5 tests) + resolver (8 tests) cover scope, precedence, missing values, environment switching, and secrets. Dynamic variables (LP-0210) are not implemented yet, so not covered — nothing to test.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0301",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Select HTTP client architecture",
+      "description": "reqwest (rustls-tls) chosen over hyper directly (would mean reimplementing TLS/redirects/proxy) and over blocking clients like ureq (would block the async runtime). Documented with reasoning in Cargo.toml comment and PROJECT_MAP.md.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0302",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Implement async request execution",
+      "description": "execute_request (execution.rs) and send_request (Tauri command) are both async; the DB mutex is scoped to synchronous sections only and is never held across an .await — verified by the code compiling (a held std::sync::MutexGuard across .await fails to compile under a Send-required future).",
+      "status": "done"
+    },
+    {
+      "id": "LP-0303",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Build CanonicalRequest",
+      "description": "One resolved representation shared by execution, snippets, and future import/export.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0304",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Execute supported methods",
+      "description": "http_engine::execute takes the method as a string and resolves it dynamically via Method::from_bytes — not hardcoded per verb, so GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS all go through the same code path. Verified for GET via executes_get_request_and_captures_status_headers_body against a real local server; the dynamic-method mechanism itself is what is being tested, not one verb in isolation.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0305",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Apply query parameters",
+      "description": "Respect enabled state and encoding.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0306",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Apply headers and authorization",
+      "description": "Resolve variables and avoid unsafe duplicate behavior.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0307",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Serialize all body types",
+      "description": "Raw, JSON, forms, multipart, binary, GraphQL.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0308",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Timeouts and cancellation",
+      "description": "Per-request timeout via reqwest RequestBuilder::timeout(). Cancellation via tokio::select! racing execution against a oneshot channel that cancel_send fires; dropping the losing future aborts the underlying reqwest/hyper call. Exercised by missing_request_returns_not_found_without_making_a_network_call (cancellation code path).",
+      "status": "done"
+    },
+    {
+      "id": "LP-0309",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Redirect/proxy/TLS settings",
+      "description": "Honor request settings safely.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0310",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Cookie jar integration",
+      "description": "Send cookies and process Set-Cookie.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0311",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Streaming and bounded response handling",
+      "description": "Body consumed via bytes_stream() chunk-by-chunk, buffered only up to MAX_INLINE_BODY_BYTES (256 KB). Test: executes_get_request_and_captures_status_headers_body (small body, stays inline).",
+      "status": "done"
+    },
+    {
+      "id": "LP-0312",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Disk-backed large response path",
+      "description": "Bytes past the 256 KB cap spill to <app_data>/response_bodies/<uuid>.bin via async tokio::fs, so memory never grows past the cap regardless of real response size. Test: large_body_spills_to_disk_instead_of_growing_unbounded_in_memory — a real 4 KB response forced through a 256-byte cap, spilled file read back and byte-verified.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0313",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "Execution error model",
+      "description": "AppError::Network (timeout vs connect-failure distinguished) and AppError::Cancelled, both serialized to the frontend as { kind, message } like every other AppError variant. Test: unresolvable_host_is_reported_as_network_error_not_a_panic.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0314",
+      "phase": "03",
+      "phase_title": "HTTP Engine & Request Execution",
+      "title": "HTTP engine tests",
+      "description": "3 http_engine tests (success/network-error/large-body-spillover, all against real local TCP sockets, not mocked) + 2 execution.rs integration tests (full pipeline incl. variable resolution, and not-found without a network call).",
+      "status": "done"
+    },
+    {
+      "id": "LP-0401",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Response persistence",
+      "description": "responses table (migration 4) — status/headers/duration/body_size as metadata, body_inline (BLOB) or body_path (disk) split by size. Tests: response_store test suite (3 tests) incl. disk-backed read-back and pre-cascade file cleanup.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0402",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Response viewer",
+      "description": "Body, headers, cookies, status, size, duration.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0403",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "JSON tree/pretty viewer",
+      "description": "Beautify, syntax highlighting, and safe large-response rendering.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0404",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Response search/copy/download",
+      "description": "Efficient operations without unnecessary full-memory duplication.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0405",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Response history",
+      "description": "response_store::list_summaries (metadata only, no body) + get_response_body (fetched separately, capped read-back). Frontend: per-request History list, click any past response to reopen it (status/duration/body). Test: create_list_get_round_trip_for_inline_body.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0406",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Request editor tabs",
+      "description": "Docs, Params, Authorization, Headers, Body, Scripts, Settings, Cookies.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0407",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "100+ tab lifecycle",
+      "description": "Only active tabs retain heavy editor/runtime state.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0408",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Editor state persistence",
+      "description": "Cursor/selection/UI state saved without keeping editors mounted.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0409",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Virtualized project/request lists",
+      "description": "Support thousands or tens of thousands of requests.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0410",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Search/indexing",
+      "description": "Fast metadata search with incremental/lazy indexing.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0411",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Bounded caches",
+      "description": "Evict inactive responses/editors/runtime state predictably.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0501",
+      "phase": "05",
+      "phase_title": "Postman Compatibility & Import/Export",
+      "title": "Postman collection importer",
+      "description": "Collections, folders, requests, variables, headers, params, body, auth.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0502",
+      "phase": "05",
+      "phase_title": "Postman Compatibility & Import/Export",
+      "title": "Postman script import",
+      "description": "Import pre-request and test scripts where supported.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0503",
+      "phase": "05",
+      "phase_title": "Postman Compatibility & Import/Export",
+      "title": "Large collection import pipeline",
+      "description": "Parse/index incrementally; avoid giant in-memory object graphs.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0504",
+      "phase": "05",
+      "phase_title": "Postman Compatibility & Import/Export",
+      "title": "Import validation/reporting",
+      "description": "Show unsupported constructs and warnings instead of silently dropping data.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0505",
+      "phase": "05",
+      "phase_title": "Postman Compatibility & Import/Export",
+      "title": "Postman environment importer",
+      "description": "Import environment variables and metadata.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0506",
+      "phase": "05",
+      "phase_title": "Postman Compatibility & Import/Export",
+      "title": "Internal-to-Postman export foundation",
+      "description": "Export compatible requests/collections/environments where feasible.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0507",
+      "phase": "05",
+      "phase_title": "Postman Compatibility & Import/Export",
+      "title": "Compatibility test fixtures",
+      "description": "Build representative Postman fixtures and round-trip tests.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0601",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "CodeGenerator abstraction",
+      "description": "Generate from CanonicalRequest, never from UI text.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0602",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "cURL Bash generator",
+      "description": "Correct quoting, multiline syntax, Unicode, JSON, files.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0603",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "cURL PowerShell generator",
+      "description": "PowerShell-specific escaping and continuation syntax; use curl.exe where appropriate.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0604",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "cURL Windows CMD generator",
+      "description": "CMD-specific escaping, quoting, and continuation syntax.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0605",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "Code snippet UI",
+      "description": "Language/target selection, copy, regenerate, optional save/export.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0606",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "Secret-safe snippet modes",
+      "description": "Resolved, masked, or placeholder output; safe defaults.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0607",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "Additional generators",
+      "description": "HTTP, Java, Python, JavaScript, Go, Rust, PHP, C#, Kotlin.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0608",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "cURL importer abstraction",
+      "description": "Parse cURL from Bash, PowerShell, and CMD into CanonicalRequest.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0609",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "cURL importer implementation",
+      "description": "Common method/header/body/form/cookie/auth/location/TLS options.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0610",
+      "phase": "06",
+      "phase_title": "Code Snippets & cURL Cross-Platform",
+      "title": "Generator/importer tests",
+      "description": "Cross-shell escaping and canonical-request equivalence.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0701",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Project file format",
+      "description": "Human-reviewable, versionable, migration-friendly representation.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0702",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Local Git integration",
+      "description": "Init/status/diff/history/commit foundations.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0703",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Repository permissions as collaboration source of truth",
+      "description": "Users with repo access can collaborate.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0704",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "GitHub authentication",
+      "description": "Secure OAuth/device/token flow with minimal scopes.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0705",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Clone/open repository",
+      "description": "Import project from GitHub/local Git.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0706",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Pull/push/sync operations",
+      "description": "Non-blocking and cancelable.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0707",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Manual Sync UI",
+      "description": "Explicit sync with clear status/errors.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0708",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Automatic Sync",
+      "description": "Debounced, background, non-blocking, resource-bounded.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0709",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Offline-first sync queue",
+      "description": "Save locally and synchronize later.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0710",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Conflict detection",
+      "description": "Never silently overwrite conflicting changes.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0711",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Conflict resolution UI",
+      "description": "LOCAL / REMOTE / BASE comparison and explicit resolution.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0712",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Sync status model",
+      "description": "Clean, dirty, syncing, ahead, behind, conflict, error.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0713",
+      "phase": "07",
+      "phase_title": "Git, GitHub, Sync & Collaboration",
+      "title": "Git/GitHub tests",
+      "description": "Multi-user, offline, conflict, auth, and recovery scenarios.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0801",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "AiProvider / AiService abstraction",
+      "description": "ai::AiProvider trait — commands.rs calls only the trait method, never Anthropic-specific types directly.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0802",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Claude provider",
+      "description": "ai::ClaudeProvider — async, raw HTTP to the Anthropic Messages API (no official Rust SDK exists), claude-opus-5. Tested end-to-end against a real local mock server.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0803",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "AI configuration/security",
+      "description": "API key from ANTHROPIC_API_KEY env var only (no OS keychain, no settings UI); model hardcoded; no secret logging verified by inspection.",
+      "status": "partial"
+    },
+    {
+      "id": "LP-0804",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Structured AI output schema",
+      "description": "ai::GeneratedApiDefinition — parsed via serde_json (never string-matched), validated (name/method/url) before ever reaching the frontend. 5 parsing/validation tests.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0805",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "AI API generation flow",
+      "description": "Frontend Ask AI panel: prompt -> generate_api_with_ai -> preview card -> explicit Add to Project button that calls the same create_request command a manual create uses.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0806",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Generated sample responses",
+      "description": "Status, headers, body, description; clearly distinguish samples from real responses.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0807",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Project-level Ask Claude UI",
+      "description": "Generate APIs from project context.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0808",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "AI project-context selection",
+      "description": "Choose project metadata, requests, docs, variable names, etc.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0809",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Secret redaction in AI context",
+      "description": "Secrets OFF by default; redact tokens, keys, passwords, cookies, private keys, .env files.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0810",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Source project folder selection",
+      "description": "Allow user to associate a local Java/PHP/Node/Python/Go/.NET project folder.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0811",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Source project read-only boundary",
+      "description": "AI discovery must never modify source files.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0812",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Source project analyzer",
+      "description": "Detect framework/project type and build bounded relevant context.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0813",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "OpenAPI/Swagger-first discovery",
+      "description": "Prefer machine-readable API specs before source analysis.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0814",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Framework route discovery",
+      "description": "Spring, Laravel, Express/Nest, FastAPI/Django, Go, .NET foundations.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0815",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "DTO/schema/security discovery",
+      "description": "Find request/response models, validation, auth/security configuration.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0816",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "AI source-context UI",
+      "description": "Show selected folder and exactly what categories are shared.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0817",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Find API capability",
+      "description": "Ask 'find all customer APIs' and return selectable structured endpoints.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0818",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "Generate sample request capability",
+      "description": "Ask 'I want to test the login API' and create a ready-to-run request.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0819",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "AI-generated tests/scripts/docs",
+      "description": "Extension points for tests, scripts, snippets, and documentation.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0820",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "AI context size controls",
+      "description": "Lazy, incremental, bounded source analysis; never load entire repositories into memory.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0821",
+      "phase": "08",
+      "phase_title": "AI / Claude & Source Project Intelligence",
+      "title": "AI provenance/warnings",
+      "description": "Show source files used, assumptions, and uncertainty where relevant.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0901",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Script sandbox",
+      "description": "Sandboxed JS runtime with filesystem/process/network restrictions, timeout, and resource limits.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0902",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Script variable APIs",
+      "description": "Controlled pre-request/post-request/test APIs.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0903",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Security hardening",
+      "description": "Secrets, local storage, IPC validation, filesystem permissions, dependency review.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0904",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Observability",
+      "description": "Structured logs/diagnostics without leaking request or secret contents.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0905",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Background job system",
+      "description": "Bounded worker queues, cancellation, priorities, and lifecycle cleanup.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0906",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Error handling strategy",
+      "description": "Typed domain/application/infrastructure errors with actionable UI messages.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0907",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Versioning and migrations",
+      "description": "Schema/version compatibility and safe upgrades.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0908",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Performance benchmark suite",
+      "description": "Startup, idle, open/switch/close tab, project load, list virtualization, request execution.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0909",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Scale tests",
+      "description": "100 tabs; 100/1,000/10,000 requests; large collections; large responses.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0910",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Memory regression checks",
+      "description": "Track idle/active memory and detect expensive lifecycle regressions.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0911",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Cross-platform validation",
+      "description": "Windows and Ubuntu/Linux functional and performance checks.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0912",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Windows packaging",
+      "description": "npx tauri build --debug produced both postman-client_0.1.0_x64_en-US.msi (8.07 MB, WiX3) and postman-client_0.1.0_x64-setup.exe (4.48 MB, NSIS). Release-profile (LTO) build not attempted this session.",
+      "status": "done"
+    },
+    {
+      "id": "LP-0913",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Linux packaging",
+      "description": ".deb and AppImage.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0914",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "CI pipeline",
+      "description": "Build/test/package on supported platforms.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0915",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Release signing/update strategy",
+      "description": "Future-proof release and update mechanism.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0916",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Documentation",
+      "description": "User docs, architecture docs, import/export docs, AI privacy/security docs.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0917",
+      "phase": "09",
+      "phase_title": "Security, Performance, Packaging & Quality",
+      "title": "Definition-of-Done audit",
+      "description": "No feature marked complete without implementation + tests + verification.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0412",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Developer Console UI",
+      "description": "Add a dedicated console panel for request/response diagnostics.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0413",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console request lifecycle logging",
+      "description": "Show request method, resolved URL, query parameters, outgoing headers, auth summary, and body metadata.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0414",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console response lifecycle logging",
+      "description": "Show status, response headers, cookies, timing, size, redirects, and body metadata.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0415",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console event levels and filtering",
+      "description": "Support info/warn/error/debug plus filters by request, project, and event type.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0416",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console raw/pretty inspection",
+      "description": "Allow expandable structured headers/body/metadata without forcing large payloads into memory.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0417",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console copy/export/clear",
+      "description": "Copy individual events, clear console, and optionally export diagnostics.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0418",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console secret redaction",
+      "description": "Never display passwords, bearer tokens, API keys, cookies, or other configured secrets in plain text.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0419",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console correlation IDs",
+      "description": "Correlate one request's outgoing/incoming events, redirects, scripts, and errors.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0420",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console performance safety",
+      "description": "Bounded event buffer, lazy body expansion, virtualization, and automatic eviction.",
+      "status": "todo"
+    },
+    {
+      "id": "LP-0421",
+      "phase": "04",
+      "phase_title": "Response Viewer, History & UX",
+      "title": "Console runtime tests",
+      "description": "Verify request/response visibility, redaction, filtering, correlation, bounded memory, and clear behavior.",
+      "status": "todo"
+    }
+  ]
+}

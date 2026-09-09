@@ -10,6 +10,12 @@ pub enum AppError {
     NotFound(String),
     #[error("validation error: {0}")]
     Validation(String),
+    #[error("network error: {0}")]
+    Network(String),
+    #[error("request cancelled")]
+    Cancelled,
+    #[error("AI error: {0}")]
+    Ai(String),
 }
 
 impl From<rusqlite::Error> for AppError {

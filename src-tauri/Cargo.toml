@@ -28,6 +28,16 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 tauri-plugin-log = "2"
+# reqwest: mature async HTTP/1.1+HTTP/2 client with TLS, streaming bodies, per-request
+# timeouts and proxy support — chosen over hyper (too low-level, would mean reimplementing
+# redirects/TLS/proxy) and over blocking clients like ureq (would block the async runtime).
+# rustls instead of the default native-tls avoids an OpenSSL system dependency on Linux.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+# Needed directly (not just transitively via reqwest/tauri) for task::spawn + AbortHandle
+# (request cancellation) and async file IO (large-response disk spillover).
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "io-util"] }
+# StreamExt::next() to consume reqwest's bytes_stream() chunk-by-chunk for bounded buffering.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

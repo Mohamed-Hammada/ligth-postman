@@ -30,6 +30,65 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         CREATE INDEX idx_requests_project_id ON requests(project_id);",
     ),
+    (
+        3,
+        "CREATE TABLE environments (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(project_id, name)
+        );
+        CREATE INDEX idx_environments_project_id ON environments(project_id);
+
+        -- scope is one of: global | environment | collection | folder | request.
+        -- collection_id/folder_id are reserved (no backing table yet) so adding those
+        -- features later needs a new table + FK, not a variables schema rewrite.
+        CREATE TABLE variables (
+            id TEXT PRIMARY KEY,
+            scope TEXT NOT NULL CHECK(scope IN ('global','environment','collection','folder','request')),
+            project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            environment_id TEXT REFERENCES environments(id) ON DELETE CASCADE,
+            request_id TEXT REFERENCES requests(id) ON DELETE CASCADE,
+            collection_id TEXT,
+            folder_id TEXT,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            is_secret INTEGER NOT NULL DEFAULT 0,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_variables_project_id ON variables(project_id);
+        CREATE INDEX idx_variables_environment_id ON variables(environment_id);
+        CREATE INDEX idx_variables_request_id ON variables(request_id);",
+    ),
+    (
+        4,
+        "-- Metadata is always cheap to list; the body never is, so it's split out
+        -- (README §19/§23). body_inline holds small bodies as a BLOB (binary-safe);
+        -- body_path holds a path under the app data dir for anything over the cap.
+        CREATE TABLE responses (
+            id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL REFERENCES requests(id) ON DELETE CASCADE,
+            status INTEGER NOT NULL,
+            status_text TEXT NOT NULL,
+            headers TEXT NOT NULL DEFAULT '[]',
+            duration_ms INTEGER NOT NULL,
+            body_size INTEGER NOT NULL,
+            body_storage TEXT NOT NULL CHECK(body_storage IN ('inline','disk')),
+            body_inline BLOB,
+            body_path TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_responses_request_id ON responses(request_id);",
+    ),
+    (
+        5,
+        "ALTER TABLE requests ADD COLUMN query_params TEXT NOT NULL DEFAULT '[]';",
+    ),
 ];
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {

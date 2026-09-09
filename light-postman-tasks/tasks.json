@@ -127,8 +127,8 @@
       "phase": "01",
       "phase_title": "Request Domain Model v2",
       "title": "Header entry model",
-      "description": "Ordered key/value/description/enabled entries and duplicate-header policy.",
-      "status": "todo"
+      "description": "HeaderEntry has key/value/enabled but no description field, no stable per-row id, and no documented duplicate-header policy.",
+      "status": "partial"
     },
     {
       "id": "LP-0107",
@@ -207,8 +207,8 @@
       "phase": "01",
       "phase_title": "Request Domain Model v2",
       "title": "Response domain boundary",
-      "description": "Status, headers, cookies, body, content type, size, duration, timestamps.",
-      "status": "todo"
+      "description": "ResponseMeta has status/headers/body/size/duration/timestamps but no cookies model and no explicit content-type extraction (it is just one of the headers today).",
+      "status": "partial"
     },
     {
       "id": "LP-0117",
@@ -255,8 +255,8 @@
       "phase": "02",
       "phase_title": "Variables & Environments",
       "title": "Variable scopes",
-      "description": "Global, Environment, Collection, Folder, Request, Runtime.",
-      "status": "todo"
+      "description": "global/environment/request scopes are real (backed by tables, reachable via API); collection/folder are schema-reserved columns only, no backing entity exists yet.",
+      "status": "partial"
     },
     {
       "id": "LP-0204",
@@ -279,8 +279,8 @@
       "phase": "02",
       "phase_title": "Variables & Environments",
       "title": "Variable resolution in all request locations",
-      "description": "URL, params, headers, auth, body, scripts.",
-      "status": "todo"
+      "description": "URL, headers, body, and query params are all resolved through the same {{var}} chain before every send. Auth (no model yet) and scripts (not implemented) are not resolved because there is nothing there to resolve.",
+      "status": "partial"
     },
     {
       "id": "LP-0207",
@@ -295,8 +295,8 @@
       "phase": "02",
       "phase_title": "Variables & Environments",
       "title": "Missing-variable diagnostics",
-      "description": "Clear unresolved-variable behavior and UI warnings.",
-      "status": "todo"
+      "description": "resolve_template returns a missing: Vec<String> (never silently drops an unresolved key). Surfaced in the frontend only for the URL-preview line; not yet surfaced for headers/body/query-params in the editor.",
+      "status": "partial"
     },
     {
       "id": "LP-0209",
@@ -383,16 +383,16 @@
       "phase": "03",
       "phase_title": "HTTP Engine & Request Execution",
       "title": "Apply query parameters",
-      "description": "Respect enabled state and encoding.",
-      "status": "todo"
+      "description": "execution::append_query_params applies resolved, enabled query params at send time via reqwest::Url — verified with a real network request showing an enabled param present and a disabled one absent from the wire.",
+      "status": "done"
     },
     {
       "id": "LP-0306",
       "phase": "03",
       "phase_title": "HTTP Engine & Request Execution",
       "title": "Apply headers and authorization",
-      "description": "Resolve variables and avoid unsafe duplicate behavior.",
-      "status": "todo"
+      "description": "Headers are resolved and applied to every outgoing request. No Authorization model exists — a bearer token, API key, etc. today has to be typed in manually as a header.",
+      "status": "partial"
     },
     {
       "id": "LP-0307",
@@ -471,8 +471,8 @@
       "phase": "04",
       "phase_title": "Response Viewer, History & UX",
       "title": "Response viewer",
-      "description": "Body, headers, cookies, status, size, duration.",
-      "status": "todo"
+      "description": "Status/size/duration/body shown in the viewer; headers are fetched (ResponseMeta) but not rendered in the UI; no cookies model to show.",
+      "status": "partial"
     },
     {
       "id": "LP-0403",
@@ -608,7 +608,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "CodeGenerator abstraction",
       "description": "Generate from CanonicalRequest, never from UI text.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "LP-0303 (CanonicalRequest) does not exist yet — the task explicitly requires generating from it, never from ad-hoc UI/request text."
     },
     {
       "id": "LP-0602",
@@ -616,7 +617,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL Bash generator",
       "description": "Correct quoting, multiline syntax, Unicode, JSON, files.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on LP-0601 (CodeGenerator abstraction), itself blocked on LP-0303."
     },
     {
       "id": "LP-0603",
@@ -624,7 +626,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL PowerShell generator",
       "description": "PowerShell-specific escaping and continuation syntax; use curl.exe where appropriate.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on LP-0601, itself blocked on LP-0303."
     },
     {
       "id": "LP-0604",
@@ -632,7 +635,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL Windows CMD generator",
       "description": "CMD-specific escaping, quoting, and continuation syntax.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on LP-0601, itself blocked on LP-0303."
     },
     {
       "id": "LP-0605",
@@ -640,7 +644,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "Code snippet UI",
       "description": "Language/target selection, copy, regenerate, optional save/export.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on LP-0601/0602-0604 (nothing to select/copy from yet)."
     },
     {
       "id": "LP-0606",
@@ -648,7 +653,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "Secret-safe snippet modes",
       "description": "Resolved, masked, or placeholder output; safe defaults.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on LP-0601 (no generator output to apply secret-safe modes to yet)."
     },
     {
       "id": "LP-0607",
@@ -656,7 +662,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "Additional generators",
       "description": "HTTP, Java, Python, JavaScript, Go, Rust, PHP, C#, Kotlin.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on LP-0601, itself blocked on LP-0303."
     },
     {
       "id": "LP-0608",
@@ -664,7 +671,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL importer abstraction",
       "description": "Parse cURL from Bash, PowerShell, and CMD into CanonicalRequest.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Task explicitly targets CanonicalRequest (LP-0303), which does not exist yet."
     },
     {
       "id": "LP-0609",
@@ -672,7 +680,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL importer implementation",
       "description": "Common method/header/body/form/cookie/auth/location/TLS options.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on LP-0608, itself blocked on LP-0303."
     },
     {
       "id": "LP-0610",
@@ -680,7 +689,8 @@
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "Generator/importer tests",
       "description": "Cross-shell escaping and canonical-request equivalence.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on every other Phase 06 task, all blocked on LP-0303."
     },
     {
       "id": "LP-0701",
@@ -920,7 +930,8 @@
       "phase_title": "AI / Claude & Source Project Intelligence",
       "title": "Find API capability",
       "description": "Ask 'find all customer APIs' and return selectable structured endpoints.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on the source-project analyzer pipeline (LP-0812-0815), none of which exists — \"find all customer APIs\" has nothing to search."
     },
     {
       "id": "LP-0818",
@@ -928,7 +939,8 @@
       "phase_title": "AI / Claude & Source Project Intelligence",
       "title": "Generate sample request capability",
       "description": "Ask 'I want to test the login API' and create a ready-to-run request.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Depends on the same analyzer/discovery pipeline (LP-0812-0817) to locate \"the login API\" before a request can be generated from it."
     },
     {
       "id": "LP-0819",
@@ -968,7 +980,8 @@
       "phase_title": "Security, Performance, Packaging & Quality",
       "title": "Script variable APIs",
       "description": "Controlled pre-request/post-request/test APIs.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "Task is \"controlled pre-request/post-request/test APIs\" for a script sandbox — LP-0901 (the sandbox itself) does not exist yet; there is nothing to expose the API inside of."
     },
     {
       "id": "LP-0903",
@@ -983,8 +996,8 @@
       "phase": "09",
       "phase_title": "Security, Performance, Packaging & Quality",
       "title": "Observability",
-      "description": "Structured logs/diagnostics without leaking request or secret contents.",
-      "status": "todo"
+      "description": "tauri-plugin-log wired, verified secret-safe (never logs values/prompts/keys), but no diagnostics command exposing memory/tab-count/startup-time metrics (README §30).",
+      "status": "partial"
     },
     {
       "id": "LP-0905",
@@ -999,16 +1012,16 @@
       "phase": "09",
       "phase_title": "Security, Performance, Packaging & Quality",
       "title": "Error handling strategy",
-      "description": "Typed domain/application/infrastructure errors with actionable UI messages.",
-      "status": "todo"
+      "description": "AppError gives typed, actionable errors surfaced to the UI, but as one flat enum, not the three-tier domain/application/infrastructure taxonomy the task describes.",
+      "status": "partial"
     },
     {
       "id": "LP-0907",
       "phase": "09",
       "phase_title": "Security, Performance, Packaging & Quality",
       "title": "Versioning and migrations",
-      "description": "Schema/version compatibility and safe upgrades.",
-      "status": "todo"
+      "description": "Versioned migration runner (db.rs) — 5 migrations shipped, tested for idempotency, verified additive against a pre-existing on-disk DB across every migration added this session (never re-applies, never corrupts).",
+      "status": "done"
     },
     {
       "id": "LP-0908",
@@ -1039,8 +1052,8 @@
       "phase": "09",
       "phase_title": "Security, Performance, Packaging & Quality",
       "title": "Cross-platform validation",
-      "description": "Windows and Ubuntu/Linux functional and performance checks.",
-      "status": "todo"
+      "description": "Verified on Windows only (build + runtime smoke tests). No Linux environment available this session to validate Ubuntu functional/performance behavior.",
+      "status": "partial"
     },
     {
       "id": "LP-0912",
@@ -1056,7 +1069,8 @@
       "phase_title": "Security, Performance, Packaging & Quality",
       "title": "Linux packaging",
       "description": ".deb and AppImage.",
-      "status": "todo"
+      "status": "blocked",
+      "blocked_on": "This session ran on Windows only. Producing a real .deb/AppImage needs a Linux build environment (or cross-compilation toolchain for Tauri`s Linux webview deps) not available here — same category as the Windows packaging proof, just blocked on host OS rather than on unimplemented code."
     },
     {
       "id": "LP-0914",
@@ -1079,16 +1093,16 @@
       "phase": "09",
       "phase_title": "Security, Performance, Packaging & Quality",
       "title": "Documentation",
-      "description": "User docs, architecture docs, import/export docs, AI privacy/security docs.",
-      "status": "todo"
+      "description": "README.md (41 sections) + PROJECT_MAP.md cover architecture and current-state docs extensively. No dedicated user-facing docs, import/export docs, or AI privacy/security docs yet.",
+      "status": "partial"
     },
     {
       "id": "LP-0917",
       "phase": "09",
       "phase_title": "Security, Performance, Packaging & Quality",
       "title": "Definition-of-Done audit",
-      "description": "No feature marked complete without implementation + tests + verification.",
-      "status": "todo"
+      "description": "This reconciliation pass (and every phase-file update this session) applies the DoD audit discipline, but it is an ongoing practice applied per-feature, not a single finished audit artifact.",
+      "status": "partial"
     },
     {
       "id": "LP-0412",

@@ -3,8 +3,8 @@
 **Purpose:** Master implementation checklist for the Lightweight API Client.
 
 **Task count:** 146  
-**Verified complete at task-plan creation:** 8  
-**Status convention:** `[x]` = verified complete, `[ ]` = pending.
+**Reconciled 2026-09-09:** 39 DONE · 13 PARTIAL · 14 BLOCKED · 80 TODO — see `TASKS.md` for the full per-task breakdown and `tasks.json` for the machine-readable version.
+**Status convention:** `[x]` = verified complete, `[~]` = partial (real, not to full stated scope), `[!]` = blocked (named prerequisite doesn't exist yet), `[ ]` = pending.
 
 > This tracker includes the original architecture/product specification plus the newly added:
 > - full Postman-style request features
@@ -18,16 +18,18 @@
 
 ## Phase Index
 
-- **Phase 00 — Foundation & Architecture**: 10/10 complete → `tasks/phase-00.md`
-- **Phase 01 — Request Domain Model v2**: 5/19 complete → `tasks/phase-01.md`
-- **Phase 02 — Variables & Environments**: 8/14 complete → `tasks/phase-02.md`
-- **Phase 03 — HTTP Engine & Request Execution**: 8/14 complete → `tasks/phase-03.md`
-- **Phase 04 — Response Viewer, History & UX**: includes the Developer Console for request/response diagnostics.: 2/11 complete → `tasks/phase-04.md`
-- **Phase 05 — Postman Compatibility & Import/Export**: 0/7 complete → `tasks/phase-05.md`
-- **Phase 06 — Code Snippets & cURL Cross-Platform**: 0/10 complete → `tasks/phase-06.md`
-- **Phase 07 — Git, GitHub, Sync & Collaboration**: 0/13 complete → `tasks/phase-07.md`
-- **Phase 08 — AI / Claude & Source Project Intelligence**: 4/21 complete → `tasks/phase-08.md`
-- **Phase 09 — Security, Performance, Packaging & Quality**: 1/17 complete → `tasks/phase-09.md`
+- **Phase 00 — Foundation & Architecture**: 10 done / 0 partial / 0 blocked / 0 todo (of 10) → `tasks/phase-00.md`
+- **Phase 01 — Request Domain Model v2**: 5 / 2 / 0 / 12 (of 19) → `tasks/phase-01.md`
+- **Phase 02 — Variables & Environments**: 7 / 3 / 0 / 4 (of 14) → `tasks/phase-02.md`
+- **Phase 03 — HTTP Engine & Request Execution**: 9 / 1 / 0 / 4 (of 14) → `tasks/phase-03.md`
+- **Phase 04 — Response Viewer, History & UX**: includes the Developer Console for request/response diagnostics. 2 / 1 / 0 / 18 (of 21) → `tasks/phase-04.md`
+- **Phase 05 — Postman Compatibility & Import/Export**: 0 / 0 / 0 / 7 (of 7) → `tasks/phase-05.md`
+- **Phase 06 — Code Snippets & cURL Cross-Platform**: 0 / 0 / 10 / 0 (of 10) — all blocked on LP-0303 → `tasks/phase-06.md`
+- **Phase 07 — Git, GitHub, Sync & Collaboration**: 0 / 0 / 0 / 13 (of 13) → `tasks/phase-07.md`
+- **Phase 08 — AI / Claude & Source Project Intelligence**: 4 / 1 / 2 / 14 (of 21) → `tasks/phase-08.md`
+- **Phase 09 — Security, Performance, Packaging & Quality**: 2 / 5 / 2 / 8 (of 17) → `tasks/phase-09.md`
+
+(counts read: done / partial / blocked / todo)
 
 ## Current Verified Baseline
 

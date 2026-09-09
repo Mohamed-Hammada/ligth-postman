@@ -80,16 +80,16 @@ Typed domain/application/infrastructure errors with actionable UI messages.
 
 ---
 
-## [ ] LP-0907 — Versioning and migrations
+## [x] LP-0907 — Versioning and migrations
 
 Schema/version compatibility and safe upgrades.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `db.rs` versioned migration runner; 5 migrations shipped so far, each additive (never edits a shipped entry, per its own doc comment).
+- [x] Relevant tests pass — `migrations_apply_cleanly_and_are_idempotent`.
+- [x] Build/type-check passes
+- [x] Runtime smoke test completed when user-facing — verified repeatedly across this session: every new migration (3, 4, 5) applied cleanly against a real on-disk DB left at the previous version, never re-running already-applied migrations or corrupting existing rows.
+- [x] PROJECT_MAP.md updated
 
 ---
 

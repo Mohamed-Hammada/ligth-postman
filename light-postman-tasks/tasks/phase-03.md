@@ -54,16 +54,16 @@ GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS.
 
 ---
 
-## [ ] LP-0305 — Apply query parameters
+## [x] LP-0305 — Apply query parameters
 
 Respect enabled state and encoding.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `execution::append_query_params` resolves each param's key/value through the same `{{var}}` chain as headers/body, then applies only `enabled` ones via `reqwest::Url::query_pairs_mut` at send time; `url` is never rewritten.
+- [x] Relevant tests pass — `append_query_params_preserves_existing_query_string_and_encodes_values`, `append_query_params_is_a_no_op_for_an_empty_list`, `append_query_params_rejects_an_unparseable_base_url`, and the extended `full_pipeline_...` test which sends a real request and confirms the enabled param is on the wire while the disabled one is not.
+- [x] Build/type-check passes
+- [x] Runtime smoke test completed when user-facing — frontend params table + manual send.
+- [x] PROJECT_MAP.md updated
 
 ---
 

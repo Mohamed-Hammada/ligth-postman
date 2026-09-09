@@ -154,6 +154,53 @@
     }
   });
 
+  // Response area sub-tabs (Body / Headers / Cookies / Tests) — replaces the old flat stacked layout.
+  let responseSubTab = $state<"body" | "headers" | "cookies" | "tests">("body");
+
+  function formatByteSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  // Real test-assertion results for the active request's most recent send, sourced from the
+  // console event log (script_engine already emits pass/fail per pm.test() call there) — not
+  // a separate/fake data source.
+  let activeResponseTests = $derived.by(() => {
+    if (!selectedRequest) return [];
+    const evts = consoleEvents.filter(
+      (e) => e.event_type === "test_assertion" && e.request_id === selectedRequest!.id,
+    );
+    if (!evts.length) return [];
+    const latestCorrelationId = evts[evts.length - 1].correlation_id;
+    return evts
+      .filter((e) => e.correlation_id === latestCorrelationId)
+      .map((e) => ({
+        name: (e.details?.name as string | undefined) ?? e.message,
+        passed: Boolean(e.details?.passed),
+        error: (e.details?.error as string | null | undefined) ?? null,
+      }));
+  });
+
+  // Resizable sidebar (drag handle between the project tree and the main workspace).
+  let sidebarWidth = $state(300);
+  let sidebarResizing = $state(false);
+
+  function startSidebarResize(e: MouseEvent) {
+    e.preventDefault();
+    sidebarResizing = true;
+    const onMove = (ev: MouseEvent) => {
+      sidebarWidth = Math.min(480, Math.max(200, ev.clientX));
+    };
+    const onUp = () => {
+      sidebarResizing = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   let aiConfigured = $state(false);
   let showAiPanel = $state(false);
   let rightPanel = $state<"code" | "info" | null>(null);
@@ -960,11 +1007,18 @@
 
   async function sendCurrentRequest() {
     if (!selectedRequest || sending) return;
+    // Send always executes the persisted request, so unsaved edits (URL, headers, body, params,
+    // auth, ...) must be flushed first — otherwise Send would silently fire the last-saved
+    // version while the editor shows something different. saveRequest() is a cheap diff-based
+    // no-op when nothing changed, so it's safe to call unconditionally.
+    await saveRequest();
+    if (!selectedRequest) return;
     const requestId = selectedRequest.id;
     sending = true;
     try {
       const meta = await api.sendRequest(requestId, selectedEnvironmentId);
       activeResponse = meta;
+      responseSubTab = "body";
       const body = await api.getResponseBody(meta.id);
       activeResponseBody = body.text;
       activeResponseTruncated = body.truncated;
@@ -990,6 +1044,7 @@
   async function openHistoryResponse(id: string) {
     try {
       activeResponse = await api.getResponse(id);
+      responseSubTab = "body";
       const body = await api.getResponseBody(id);
       activeResponseBody = body.text;
       activeResponseTruncated = body.truncated;
@@ -1808,13 +1863,18 @@
       {/if}
     </div>
     <div class="topbar-right">
-      {#if aiConfigured}
-        <button type="button" class="btn-ghost" onclick={() => (showAiPanel = true)}>✨ Ask AI</button>
-      {/if}
-      <button type="button" class="btn-ghost" onclick={() => { showCollectionImport = true; collectionImportReport = null; collectionImportError = ""; }}>
+      <button
+        type="button"
+        class="btn-ghost"
+        title={aiConfigured ? "Ask Claude AI about this project, or generate requests/tests/docs" : "Set up AI features (Claude API key)"}
+        onclick={() => (showAiPanel = true)}
+      >
+        ✨ {aiConfigured ? "Ask AI" : "Set up AI"}
+      </button>
+      <button type="button" class="btn-ghost" title="Import a Postman collection (.json)" onclick={() => { showCollectionImport = true; collectionImportReport = null; collectionImportError = ""; }}>
         📥 Import Collection
       </button>
-      <button type="button" class="btn-ghost" onclick={() => (showCurlImport = true)}>🔗 Import cURL</button>
+      <button type="button" class="btn-ghost" title="Import a request from a cURL command" onclick={() => (showCurlImport = true)}>🔗 Import cURL</button>
     </div>
   </header>
 
@@ -1824,12 +1884,12 @@
   {#if errorMessage}
     <div class="error-banner">
       {errorMessage}
-      <button type="button" class="dismiss-btn" onclick={() => (errorMessage = "")}>✕</button>
+      <button type="button" class="dismiss-btn" title="Dismiss" onclick={() => (errorMessage = "")}>✕</button>
     </div>
   {/if}
 
   <div class="workspace">
-    <aside class="sidebar">
+    <aside class="sidebar" style="width: {sidebarWidth}px">
       <div class="sidebar-header">
         <span class="sidebar-title">Projects</span>
       </div>
@@ -1903,15 +1963,15 @@
                         <button class="icon-btn icon-btn-ghost" title="Delete" onclick={() => deleteRequest(req.id)}>🗑</button>
                       </li>
                     {:else}
-                      <li class="empty">{requestSearchQuery ? "No matching requests." : "No requests yet."}</li>
+                      <li class="empty">{requestSearchQuery ? "No matching requests." : "No requests yet — add one above, or import a Postman collection / cURL command."}</li>
                     {/each}
                   </ul>
 
                   {#if totalRequestPages > 1}
                     <div class="request-pagination">
-                      <button type="button" disabled={requestPage === 0} onclick={() => (requestPage = Math.max(0, requestPage - 1))}>◀</button>
+                      <button type="button" title="Previous page" disabled={requestPage === 0} onclick={() => (requestPage = Math.max(0, requestPage - 1))}>◀</button>
                       <span>{requestPage + 1} / {totalRequestPages}</span>
-                      <button type="button" disabled={requestPage >= totalRequestPages - 1} onclick={() => (requestPage = Math.min(totalRequestPages - 1, requestPage + 1))}>▶</button>
+                      <button type="button" title="Next page" disabled={requestPage >= totalRequestPages - 1} onclick={() => (requestPage = Math.min(totalRequestPages - 1, requestPage + 1))}>▶</button>
                     </div>
                   {/if}
                 {/if}
@@ -1919,21 +1979,38 @@
             {/if}
           </div>
         {:else}
-          <p class="empty">No projects yet.</p>
+          <p class="empty">No projects yet — create one above to get started.</p>
         {/each}
       </div>
     </aside>
+
+    <div
+      class="sidebar-resize-handle"
+      class:resizing={sidebarResizing}
+      onmousedown={startSidebarResize}
+      onkeydown={(e) => {
+        if (e.key === "ArrowLeft") sidebarWidth = Math.max(200, sidebarWidth - 16);
+        else if (e.key === "ArrowRight") sidebarWidth = Math.min(480, sidebarWidth + 16);
+      }}
+      role="slider"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      aria-valuenow={sidebarWidth}
+      aria-valuemin={200}
+      aria-valuemax={480}
+      tabindex="0"
+    ></div>
 
     <main class="main">
       {#if !selectedProjectId}
         <div class="empty-state">
           <div class="empty-icon">📁</div>
-          <p>Select or create a project to get started.</p>
+          <p>Select a project on the left, or create one to get started.</p>
         </div>
       {:else if !selectedRequest}
         <div class="empty-state">
           <div class="empty-icon">📨</div>
-          <p>Select or create a request to begin.</p>
+          <p>Select a request on the left, or add a new one to begin.</p>
         </div>
       {:else}
         <section class="detail">
@@ -2309,63 +2386,109 @@
             {/if}
           </div>
 
-          {#if activeResponse}
+          {#if sending}
+            <div class="response-loading">
+              <span class="spinner" aria-hidden="true"></span>
+              Sending request…
+            </div>
+          {:else if activeResponse}
             <div class="response">
-              <div class="response-header-bar">
-                <p class="response-status">
-                  <strong class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>
-                    {activeResponse.status} {activeResponse.status_text}
-                  </strong>
-                  · {activeResponse.duration_ms} ms · {activeResponse.body_size} bytes
-                </p>
-                <div class="response-format-toggle">
-                  <button type="button" class="btn-toggle" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>Pretty</button>
-                  <button type="button" class="btn-toggle" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>Raw</button>
-                </div>
-              </div>
-
-              <div class="response-actions">
-                <button type="button" onclick={copyResponseBody}>Copy response body</button>
-                <button type="button" onclick={downloadResponseBody}>Download response</button>
+              <div class="response-stat-row">
+                <span class="response-stat-status" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>
+                  {activeResponse.status} {activeResponse.status_text}
+                </span>
+                <span class="response-stat-item"><span class="response-stat-label">Time</span> {activeResponse.duration_ms} ms</span>
+                <span class="response-stat-item"><span class="response-stat-label">Size</span> {formatByteSize(activeResponse.body_size)}</span>
+                <div class="response-stat-spacer"></div>
                 {#if copyFeedback}
                   <span class="hint">{copyFeedback}</span>
                 {/if}
+                <button type="button" class="icon-btn" title="Copy response body" onclick={copyResponseBody}>⧉</button>
+                <button type="button" class="icon-btn" title="Download response body" onclick={downloadResponseBody}>⭳</button>
               </div>
 
-              {#if activeResponse.headers && activeResponse.headers.length}
-                <details class="response-headers-details">
-                  <summary>Response Headers ({activeResponse.headers.length})</summary>
-                  <div class="headers-list">
-                    {#each activeResponse.headers as h}
-                      <div class="header-line">
-                        <strong>{h.key}:</strong> {h.value}
-                      </div>
-                    {/each}
-                  </div>
-                </details>
-              {/if}
+              <div class="response-subtabs">
+                <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>Body</button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "headers"} onclick={() => (responseSubTab = "headers")}>
+                  Headers
+                  {#if activeResponse.headers?.length}<span class="tab-badge">{activeResponse.headers.length}</span>{/if}
+                </button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "cookies"} onclick={() => (responseSubTab = "cookies")}>
+                  Cookies
+                  {#if activeResponse.cookies?.length}<span class="tab-badge">{activeResponse.cookies.length}</span>{/if}
+                </button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "tests"} onclick={() => (responseSubTab = "tests")}>
+                  Tests
+                  {#if activeResponseTests.length}
+                    <span class="tab-badge" class:tab-badge-warn={activeResponseTests.some((t) => !t.passed)}>
+                      {activeResponseTests.filter((t) => t.passed).length}/{activeResponseTests.length}
+                    </span>
+                  {/if}
+                </button>
 
-              {#if activeResponse.cookies && activeResponse.cookies.length}
-                <details class="response-headers-details">
-                  <summary>Response Cookies ({activeResponse.cookies.length})</summary>
-                  <div class="headers-list">
-                    {#each activeResponse.cookies as c}
-                      <div class="header-line">
-                        <strong>{c.name}:</strong> {c.value}
-                        {#if c.domain}<span class="hint">domain: {c.domain}</span>{/if}
-                        {#if c.path}<span class="hint">path: {c.path}</span>{/if}
-                        {#if c.http_only}<span class="badge">HttpOnly</span>{/if}
-                        {#if c.secure}<span class="badge">Secure</span>{/if}
-                      </div>
-                    {/each}
+                {#if responseSubTab === "body"}
+                  <div class="response-format-toggle">
+                    <button type="button" class="btn-toggle" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>Pretty</button>
+                    <button type="button" class="btn-toggle" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>Raw</button>
                   </div>
-                </details>
-              {/if}
+                {/if}
+              </div>
 
-              <pre class="body-view">{prettyResponseBody}</pre>
-              {#if activeResponseTruncated}
-                <p class="hint">(truncated — body is larger than the preview cap)</p>
-              {/if}
+              <div class="response-subtab-content">
+                {#if responseSubTab === "body"}
+                  <pre class="body-view">{prettyResponseBody}</pre>
+                  {#if activeResponseTruncated}
+                    <p class="hint">(truncated — body is larger than the preview cap)</p>
+                  {/if}
+                {:else if responseSubTab === "headers"}
+                  {#if activeResponse.headers?.length}
+                    <div class="headers-list">
+                      {#each activeResponse.headers as h}
+                        <div class="header-line">
+                          <strong>{h.key}:</strong> {h.value}
+                        </div>
+                      {/each}
+                    </div>
+                  {:else}
+                    <p class="empty">This response had no headers.</p>
+                  {/if}
+                {:else if responseSubTab === "cookies"}
+                  {#if activeResponse.cookies?.length}
+                    <div class="headers-list">
+                      {#each activeResponse.cookies as c}
+                        <div class="header-line">
+                          <strong>{c.name}:</strong> {c.value}
+                          {#if c.domain}<span class="hint">domain: {c.domain}</span>{/if}
+                          {#if c.path}<span class="hint">path: {c.path}</span>{/if}
+                          {#if c.http_only}<span class="badge">HttpOnly</span>{/if}
+                          {#if c.secure}<span class="badge">Secure</span>{/if}
+                        </div>
+                      {/each}
+                    </div>
+                  {:else}
+                    <p class="empty">No cookies were set by this response.</p>
+                  {/if}
+                {:else if responseSubTab === "tests"}
+                  {#if activeResponseTests.length}
+                    <ul class="test-results-list">
+                      {#each activeResponseTests as t, i (i)}
+                        <li class="test-result-row" class:test-pass={t.passed} class:test-fail={!t.passed}>
+                          <span class="test-result-icon">{t.passed ? "✓" : "✗"}</span>
+                          <span class="test-result-name">{t.name}</span>
+                          {#if !t.passed && t.error}<span class="test-result-error">{t.error}</span>{/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else}
+                    <p class="empty">No tests ran for this request. Add assertions in the Scripts tab to see pass/fail results here.</p>
+                  {/if}
+                {/if}
+              </div>
+            </div>
+          {:else}
+            <div class="response-empty-state">
+              <div class="empty-icon">📭</div>
+              <p>Send the request to see the response here.</p>
             </div>
           {/if}
 
@@ -2476,8 +2599,8 @@
           {/if}
           </div>
 
+          <h2>History</h2>
           {#if responseHistory.length}
-            <h2>History</h2>
             <ul class="requests">
               {#each responseHistory as r (r.id)}
                 <li class="row-item">
@@ -2489,6 +2612,8 @@
                 </li>
               {/each}
             </ul>
+          {:else}
+            <p class="empty">Your request history will appear here after you send this request.</p>
           {/if}
         </section>
       {/if}
@@ -2630,7 +2755,7 @@
       <div class="modal-container">
         <div class="modal-header">
           <h3>Import Postman Collection</h3>
-          <button type="button" class="modal-close-btn" onclick={() => (showCollectionImport = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showCollectionImport = false)}>✕</button>
         </div>
         <p class="hint">Upload or paste Postman Collection v2.0 or v2.1 JSON.</p>
 
@@ -2707,7 +2832,7 @@
       <div class="modal-container">
         <div class="modal-header">
           <h3>Import Postman Environment</h3>
-          <button type="button" class="modal-close-btn" onclick={() => (showEnvironmentImport = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showEnvironmentImport = false)}>✕</button>
         </div>
         <p class="hint">Upload or paste a Postman Environment JSON file.</p>
 
@@ -2769,7 +2894,7 @@
       <div class="modal-container">
         <div class="modal-header">
           <h3>Import from cURL</h3>
-          <button type="button" class="modal-close-btn" onclick={() => (showCurlImport = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showCurlImport = false)}>✕</button>
         </div>
         <form onsubmit={importCurlCommand}>
           <input placeholder="Request Name (optional)" bind:value={curlImportName} />
@@ -2806,7 +2931,7 @@
             <h3>✨ AI Assistant & Source Intelligence</h3>
             <span class="modal-sub">Generate requests with project context, discover codebase routes, or configure Claude AI</span>
           </div>
-          <button type="button" class="modal-close-btn" onclick={() => (showAiPanel = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showAiPanel = false)}>✕</button>
         </div>
 
         <div class="modal-tabs">
@@ -2840,7 +2965,8 @@
           <div class="modal-body">
             {#if !aiConfigured}
               <div class="action-alert warning">
-                <span>⚠️ Claude AI API key is not configured. Add your key in the <button type="button" class="link-btn" onclick={() => (aiActiveTab = "settings")}>AI Settings</button> tab.</span>
+                <span>AI features aren't set up yet — add a Claude API key to generate requests, docs, and tests.</span>
+                <button type="button" class="btn-primary btn-xs" onclick={() => (aiActiveTab = "settings")}>Configure AI</button>
               </div>
             {/if}
 
@@ -3073,7 +3199,7 @@
       <div class="modal-container modal-wide">
         <div class="modal-header">
           <h3>Environment & Variables</h3>
-          <button type="button" class="modal-close-btn" onclick={() => (showVariables = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showVariables = false)}>✕</button>
         </div>
 
         <div class="variables-panel">
@@ -3169,7 +3295,7 @@
               <span class="modal-sub">Project: {projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId}</span>
             {/if}
           </div>
-          <button type="button" class="modal-close-btn" onclick={() => (showGitModal = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showGitModal = false)}>✕</button>
         </div>
 
         <div class="modal-tabs">
@@ -3514,7 +3640,7 @@
       <div class="modal-container">
         <div class="modal-header">
           <h3>Git Diff Preview</h3>
-          <button type="button" class="modal-close-btn" onclick={() => (showDiffModal = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showDiffModal = false)}>✕</button>
         </div>
         <div class="modal-body">
           {#if !gitDiffContent.trim()}
@@ -3542,7 +3668,7 @@
       <div class="modal-container">
         <div class="modal-header">
           <h3>Git Commit History</h3>
-          <button type="button" class="modal-close-btn" onclick={() => (showHistoryModal = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showHistoryModal = false)}>✕</button>
         </div>
         <div class="modal-body">
           {#if gitHistory.length === 0}
@@ -3881,6 +4007,20 @@
     display: flex;
     flex-direction: column;
     overflow-y: auto;
+  }
+
+  .sidebar-resize-handle {
+    width: 5px;
+    flex-shrink: 0;
+    margin-left: -3px;
+    cursor: col-resize;
+    z-index: 1;
+    background: transparent;
+  }
+
+  .sidebar-resize-handle:hover,
+  .sidebar-resize-handle.resizing {
+    background: var(--color-accent);
   }
 
   .sidebar-header {
@@ -4613,20 +4753,104 @@
     padding: 0.7rem 0.9rem 1rem;
   }
 
-  .response-header-bar {
+  .response-loading {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.4rem;
+    gap: 0.5rem;
+    padding: 1rem 0.9rem;
+    color: var(--color-text-secondary);
+    font-size: 0.82rem;
+    border-top: 1px solid var(--color-border);
   }
 
-  .response-status {
-    margin: 0;
+  .response-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 2rem 0.9rem;
+    color: var(--color-text-tertiary);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .spinner {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    border: 2px solid var(--color-border-strong);
+    border-top-color: var(--color-accent);
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .response-stat-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding-bottom: 0.6rem;
+  }
+
+  .response-stat-status {
+    font-weight: 700;
     font-size: 0.85rem;
+  }
+
+  .response-stat-item {
+    font-size: 0.78rem;
+    color: var(--color-text-secondary);
+  }
+
+  .response-stat-label {
+    color: var(--color-text-tertiary);
+    text-transform: uppercase;
+    font-size: 0.66rem;
+    letter-spacing: 0.03em;
+    margin-right: 0.2rem;
+  }
+
+  .response-stat-spacer {
+    flex: 1;
   }
 
   .status-ok { color: var(--color-success); }
   .status-err { color: var(--color-danger); }
+
+  .response-subtabs {
+    display: flex;
+    align-items: center;
+    gap: 0.1rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .response-subtab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.78rem;
+    color: var(--color-text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .response-subtab:hover {
+    color: var(--color-text);
+  }
+
+  .response-subtab.active {
+    color: var(--color-text);
+    border-bottom-color: var(--color-primary);
+    font-weight: 600;
+  }
+
+  .response-subtab-content {
+    padding-top: 0.6rem;
+  }
 
   .response-format-toggle {
     display: flex;
@@ -4634,6 +4858,7 @@
     background: var(--color-bg-hover);
     border-radius: var(--radius-sm);
     padding: 2px;
+    margin-left: auto;
   }
 
   .btn-toggle {
@@ -4650,22 +4875,40 @@
     font-weight: 600;
   }
 
-  .response-actions {
+  .test-results-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .test-result-row {
+    display: flex;
+    align-items: baseline;
     gap: 0.5rem;
-    margin-bottom: 0.5rem;
+    font-size: 0.8rem;
+    padding: 0.25rem 0;
   }
 
-  .response-headers-details {
-    margin-bottom: 0.5rem;
-    font-size: 0.78rem;
+  .test-result-icon {
+    font-weight: 700;
+    width: 1rem;
+    flex-shrink: 0;
   }
 
-  .response-headers-details summary {
-    cursor: pointer;
-    color: var(--color-text-secondary);
-    padding: 0.2rem 0;
+  .test-pass .test-result-icon { color: var(--color-success); }
+  .test-fail .test-result-icon { color: var(--color-danger); }
+
+  .test-result-name {
+    color: var(--color-text);
+  }
+
+  .test-result-error {
+    color: var(--color-danger);
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
   }
 
   .headers-list {
@@ -5155,6 +5398,10 @@
     padding: 0.4rem 0.7rem;
     border-radius: var(--radius-md);
     font-size: 0.78rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
   }
 
   .action-alert.success {
@@ -5165,6 +5412,15 @@
   .action-alert.error {
     background: var(--color-danger-bg);
     color: var(--color-danger);
+  }
+
+  .action-alert.warning {
+    background: var(--color-warn-bg);
+    color: var(--color-warn);
+  }
+
+  .action-alert .btn-xs {
+    flex-shrink: 0;
   }
 
   /* ---------- Git status pill (footer) ---------- */

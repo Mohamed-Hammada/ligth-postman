@@ -164,6 +164,7 @@ export interface ResolvedTemplate {
 export interface AppError {
   kind: "Storage" | "NotFound" | "Validation" | "Network" | "Cancelled" | "Ai";
   message: string;
+  hint: string;
 }
 
 export interface ResponseSummary {
@@ -294,11 +295,28 @@ export function isAppError(err: unknown): err is AppError {
   );
 }
 
+/** Short, human summary per error kind — shown instead of the raw backend message. */
+const FRIENDLY_ERROR_SUMMARY: Record<AppError["kind"], string> = {
+  Storage: "A local storage error occurred.",
+  NotFound: "That item couldn't be found.",
+  Validation: "Please check the highlighted fields.",
+  Network: "Unable to reach the server.",
+  Cancelled: "Request cancelled.",
+  Ai: "The AI request failed.",
+};
+
+/**
+ * Turns a raw AppError into an actionable, human sentence: a short summary plus the backend's
+ * remediation hint (e.g. "Unable to reach the server. Verify target URL, ensure server is
+ * active, and inspect proxy or firewall settings.") instead of a technical string like
+ * "network error: connection refused (os error 10061)".
+ */
 export function describeError(err: unknown): string {
-  // AppError::Cancelled is a unit variant, so serde's adjacently-tagged encoding omits
-  // `message` entirely for it (`{ kind: "Cancelled" }` with no content key) — everything
-  // else always carries one.
-  if (isAppError(err)) return err.message ?? "Request cancelled";
+  if (isAppError(err)) {
+    if (err.kind === "Cancelled") return FRIENDLY_ERROR_SUMMARY.Cancelled;
+    const summary = FRIENDLY_ERROR_SUMMARY[err.kind] ?? err.message;
+    return err.hint ? `${summary} ${err.hint}` : summary;
+  }
   if (err instanceof Error) return err.message;
   return String(err);
 }

@@ -1,4 +1,5 @@
-use serde::Serialize;
+use serde::{Serialize, Serializer};
+use serde::ser::SerializeStruct;
 
 /// Error taxonomy classifying faults into three distinct architectural tiers (LP-0906).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -13,8 +14,7 @@ pub enum ErrorTier {
 }
 
 /// Structured, domain-level errors. Never leak raw rusqlite/IO errors to the UI (README §34).
-#[derive(Debug, thiserror::Error, Serialize)]
-#[serde(tag = "kind", content = "message")]
+#[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("storage error: {0}")]
     Storage(String),
@@ -40,6 +40,18 @@ impl AppError {
         }
     }
 
+    /// The `kind` discriminant sent over IPC — kept stable for the frontend's `AppError.kind` union.
+    fn kind_name(&self) -> &'static str {
+        match self {
+            AppError::Storage(_) => "Storage",
+            AppError::NotFound(_) => "NotFound",
+            AppError::Validation(_) => "Validation",
+            AppError::Network(_) => "Network",
+            AppError::Cancelled => "Cancelled",
+            AppError::Ai(_) => "Ai",
+        }
+    }
+
     /// Provides user-facing remediation advice for actionable UI feedback.
     pub fn remediation_hint(&self) -> &'static str {
         match self {
@@ -50,6 +62,19 @@ impl AppError {
             AppError::Storage(_) => "SQLite database I/O error. Verify disk space and write permissions.",
             AppError::Cancelled => "Request was cancelled by user action.",
         }
+    }
+}
+
+/// Hand-written so the IPC payload can carry `hint` alongside `kind`/`message` — the frontend's
+/// `describeError()` uses it to show an actionable message instead of a raw backend string
+/// (e.g. "Unable to reach the server." + the hint above, rather than "network error: ...").
+impl Serialize for AppError {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut s = serializer.serialize_struct("AppError", 3)?;
+        s.serialize_field("kind", self.kind_name())?;
+        s.serialize_field("message", &self.to_string())?;
+        s.serialize_field("hint", self.remediation_hint())?;
+        s.end()
     }
 }
 
@@ -78,6 +103,20 @@ mod tests {
         assert!(AppError::Network("err".into()).remediation_hint().contains("proxy"));
         assert!(AppError::Ai("err".into()).remediation_hint().contains("Settings"));
         assert!(AppError::Validation("err".into()).remediation_hint().contains("required fields"));
+    }
+
+    #[test]
+    fn wire_format_carries_kind_message_and_hint() {
+        let value = serde_json::to_value(AppError::Network("connection refused".into())).unwrap();
+        assert_eq!(value["kind"], "Network");
+        assert_eq!(value["message"], "network error: connection refused");
+        assert!(value["hint"].as_str().unwrap().contains("proxy"));
+
+        // Cancelled is a unit variant — confirm `message`/`hint` are still present (unlike the
+        // old adjacently-tagged derive, which omitted `message` entirely for unit variants).
+        let cancelled = serde_json::to_value(AppError::Cancelled).unwrap();
+        assert_eq!(cancelled["kind"], "Cancelled");
+        assert_eq!(cancelled["message"], "request cancelled");
     }
 }
 

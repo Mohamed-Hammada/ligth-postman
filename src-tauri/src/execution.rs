@@ -13,10 +13,11 @@ use std::sync::Mutex;
 use reqwest::Client;
 use rusqlite::Connection;
 
+use crate::canonical_request;
 use crate::error::AppError;
 use crate::http_engine::{self, HttpRequestSpec};
-use crate::models::{HeaderEntry, ResponseMeta};
-use crate::resolver::{self, ScopeChain};
+use crate::models::ResponseMeta;
+use crate::resolver::ScopeChain;
 use crate::store::{request_store, response_store, variable_store};
 
 /// Bodies larger than this spill to disk instead of growing the in-memory buffer further
@@ -56,32 +57,19 @@ pub async fn execute_request(
             ..Default::default()
         };
 
-        let base_url = resolver::resolve_template(&request.url, &chain).resolved;
-        let resolved_params: Vec<(String, String)> = request
-            .query_params
-            .iter()
-            .filter(|p| p.enabled)
-            .map(|p| {
-                (
-                    resolver::resolve_template(&p.key, &chain).resolved,
-                    resolver::resolve_template(&p.value, &chain).resolved,
-                )
-            })
-            .collect();
-        let url = append_query_params(&base_url, &resolved_params)?;
-        let headers: Vec<HeaderEntry> = request
-            .headers
-            .iter()
-            .map(|h| HeaderEntry {
-                key: h.key.clone(),
-                value: resolver::resolve_template(&h.value, &chain).resolved,
-                enabled: h.enabled,
-            })
-            .collect();
-        let body = request.body.as_deref().map(|b| resolver::resolve_template(b, &chain).resolved);
+        // The single resolved representation (LP-0303) — codegen (curl, etc.) builds the
+        // exact same struct from the exact same function, so "what gets sent" and "what
+        // gets shown as a snippet" can never drift apart.
+        let canonical = canonical_request::build(&request, &chain)?;
 
         (
-            HttpRequestSpec { method: request.method, url, headers, body, timeout_ms: input.timeout_ms },
+            HttpRequestSpec {
+                method: canonical.method,
+                url: canonical.url,
+                headers: canonical.headers,
+                body: canonical.body,
+                timeout_ms: input.timeout_ms,
+            },
             request.id,
         )
     };
@@ -108,23 +96,8 @@ pub async fn execute_request(
     )
 }
 
-/// Appends `params` to `base_url`'s query string (URL-encoded), preserving any query string
-/// already present in `base_url` rather than clobbering it. Runtime-only — the caller never
-/// writes the result back to the stored request (README's query-parameter serialization rule).
-fn append_query_params(base_url: &str, params: &[(String, String)]) -> Result<String, AppError> {
-    if params.is_empty() {
-        return Ok(base_url.to_string());
-    }
-    let mut url = reqwest::Url::parse(base_url)
-        .map_err(|err| AppError::Validation(format!("invalid URL '{base_url}': {err}")))?;
-    {
-        let mut query = url.query_pairs_mut();
-        for (key, value) in params {
-            query.append_pair(key, value);
-        }
-    }
-    Ok(url.to_string())
-}
+// Query-param URL-encoding now lives in `canonical_request::append_query_params` (its own
+// tests cover it there); `build()` above is the only call site left in this module.
 
 #[cfg(test)]
 mod tests {
@@ -164,12 +137,10 @@ mod tests {
                         Err(_) => break,
                     }
                 }
-                let request_line = String::from_utf8_lossy(&received)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                *captured_clone.lock().unwrap() = Some(request_line);
+                // Full request line + headers (not just the first line) so tests can also
+                // assert on things like the resolved Authorization header.
+                let request_text = String::from_utf8_lossy(&received).to_string();
+                *captured_clone.lock().unwrap() = Some(request_text);
                 let _ = stream.write_all(&response);
                 let _ = stream.flush();
             }
@@ -218,6 +189,7 @@ mod tests {
                     QueryParam { key: "verbose".into(), value: "{{port}}".into(), enabled: true, description: None },
                     QueryParam { key: "skip".into(), value: "1".into(), enabled: false, description: None },
                 ],
+                auth: crate::models::Auth::Bearer { token: "secret-{{port}}".into() },
                 body: None,
             },
         )
@@ -252,6 +224,10 @@ mod tests {
             "unexpected request line: {request_line}"
         );
         assert!(!request_line.contains("skip="), "disabled query param must be omitted: {request_line}");
+        assert!(
+            request_line.to_lowercase().contains(&format!("authorization: bearer secret-{port}")),
+            "expected resolved Authorization header, got: {request_line}"
+        );
 
         // And that it was actually persisted, not just returned.
         let conn = db.lock().unwrap();
@@ -276,27 +252,5 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::NotFound(_))));
-    }
-
-    #[test]
-    fn append_query_params_preserves_existing_query_string_and_encodes_values() {
-        let url = append_query_params(
-            "https://api.example.com/search?existing=1",
-            &[("q".to_string(), "hello world".to_string())],
-        )
-        .unwrap();
-        assert_eq!(url, "https://api.example.com/search?existing=1&q=hello+world");
-    }
-
-    #[test]
-    fn append_query_params_is_a_no_op_for_an_empty_list() {
-        let url = append_query_params("https://api.example.com/users", &[]).unwrap();
-        assert_eq!(url, "https://api.example.com/users");
-    }
-
-    #[test]
-    fn append_query_params_rejects_an_unparseable_base_url() {
-        let result = append_query_params("not a url", &[("a".to_string(), "b".to_string())]);
-        assert!(matches!(result, Err(AppError::Validation(_))));
     }
 }

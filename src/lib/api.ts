@@ -22,6 +22,15 @@ export interface QueryParam {
   description?: string | null;
 }
 
+/** LP-0107. `token`/`username`/`password`/`key`/`value` are raw templates — `{{var}}` is
+ * resolved at send/snippet time, never baked into storage. No `inherit`/OAuth2 variant yet:
+ * there is no Collection/Folder to inherit from and no OAuth2 flow implemented. */
+export type Auth =
+  | { type: "none" }
+  | { type: "bearer"; token: string }
+  | { type: "basic"; username: string; password: string }
+  | { type: "api_key"; key: string; value: string; location: "header" | "query" };
+
 /** Lightweight row for lists — never carries headers/body. */
 export interface RequestSummary {
   id: string;
@@ -36,6 +45,7 @@ export interface RequestSummary {
 export interface RequestFull extends RequestSummary {
   headers: HeaderEntry[];
   query_params: QueryParam[];
+  auth: Auth;
   body: string | null;
   created_at: string;
 }
@@ -47,6 +57,7 @@ export interface NewRequestInput {
   url: string;
   headers: HeaderEntry[];
   query_params: QueryParam[];
+  auth: Auth;
   body: string | null;
 }
 
@@ -63,6 +74,7 @@ export interface UpdateRequestInput {
   url?: string;
   headers?: HeaderEntry[];
   query_params?: QueryParam[];
+  auth?: Auth;
   body?: string;
   clear_body?: boolean;
 }
@@ -104,6 +116,8 @@ export interface ResponseBodyPayload {
   text: string;
   truncated: boolean;
 }
+
+export type SnippetMode = "placeholder" | "resolved";
 
 /** Structured output from the AI generation command — preview before "Add to Project". */
 export interface GeneratedApiDefinition {
@@ -182,4 +196,7 @@ export const api = {
   isAiConfigured: () => invoke<boolean>("is_ai_configured"),
   generateApiWithAi: (prompt: string) =>
     invoke<GeneratedApiDefinition>("generate_api_with_ai", { prompt }),
+
+  generateCurlSnippet: (requestId: string, environmentId: string | null, mode: SnippetMode) =>
+    invoke<string>("generate_curl_snippet", { requestId, environmentId, mode }),
 };

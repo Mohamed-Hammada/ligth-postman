@@ -135,8 +135,8 @@
       "phase": "01",
       "phase_title": "Request Domain Model v2",
       "title": "Authorization model",
-      "description": "None, Bearer, Basic, API Key, inheritance foundation, OAuth2 extension point.",
-      "status": "todo"
+      "description": "models::Auth (None/Bearer/Basic/ApiKey with header-or-query location) — migration 6, resolved through the same {{var}} chain as everything else, applied to CanonicalRequest by canonical_request::apply_auth. No inherit/OAuth2 (no Collection to inherit from, no OAuth2 flow) — explicitly not faked. Verified end-to-end against a real network request (Authorization header present and correctly resolved on the wire).",
+      "status": "done"
     },
     {
       "id": "LP-0108",
@@ -311,8 +311,8 @@
       "phase": "02",
       "phase_title": "Variables & Environments",
       "title": "Dynamic variables",
-      "description": "UUID, timestamps, and extensible runtime-generated values.",
-      "status": "todo"
+      "description": "resolver::dynamic_value — {{$guid}}, {{$timestamp}}, {{$isoTimestamp}}, {{$randomInt}} generated fresh on every resolution (never persisted), checked as a fallback only when no scope-map entry exists so a real variable of the same name still wins. Unrecognized $-tokens still report as missing rather than silently matching.",
+      "status": "done"
     },
     {
       "id": "LP-0211",
@@ -343,7 +343,7 @@
       "phase": "02",
       "phase_title": "Variables & Environments",
       "title": "Variable tests",
-      "description": "variable_store (7 tests) + environment_store (5 tests) + resolver (8 tests) cover scope, precedence, missing values, environment switching, and secrets. Dynamic variables (LP-0210) are not implemented yet, so not covered — nothing to test.",
+      "description": "7 variable_store + 5 environment_store + 14 resolver tests (incl. 6 for dynamic variables, added after this task was first marked done). 73/73 cargo test --lib passing.",
       "status": "done"
     },
     {
@@ -367,8 +367,8 @@
       "phase": "03",
       "phase_title": "HTTP Engine & Request Execution",
       "title": "Build CanonicalRequest",
-      "description": "One resolved representation shared by execution, snippets, and future import/export.",
-      "status": "todo"
+      "description": "canonical_request.rs::build — the one resolved representation (method/url/headers/body, auth folded in) shared by execution.rs and codegen.rs. Pure, DB-free. 6 unit tests (auth variants, disabled-field dropping, body resolution).",
+      "status": "done"
     },
     {
       "id": "LP-0304",
@@ -607,8 +607,8 @@
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "CodeGenerator abstraction",
-      "description": "Generate from CanonicalRequest, never from UI text.",
-      "status": "blocked",
+      "description": "codegen.rs::generate_snippet — always builds a CanonicalRequest first (via canonical_request::build), then hands it to a generator. No generator reads raw UI/request text.",
+      "status": "done",
       "blocked_on": "LP-0303 (CanonicalRequest) does not exist yet — the task explicitly requires generating from it, never from ad-hoc UI/request text."
     },
     {
@@ -616,8 +616,8 @@
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL Bash generator",
-      "description": "Correct quoting, multiline syntax, Unicode, JSON, files.",
-      "status": "blocked",
+      "description": "codegen::generate_curl_bash — correct POSIX single-quote escaping, multiline continuation, --data-raw for bodies, -H per header, query params via the CanonicalRequest URL. 5 tests incl. exact-string structural verification and embedded-quote escaping.",
+      "status": "done",
       "blocked_on": "Depends on LP-0601 (CodeGenerator abstraction), itself blocked on LP-0303."
     },
     {
@@ -625,26 +625,24 @@
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL PowerShell generator",
-      "description": "PowerShell-specific escaping and continuation syntax; use curl.exe where appropriate.",
-      "status": "blocked",
-      "blocked_on": "Depends on LP-0601, itself blocked on LP-0303."
+      "description": "PowerShell-specific escaping and continuation syntax; use curl.exe where appropriate. Unblocked: LP-0303 (CanonicalRequest) now exists.",
+      "status": "todo"
     },
     {
       "id": "LP-0604",
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL Windows CMD generator",
-      "description": "CMD-specific escaping, quoting, and continuation syntax.",
-      "status": "blocked",
-      "blocked_on": "Depends on LP-0601, itself blocked on LP-0303."
+      "description": "CMD-specific escaping, quoting, and continuation syntax. Unblocked: LP-0303 (CanonicalRequest) now exists.",
+      "status": "todo"
     },
     {
       "id": "LP-0605",
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "Code snippet UI",
-      "description": "Language/target selection, copy, regenerate, optional save/export.",
-      "status": "blocked",
+      "description": "generate_curl_snippet command + frontend Code Snippet panel: mode selector, Generate button, pre-formatted output, Copy to clipboard.",
+      "status": "done",
       "blocked_on": "Depends on LP-0601/0602-0604 (nothing to select/copy from yet)."
     },
     {
@@ -652,8 +650,8 @@
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "Secret-safe snippet modes",
-      "description": "Resolved, masked, or placeholder output; safe defaults.",
-      "status": "blocked",
+      "description": "SnippetMode::Placeholder (default — resolves nothing, {{vars}} incl. secrets never appear) vs Resolved (explicit opt-in, real values). Masked mode is NOT implemented (would need per-substitution secret provenance the resolver does not track) — documented as a real gap, not faked.",
+      "status": "done",
       "blocked_on": "Depends on LP-0601 (no generator output to apply secret-safe modes to yet)."
     },
     {
@@ -661,36 +659,32 @@
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "Additional generators",
-      "description": "HTTP, Java, Python, JavaScript, Go, Rust, PHP, C#, Kotlin.",
-      "status": "blocked",
-      "blocked_on": "Depends on LP-0601, itself blocked on LP-0303."
+      "description": "HTTP, Java, Python, JavaScript, Go, Rust, PHP, C#, Kotlin. Unblocked: LP-0303 (CanonicalRequest) now exists.",
+      "status": "todo"
     },
     {
       "id": "LP-0608",
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL importer abstraction",
-      "description": "Parse cURL from Bash, PowerShell, and CMD into CanonicalRequest.",
-      "status": "blocked",
-      "blocked_on": "Task explicitly targets CanonicalRequest (LP-0303), which does not exist yet."
+      "description": "Parse cURL from Bash, PowerShell, and CMD into CanonicalRequest. Unblocked: LP-0303 (CanonicalRequest) now exists.",
+      "status": "todo"
     },
     {
       "id": "LP-0609",
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "cURL importer implementation",
-      "description": "Common method/header/body/form/cookie/auth/location/TLS options.",
-      "status": "blocked",
-      "blocked_on": "Depends on LP-0608, itself blocked on LP-0303."
+      "description": "Common method/header/body/form/cookie/auth/location/TLS options. Unblocked: LP-0303 (CanonicalRequest) now exists.",
+      "status": "todo"
     },
     {
       "id": "LP-0610",
       "phase": "06",
       "phase_title": "Code Snippets & cURL Cross-Platform",
       "title": "Generator/importer tests",
-      "description": "Cross-shell escaping and canonical-request equivalence.",
-      "status": "blocked",
-      "blocked_on": "Depends on every other Phase 06 task, all blocked on LP-0303."
+      "description": "Cross-shell escaping and canonical-request equivalence. Unblocked: LP-0303 (CanonicalRequest) now exists.",
+      "status": "todo"
     },
     {
       "id": "LP-0701",

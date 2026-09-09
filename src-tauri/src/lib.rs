@@ -1,4 +1,6 @@
 mod ai;
+mod canonical_request;
+mod codegen;
 mod commands;
 mod db;
 mod error;
@@ -73,6 +75,7 @@ pub fn run() {
             commands::delete_response,
             commands::is_ai_configured,
             commands::generate_api_with_ai,
+            commands::generate_curl_snippet,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

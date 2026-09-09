@@ -28,16 +28,16 @@ Never block the UI thread.
 
 ---
 
-## [ ] LP-0303 — Build CanonicalRequest
+## [x] LP-0303 — Build CanonicalRequest
 
 One resolved representation shared by execution, snippets, and future import/export.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `canonical_request.rs::build(request, chain)` — pure, DB-free, folds URL/header/query-param/body resolution and auth application into exactly one function. `execution.rs` and `codegen.rs` both call it; neither duplicates resolution logic anymore (the old inline version in `execution.rs` was deleted as part of this task, not left behind as dead code).
+- [x] Relevant tests pass — 6 `canonical_request::tests::*` (auth variants, disabled-field dropping, body resolution) plus every `execution::tests::*` and `codegen::tests::*` that now depend on it transitively.
+- [x] Build/type-check passes
+- [x] Runtime smoke test completed when user-facing — exercised by every real send in this session's manual runs (unchanged behavior, now built through the shared path).
+- [x] PROJECT_MAP.md updated
 
 ---
 

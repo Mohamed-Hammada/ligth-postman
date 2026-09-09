@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::models::{
-    HeaderEntry, NewRequestInput, QueryParam, RequestFull, RequestSummary, UpdateRequestInput,
-    VALID_METHODS,
+    Auth, HeaderEntry, NewRequestInput, QueryParam, RequestFull, RequestSummary,
+    UpdateRequestInput, VALID_METHODS,
 };
 
 pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<RequestFull, AppError> {
@@ -30,6 +30,8 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
         .map_err(|err| AppError::Validation(format!("invalid headers: {err}")))?;
     let query_params_json = serde_json::to_string(&input.query_params)
         .map_err(|err| AppError::Validation(format!("invalid query params: {err}")))?;
+    let auth_json = serde_json::to_string(&input.auth)
+        .map_err(|err| AppError::Validation(format!("invalid auth: {err}")))?;
 
     let request = RequestFull {
         id: Uuid::new_v4().to_string(),
@@ -39,14 +41,15 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
         url: url.to_string(),
         headers: input.headers,
         query_params: input.query_params,
+        auth: input.auth,
         body: input.body,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
 
     conn.execute(
-        "INSERT INTO requests (id, project_id, name, method, url, headers, query_params, body, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO requests (id, project_id, name, method, url, headers, query_params, auth, body, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             request.id,
             request.project_id,
@@ -55,6 +58,7 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
             request.url,
             headers_json,
             query_params_json,
+            auth_json,
             request.body,
             request.created_at.to_rfc3339(),
             request.updated_at.to_rfc3339()
@@ -92,14 +96,15 @@ pub fn list_requests(conn: &Connection, project_id: &str) -> Result<Vec<RequestS
 
 pub fn get_request(conn: &Connection, id: &str) -> Result<RequestFull, AppError> {
     conn.query_row(
-        "SELECT id, project_id, name, method, url, headers, query_params, body, created_at, updated_at
+        "SELECT id, project_id, name, method, url, headers, query_params, auth, body, created_at, updated_at
          FROM requests WHERE id = ?1",
         params![id],
         |row| {
             let headers_json: String = row.get(5)?;
             let query_params_json: String = row.get(6)?;
-            let created_at: String = row.get(8)?;
-            let updated_at: String = row.get(9)?;
+            let auth_json: String = row.get(7)?;
+            let created_at: String = row.get(9)?;
+            let updated_at: String = row.get(10)?;
             Ok(RequestFull {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
@@ -110,7 +115,8 @@ pub fn get_request(conn: &Connection, id: &str) -> Result<RequestFull, AppError>
                     .unwrap_or_default(),
                 query_params: serde_json::from_str::<Vec<QueryParam>>(&query_params_json)
                     .unwrap_or_default(),
-                body: row.get(7)?,
+                auth: serde_json::from_str::<Auth>(&auth_json).unwrap_or(Auth::None),
+                body: row.get(8)?,
                 created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
                 updated_at: updated_at.parse().unwrap_or_else(|_| Utc::now()),
             })
@@ -164,6 +170,7 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
 
     let headers = input.headers.unwrap_or(existing.headers);
     let query_params = input.query_params.unwrap_or(existing.query_params);
+    let auth = input.auth.unwrap_or(existing.auth);
     let body = if input.clear_body {
         None
     } else {
@@ -174,13 +181,15 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
         .map_err(|err| AppError::Validation(format!("invalid headers: {err}")))?;
     let query_params_json = serde_json::to_string(&query_params)
         .map_err(|err| AppError::Validation(format!("invalid query params: {err}")))?;
+    let auth_json = serde_json::to_string(&auth)
+        .map_err(|err| AppError::Validation(format!("invalid auth: {err}")))?;
     let updated_at = Utc::now();
 
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "UPDATE requests SET name = ?1, method = ?2, url = ?3, headers = ?4, query_params = ?5, body = ?6, updated_at = ?7
-         WHERE id = ?8",
-        params![name, method, url, headers_json, query_params_json, body, updated_at.to_rfc3339(), existing.id],
+        "UPDATE requests SET name = ?1, method = ?2, url = ?3, headers = ?4, query_params = ?5, auth = ?6, body = ?7, updated_at = ?8
+         WHERE id = ?9",
+        params![name, method, url, headers_json, query_params_json, auth_json, body, updated_at.to_rfc3339(), existing.id],
     )?;
     tx.commit()?;
 
@@ -192,6 +201,7 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
         url,
         headers,
         query_params,
+        auth,
         body,
         created_at: existing.created_at,
         updated_at,
@@ -235,6 +245,7 @@ mod tests {
                 url: "https://api.example.com/users".into(),
                 headers: vec![],
                 query_params: vec![],
+                auth: Auth::None,
                 body: None,
             },
         );
@@ -253,6 +264,7 @@ mod tests {
                 url: "https://api.example.com/users".into(),
                 headers: vec![],
                 query_params: vec![],
+                auth: Auth::None,
                 body: None,
             },
         );
@@ -276,6 +288,7 @@ mod tests {
                     enabled: true,
                 }],
                 query_params: vec![],
+                auth: Auth::None,
                 body: Some("{}".into()),
             },
         )
@@ -309,6 +322,7 @@ mod tests {
                 url: "https://api.example.com/users".into(),
                 headers: vec![HeaderEntry { key: "X-A".into(), value: "1".into(), enabled: true }],
                 query_params: vec![QueryParam { key: "page".into(), value: "1".into(), enabled: true, description: None }],
+                auth: Auth::Bearer { token: "seed-token".into() },
                 body: Some("{}".into()),
             },
         )
@@ -330,6 +344,7 @@ mod tests {
                 url: None,
                 headers: None,
                 query_params: None,
+                auth: None,
                 body: None,
                 clear_body: false,
             },
@@ -340,8 +355,40 @@ mod tests {
         assert_eq!(updated.url, created.url);
         assert_eq!(updated.headers.len(), 1);
         assert_eq!(updated.query_params.len(), 1);
+        assert!(matches!(updated.auth, Auth::Bearer { ref token } if token == "seed-token"));
         assert_eq!(updated.body, Some("{}".into()));
         assert_eq!(updated.created_at, created.created_at);
+    }
+
+    #[test]
+    fn update_can_change_auth_type() {
+        let conn = db::open_in_memory().unwrap();
+        let project_id = seed_project(&conn);
+        let created = seed_request(&conn, &project_id);
+
+        let updated = update_request(
+            &conn,
+            UpdateRequestInput {
+                id: created.id,
+                name: None,
+                method: None,
+                url: None,
+                headers: None,
+                query_params: None,
+                auth: Some(Auth::Basic { username: "alice".into(), password: "{{pw}}".into() }),
+                body: None,
+                clear_body: false,
+            },
+        )
+        .unwrap();
+
+        match updated.auth {
+            Auth::Basic { username, password } => {
+                assert_eq!(username, "alice");
+                assert_eq!(password, "{{pw}}");
+            }
+            other => panic!("expected Basic auth, got {other:?}"),
+        }
     }
 
     #[test]
@@ -359,6 +406,7 @@ mod tests {
                 url: None,
                 headers: None,
                 query_params: None,
+                auth: None,
                 body: None,
                 clear_body: true,
             },
@@ -383,6 +431,7 @@ mod tests {
                 url: None,
                 headers: None,
                 query_params: None,
+                auth: None,
                 body: None,
                 clear_body: false,
             },
@@ -405,6 +454,7 @@ mod tests {
                 url: None,
                 headers: None,
                 query_params: None,
+                auth: None,
                 body: None,
                 clear_body: false,
             },

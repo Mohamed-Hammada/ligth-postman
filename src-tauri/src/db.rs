@@ -89,6 +89,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         5,
         "ALTER TABLE requests ADD COLUMN query_params TEXT NOT NULL DEFAULT '[]';",
     ),
+    (
+        6,
+        r#"ALTER TABLE requests ADD COLUMN auth TEXT NOT NULL DEFAULT '{"type":"none"}';"#,
+    ),
 ];
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {

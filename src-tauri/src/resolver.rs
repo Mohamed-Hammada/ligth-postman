@@ -98,8 +98,8 @@ fn substitute(template: &str, vars: &VarMap) -> (String, Vec<String>) {
         match after_open.find("}}") {
             Some(end) => {
                 let key = after_open[..end].trim();
-                match vars.get(key) {
-                    Some(value) => output.push_str(value),
+                match vars.get(key).cloned().or_else(|| dynamic_value(key)) {
+                    Some(value) => output.push_str(&value),
                     None => {
                         missing.push(key.to_string());
                         output.push_str(&rest[start..start + 4 + end]);
@@ -117,6 +117,28 @@ fn substitute(template: &str, vars: &VarMap) -> (String, Vec<String>) {
     }
     output.push_str(rest);
     (output, missing)
+}
+
+/// Dynamic variables (README §41 "Dynamic variables" / task-pack LP-0210): generated fresh
+/// on every resolution, never persisted. Postman's `$`-prefix convention, kept intentionally
+/// small — add a case here to extend it, not a new subsystem. An unrecognized `$name` is
+/// *not* claimed here — it falls through to the normal "missing" reporting like any other
+/// unknown key, so a typo doesn't silently start meaning something.
+fn dynamic_value(key: &str) -> Option<String> {
+    match key {
+        "$guid" => Some(uuid::Uuid::new_v4().to_string()),
+        "$timestamp" => Some(chrono::Utc::now().timestamp().to_string()),
+        "$isoTimestamp" => Some(chrono::Utc::now().to_rfc3339()),
+        // Sourced from a fresh UUID's random bytes rather than pulling in the `rand` crate
+        // for one call site — good enough for "give me a plausible-looking test value",
+        // which is all a mock/dynamic variable needs to be.
+        "$randomInt" => {
+            let bytes = uuid::Uuid::new_v4().into_bytes();
+            let n = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            Some((n % 1000).to_string())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -237,5 +259,51 @@ mod tests {
 
         assert_eq!(dev_result.resolved, "https://dev.example.com/health");
         assert_eq!(prod_result.resolved, "https://prod.example.com/health");
+    }
+
+    #[test]
+    fn dollar_guid_resolves_to_a_valid_uuid_and_changes_every_call() {
+        let chain = ScopeChain::default();
+        let first = resolve_template("{{$guid}}", &chain);
+        let second = resolve_template("{{$guid}}", &chain);
+        assert!(first.missing.is_empty());
+        assert!(uuid::Uuid::parse_str(&first.resolved).is_ok(), "not a valid UUID: {}", first.resolved);
+        assert_ne!(first.resolved, second.resolved, "each resolution should mint a fresh value");
+    }
+
+    #[test]
+    fn dollar_timestamp_resolves_to_a_number() {
+        let result = resolve_template("{{$timestamp}}", &ScopeChain::default());
+        assert!(result.missing.is_empty());
+        assert!(result.resolved.parse::<i64>().is_ok(), "not numeric: {}", result.resolved);
+    }
+
+    #[test]
+    fn dollar_iso_timestamp_resolves_to_valid_rfc3339() {
+        let result = resolve_template("{{$isoTimestamp}}", &ScopeChain::default());
+        assert!(chrono::DateTime::parse_from_rfc3339(&result.resolved).is_ok());
+    }
+
+    #[test]
+    fn dollar_random_int_resolves_to_a_bounded_number() {
+        let result = resolve_template("{{$randomInt}}", &ScopeChain::default());
+        let n: u32 = result.resolved.parse().unwrap();
+        assert!(n < 1000);
+    }
+
+    #[test]
+    fn a_persisted_variable_of_the_same_name_takes_precedence_over_a_dynamic_one() {
+        // Dynamic names are only a fallback for keys with no scope-map entry — an explicit
+        // variable literally named "$guid" (unusual, but not forbidden) should still win.
+        let global = map(&[("$guid", "not-a-real-guid")]);
+        let result = resolve_template("{{$guid}}", &ScopeChain { global: Some(&global), ..Default::default() });
+        assert_eq!(result.resolved, "not-a-real-guid");
+    }
+
+    #[test]
+    fn unrecognized_dollar_token_is_still_reported_missing() {
+        let result = resolve_template("{{$notARealDynamicVar}}", &ScopeChain::default());
+        assert_eq!(result.missing, vec!["$notARealDynamicVar".to_string()]);
+        assert_eq!(result.resolved, "{{$notARealDynamicVar}}");
     }
 }

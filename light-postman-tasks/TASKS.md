@@ -2,7 +2,7 @@
 
 **Reconciled 2026-09-09** against actual code, tests, and manual runs — see `PROJECT_MAP.md` for the evidence behind every DONE/PARTIAL row, and `tasks.json` for the machine-readable version (each entry there carries a `description` explaining exactly what's real, and `blocked` entries carry a `blocked_on`).
 
-**39 DONE · 13 PARTIAL · 14 BLOCKED · 80 TODO** (of 146)
+**46 DONE · 13 PARTIAL · 4 BLOCKED · 83 TODO** (of 146)
 
 Legend: `[x]` DONE · `[~]` PARTIAL (real, but not to the task's full stated scope) · `[!]` BLOCKED (an explicit prerequisite named in the task doesn't exist yet) · `[ ]` TODO (not started, no blocker)
 
@@ -19,7 +19,7 @@ Legend: `[x]` DONE · `[~]` PARTIAL (real, but not to the task's full stated sco
 - [x] **LP-0009** — Define stable application/domain boundaries before adding major features
 - [x] **LP-0010** — Document architecture invariants and non-negotiable performance rules
 
-## Phase 01 — Request Domain Model v2 (5 DONE · 2 PARTIAL · 12 TODO)
+## Phase 01 — Request Domain Model v2 (6 DONE · 2 PARTIAL · 11 TODO)
 
 - [x] **LP-0101** — Request update
 - [x] **LP-0102** — Request delete
@@ -27,7 +27,7 @@ Legend: `[x]` DONE · `[~]` PARTIAL (real, but not to the task's full stated sco
 - [x] **LP-0104** — Query parameter model
 - [x] **LP-0105** — Query parameter serialization
 - [~] **LP-0106** — Header entry model — has key/value/enabled; missing description field, stable id, duplicate-header policy
-- [ ] **LP-0107** — Authorization model
+- [x] **LP-0107** — Authorization model — None/Bearer/Basic/ApiKey, resolved through the variable chain, applied to CanonicalRequest; no inherit/OAuth2 (nothing to inherit from yet)
 - [ ] **LP-0108** — Body model
 - [ ] **LP-0109** — Raw body content types
 - [ ] **LP-0110** — Multipart/file body foundation
@@ -41,7 +41,7 @@ Legend: `[x]` DONE · `[~]` PARTIAL (real, but not to the task's full stated sco
 - [ ] **LP-0118** — Persistence migrations for Request v2
 - [ ] **LP-0119** — Round-trip and validation tests
 
-## Phase 02 — Variables & Environments (7 DONE · 3 PARTIAL · 4 TODO)
+## Phase 02 — Variables & Environments (8 DONE · 3 PARTIAL · 3 TODO)
 
 - [x] **LP-0201** — Environment entity and CRUD
 - [x] **LP-0202** — Variable entity
@@ -52,17 +52,17 @@ Legend: `[x]` DONE · `[~]` PARTIAL (real, but not to the task's full stated sco
 - [x] **LP-0207** — Environment switching
 - [~] **LP-0208** — Missing-variable diagnostics — resolver reports missing keys; surfaced in the URL preview only, not headers/body/params in the editor
 - [x] **LP-0209** — Secret handling
-- [ ] **LP-0210** — Dynamic variables
+- [x] **LP-0210** — Dynamic variables — `{{$guid}}`/`{{$timestamp}}`/`{{$isoTimestamp}}`/`{{$randomInt}}`, generated fresh each resolution, never persisted
 - [ ] **LP-0211** — Shared vs local environment data
 - [ ] **LP-0212** — Postman environment import
 - [ ] **LP-0213** — Variable editor UI
 - [x] **LP-0214** — Variable tests
 
-## Phase 03 — HTTP Engine & Request Execution (9 DONE · 1 PARTIAL · 4 TODO)
+## Phase 03 — HTTP Engine & Request Execution (10 DONE · 1 PARTIAL · 3 TODO)
 
 - [x] **LP-0301** — Select HTTP client architecture
 - [x] **LP-0302** — Implement async request execution
-- [ ] **LP-0303** — Build CanonicalRequest — blocks all of Phase 06
+- [x] **LP-0303** — Build CanonicalRequest — `canonical_request.rs`; `execution.rs` and `codegen.rs` both build from it, so sending and snippet-generating can never drift apart
 - [x] **LP-0304** — Execute supported methods
 - [x] **LP-0305** — Apply query parameters
 - [~] **LP-0306** — Apply headers and authorization — headers done; no Authorization model, must be typed as a raw header today
@@ -109,20 +109,20 @@ Legend: `[x]` DONE · `[~]` PARTIAL (real, but not to the task's full stated sco
 - [ ] **LP-0506** — Internal-to-Postman export foundation
 - [ ] **LP-0507** — Compatibility test fixtures
 
-## Phase 06 — Code Snippets & cURL Cross-Platform (0/10 — all BLOCKED on LP-0303)
+## Phase 06 — Code Snippets & cURL Cross-Platform (4 DONE · 0 PARTIAL · 0 BLOCKED · 6 TODO)
 
-Every task here either *is* the CodeGenerator abstraction the task pack says must "generate from CanonicalRequest, never from UI text" (LP-0601), or depends on it. None can meaningfully start until LP-0303 exists.
+LP-0303 (CanonicalRequest) now exists, so nothing here is externally blocked anymore. Bash is done; PowerShell/CMD/other-language generators and the cURL importer are real, unstarted work — not stubbed.
 
-- [!] **LP-0601** — CodeGenerator abstraction — blocked on LP-0303 (CanonicalRequest)
-- [!] **LP-0602** — cURL Bash generator — blocked on LP-0601
-- [!] **LP-0603** — cURL PowerShell generator — blocked on LP-0601
-- [!] **LP-0604** — cURL Windows CMD generator — blocked on LP-0601
-- [!] **LP-0605** — Code snippet UI — blocked on LP-0601-0604
-- [!] **LP-0606** — Secret-safe snippet modes — blocked on LP-0601
-- [!] **LP-0607** — Additional generators — blocked on LP-0601
-- [!] **LP-0608** — cURL importer abstraction — blocked on LP-0303
-- [!] **LP-0609** — cURL importer implementation — blocked on LP-0608
-- [!] **LP-0610** — Generator/importer tests — blocked on the rest of Phase 06
+- [x] **LP-0601** — CodeGenerator abstraction — `codegen::generate_snippet` always builds a `CanonicalRequest` first; no generator reads raw UI/request text
+- [x] **LP-0602** — cURL Bash generator — correct POSIX quoting, `-H`/`--data-raw`, tested incl. exact-string structural verification
+- [ ] **LP-0603** — cURL PowerShell generator
+- [ ] **LP-0604** — cURL Windows CMD generator
+- [x] **LP-0605** — Code snippet UI — mode selector, Generate, Copy to clipboard
+- [x] **LP-0606** — Secret-safe snippet modes — `Placeholder` (default, resolves nothing) and `Resolved` (explicit opt-in) are real; `Masked` is NOT implemented (would need per-substitution secret provenance the resolver doesn't track) — documented gap, not faked
+- [ ] **LP-0607** — Additional generators (HTTP, Java, Python, JS, Go, Rust, PHP, C#, Kotlin)
+- [ ] **LP-0608** — cURL importer abstraction
+- [ ] **LP-0609** — cURL importer implementation
+- [ ] **LP-0610** — Generator/importer tests
 
 ## Phase 07 — Git, GitHub, Sync & Collaboration (0/13 — all TODO)
 

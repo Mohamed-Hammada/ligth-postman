@@ -331,3 +331,25 @@ pub async fn generate_api_with_ai(
     log::info!("AI generated an API definition: {}", definition.name);
     Ok(definition)
 }
+
+/// LP-0605 (snippet UI backend). Builds the request's own scope chain the same way
+/// `resolve_preview`/`send_request` do, then hands it to `codegen::generate_snippet`.
+#[tauri::command]
+pub fn generate_curl_snippet(
+    state: State<AppState>,
+    request_id: String,
+    environment_id: Option<String>,
+    mode: crate::codegen::SnippetMode,
+) -> Result<String, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let request = request_store::get_request(&conn, &request_id)?;
+    let (global, environment, request_vars) =
+        variable_store::load_scope_maps(&conn, &request.project_id, environment_id.as_deref(), Some(&request.id))?;
+    let chain = ScopeChain {
+        global: Some(&global),
+        environment: Some(&environment),
+        request: Some(&request_vars),
+        ..Default::default()
+    };
+    crate::codegen::generate_snippet(&request, &chain, mode)
+}

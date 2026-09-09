@@ -125,16 +125,16 @@ Do not log/commit/expose secret values by default.
 
 ---
 
-## [ ] LP-0210 — Dynamic variables
+## [x] LP-0210 — Dynamic variables
 
 UUID, timestamps, and extensible runtime-generated values.
 
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `resolver::dynamic_value` — `{{$guid}}`, `{{$timestamp}}`, `{{$isoTimestamp}}`, `{{$randomInt}}`; checked only as a fallback when no scope-map entry matches, so a real persisted variable named `$guid` still wins; an unrecognized `$name` still reports as missing rather than silently resolving.
+- [x] Relevant tests pass — 6 new `resolver::tests::*`: valid UUID + changes every call, numeric timestamp, valid RFC3339, bounded random int, persisted-variable precedence, unrecognized-token-stays-missing.
+- [x] Build/type-check passes
+- [x] Runtime smoke test completed when user-facing — usable immediately in any field (URL/headers/body/query params/auth) since it's built into the shared resolver; no dedicated UI needed for the capability itself (LP-0213 variable editor UI is still separate, unstarted work).
+- [x] PROJECT_MAP.md updated
 
 ---
 
@@ -181,11 +181,11 @@ Fast editing with lazy loading for large variable sets.
 
 Scope, precedence, missing values, switching, secrets, dynamic values.
 
-**Status:** Everything except dynamic values (LP-0210, not implemented) is covered — there's nothing to test for a feature that doesn't exist yet.
+**Status:** Now fully covered, dynamic values included (LP-0210 landed after this task was first marked done).
 
 **Verification:**
-- [x] Implementation complete — 7 `variable_store` + 5 `environment_store` + 8 `resolver` tests.
-- [x] Relevant tests pass — 46/46 `cargo test --lib`.
+- [x] Implementation complete — 7 `variable_store` + 5 `environment_store` + 14 `resolver` tests (incl. 6 for dynamic variables).
+- [x] Relevant tests pass — 73/73 `cargo test --lib`.
 - [x] Build/type-check passes
 - [x] Runtime smoke test completed when user-facing — N/A (test-coverage task).
 - [x] PROJECT_MAP.md updated

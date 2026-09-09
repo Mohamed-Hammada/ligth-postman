@@ -3,6 +3,7 @@
   import {
     api,
     describeError,
+    type Auth,
     type Environment,
     type GeneratedApiDefinition,
     type Project,
@@ -12,6 +13,7 @@
     type ResolvedTemplate,
     type ResponseMeta,
     type ResponseSummary,
+    type SnippetMode,
   } from "$lib/api";
 
   let projects = $state<Project[]>([]);
@@ -39,6 +41,17 @@
   let editMethod = $state("GET");
   let editUrl = $state("");
   let editQueryParams = $state<QueryParam[]>([]);
+  let editAuthType = $state<Auth["type"]>("none");
+  let editAuthBearerToken = $state("");
+  let editAuthBasicUsername = $state("");
+  let editAuthBasicPassword = $state("");
+  let editAuthApiKeyKey = $state("");
+  let editAuthApiKeyValue = $state("");
+  let editAuthApiKeyLocation = $state<"header" | "query">("header");
+
+  let snippetMode = $state<SnippetMode>("placeholder");
+  let snippet = $state("");
+  let snippetError = $state("");
 
   let errorMessage = $state("");
   let loadingRequests = $state(false);
@@ -60,8 +73,52 @@
       editMethod = selectedRequest.method;
       editUrl = selectedRequest.url;
       editQueryParams = selectedRequest.query_params.map((p) => ({ ...p }));
+
+      const auth = selectedRequest.auth;
+      editAuthType = auth.type;
+      editAuthBearerToken = auth.type === "bearer" ? auth.token : "";
+      editAuthBasicUsername = auth.type === "basic" ? auth.username : "";
+      editAuthBasicPassword = auth.type === "basic" ? auth.password : "";
+      editAuthApiKeyKey = auth.type === "api_key" ? auth.key : "";
+      editAuthApiKeyValue = auth.type === "api_key" ? auth.value : "";
+      editAuthApiKeyLocation = auth.type === "api_key" ? auth.location : "header";
+
+      snippet = "";
+      snippetError = "";
     }
   });
+
+  function buildAuthFromEditFields(): Auth {
+    switch (editAuthType) {
+      case "bearer":
+        return { type: "bearer", token: editAuthBearerToken };
+      case "basic":
+        return { type: "basic", username: editAuthBasicUsername, password: editAuthBasicPassword };
+      case "api_key":
+        return { type: "api_key", key: editAuthApiKeyKey, value: editAuthApiKeyValue, location: editAuthApiKeyLocation };
+      default:
+        return { type: "none" };
+    }
+  }
+
+  async function copyAsCurl() {
+    if (!selectedRequest) return;
+    snippetError = "";
+    try {
+      snippet = await api.generateCurlSnippet(selectedRequest.id, selectedEnvironmentId, snippetMode);
+    } catch (err) {
+      snippetError = describeError(err);
+    }
+  }
+
+  async function copySnippetToClipboard() {
+    if (!snippet) return;
+    try {
+      await navigator.clipboard.writeText(snippet);
+    } catch (err) {
+      snippetError = describeError(err);
+    }
+  }
 
   // Live preview of what {{vars}} in the URL resolve to for the currently selected
   // environment — same resolver code path the HTTP engine will use to build the real
@@ -120,6 +177,7 @@
         url: aiPreview.url,
         headers: aiPreview.headers,
         query_params: aiPreview.query_params,
+        auth: { type: "none" },
         body: aiPreview.body,
       });
       requests = [
@@ -191,6 +249,7 @@
         url: newRequestUrl.trim(),
         headers: [],
         query_params: [],
+        auth: { type: "none" },
         body: null,
       });
       newRequestName = "";
@@ -313,6 +372,10 @@
         ...(JSON.stringify(editQueryParams) !== JSON.stringify(original.query_params)
           ? { query_params: editQueryParams }
           : {}),
+        ...(() => {
+          const auth = buildAuthFromEditFields();
+          return JSON.stringify(auth) !== JSON.stringify(original.auth) ? { auth } : {};
+        })(),
       });
       selectedRequest = updated;
       requests = requests.map((r) =>
@@ -516,6 +579,54 @@
             {/each}
             <button type="button" onclick={addQueryParam}>Add param</button>
             <button type="button" onclick={saveRequest}>Save params</button>
+          </div>
+
+          <h2>Authorization</h2>
+          <div class="params-table">
+            <select bind:value={editAuthType}>
+              <option value="none">No Auth</option>
+              <option value="bearer">Bearer Token</option>
+              <option value="basic">Basic Auth</option>
+              <option value="api_key">API Key</option>
+            </select>
+            {#if editAuthType === "bearer"}
+              <div class="params-row">
+                <input placeholder="Token" bind:value={editAuthBearerToken} />
+              </div>
+            {:else if editAuthType === "basic"}
+              <div class="params-row">
+                <input placeholder="Username" bind:value={editAuthBasicUsername} />
+                <input placeholder="Password" bind:value={editAuthBasicPassword} />
+              </div>
+            {:else if editAuthType === "api_key"}
+              <div class="params-row">
+                <input placeholder="Key" bind:value={editAuthApiKeyKey} />
+                <input placeholder="Value" bind:value={editAuthApiKeyValue} />
+                <select bind:value={editAuthApiKeyLocation}>
+                  <option value="header">Header</option>
+                  <option value="query">Query Param</option>
+                </select>
+              </div>
+            {/if}
+            <button type="button" onclick={saveRequest}>Save auth</button>
+          </div>
+
+          <h2>Code Snippet</h2>
+          <div class="params-table">
+            <div class="params-row">
+              <select bind:value={snippetMode}>
+                <option value="placeholder">Placeholder (safe — never resolves {"{{vars}}"})</option>
+                <option value="resolved">Resolved (real values, including secrets)</option>
+              </select>
+              <button type="button" onclick={copyAsCurl}>Generate cURL</button>
+            </div>
+            {#if snippetError}
+              <p class="error">{snippetError}</p>
+            {/if}
+            {#if snippet}
+              <pre class="body-view">{snippet}</pre>
+              <button type="button" onclick={copySnippetToClipboard}>Copy to clipboard</button>
+            {/if}
           </div>
 
           <p class="hint">Headers: {selectedRequest.headers.length} · Updated {new Date(selectedRequest.updated_at).toLocaleString()}</p>

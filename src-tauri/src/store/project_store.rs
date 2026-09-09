@@ -201,6 +201,7 @@ mod tests {
                 url: "https://api.example.com/users".into(),
                 headers: vec![],
                 query_params: vec![],
+                auth: crate::models::Auth::None,
                 body: None,
             },
         )

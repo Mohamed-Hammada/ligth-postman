@@ -46,6 +46,35 @@ pub struct QueryParam {
     pub description: Option<String>,
 }
 
+/// Where an API-key auth value gets placed on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyLocation {
+    Header,
+    Query,
+}
+
+/// Task-pack LP-0107 scope: None/Bearer/Basic/ApiKey. "Inheritance foundation" and an OAuth2
+/// extension point are explicitly NOT included — there is no Collection/Folder entity yet for
+/// a request to inherit auth *from*, and a fake `Inherit` variant that inherits from nothing
+/// would be exactly the placeholder behavior this pack forbids. Add it when Collections exist.
+/// Every field is stored as the raw template — `{{token}}` is resolved at send/codegen time
+/// by `canonical_request::build`, same as headers/body/query params.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Auth {
+    None,
+    Bearer { token: String },
+    Basic { username: String, password: String },
+    ApiKey { key: String, value: String, location: ApiKeyLocation },
+}
+
+impl Default for Auth {
+    fn default() -> Self {
+        Auth::None
+    }
+}
+
 /// Lightweight row for lists — never carries headers/body (README §4/§20 lazy loading).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestSummary {
@@ -67,6 +96,7 @@ pub struct RequestFull {
     pub url: String,
     pub headers: Vec<HeaderEntry>,
     pub query_params: Vec<QueryParam>,
+    pub auth: Auth,
     pub body: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -82,6 +112,8 @@ pub struct NewRequestInput {
     pub headers: Vec<HeaderEntry>,
     #[serde(default)]
     pub query_params: Vec<QueryParam>,
+    #[serde(default)]
+    pub auth: Auth,
     #[serde(default)]
     pub body: Option<String>,
 }
@@ -279,6 +311,8 @@ pub struct UpdateRequestInput {
     pub headers: Option<Vec<HeaderEntry>>,
     #[serde(default)]
     pub query_params: Option<Vec<QueryParam>>,
+    #[serde(default)]
+    pub auth: Option<Auth>,
     #[serde(default)]
     pub body: Option<String>,
     #[serde(default)]

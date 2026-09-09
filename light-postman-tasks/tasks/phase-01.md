@@ -80,16 +80,18 @@ Ordered key/value/description/enabled entries and duplicate-header policy.
 
 ---
 
-## [ ] LP-0107 — Authorization model
+## [x] LP-0107 — Authorization model (inheritance/OAuth2 explicitly out of scope — see below)
 
 None, Bearer, Basic, API Key, inheritance foundation, OAuth2 extension point.
 
+**Status:** `models::Auth` implements None/Bearer/Basic/ApiKey (header or query location), stored as its own migrated column, resolved through the same `{{var}}` chain as headers/body, and applied exactly once by `canonical_request::apply_auth`. "Inheritance foundation" and "OAuth2 extension point" are deliberately not included: there is no Collection/Folder entity for a request to inherit auth *from* yet, and a fake `Auth::Inherit` variant that inherits from nothing would be exactly the placeholder behavior this pack forbids. Add it once Collections exist.
+
 **Verification:**
-- [ ] Implementation complete
-- [ ] Relevant tests pass
-- [ ] Build/type-check passes
-- [ ] Runtime smoke test completed when user-facing
-- [ ] PROJECT_MAP.md updated
+- [x] Implementation complete — `models.rs` (`Auth`, `ApiKeyLocation`), migration 6, `request_store.rs` wiring, `canonical_request::apply_auth`.
+- [x] Relevant tests pass — `canonical_request::tests::{bearer_auth_resolves_variable_into_header, basic_auth_base64_encodes_username_password, api_key_in_header_location_adds_a_header, api_key_in_query_location_adds_a_query_param_not_a_header, none_auth_adds_no_header}`, plus `request_store::tests::update_can_change_auth_type` and the extended `execution::tests::full_pipeline_...` which sends a real request and confirms the resolved `Authorization: Bearer secret-<port>` header is genuinely on the wire.
+- [x] Build/type-check passes
+- [x] Runtime smoke test completed when user-facing — frontend Authorization editor (type selector + fields) wired to `update_request`; migration 6 applied to a pre-existing on-disk DB in a manual run.
+- [x] PROJECT_MAP.md updated
 
 ---
 

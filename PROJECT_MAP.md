@@ -106,6 +106,15 @@ Everything below is scoped against this flow. A feature that doesn't serve a ste
 
 ---
 
+## Task-Pack Reconciliation (146 tasks, `light-postman-tasks/`)
+
+Full per-task breakdown lives in `light-postman-tasks/TASKS.md` (human-readable) and `tasks.json` (machine-readable, each entry carries *why*). Summary as of 2026-09-09:
+
+- **39 DONE** — implemented, tested, and either runtime- or real-HTTP-verified.
+- **13 PARTIAL** — real and working, but not to the task's full stated scope (e.g. variable scopes cover global/environment/request but not collection/folder, which don't exist as entities yet).
+- **14 BLOCKED** — the task text names a specific prerequisite that doesn't exist: all of Phase 06 (cURL/codegen) blocks on `LP-0303` (`CanonicalRequest`, not built); `LP-0902` blocks on `LP-0901` (script sandbox); `LP-0817`/`LP-0818` block on the source-analyzer pipeline (`LP-0812`-`0815`); `LP-0913` (Linux packaging) blocks on this session having no Linux build environment.
+- **80 TODO** — not started, no blocker.
+
 ## ORPHANS & PENDING
 
 Nothing here is wired to a command, a store, or a UI surface yet. Grouped by README phase (§39). This list is expected to be long right now — the product is a scaffold plus one thin vertical slice, not a Postman replacement.

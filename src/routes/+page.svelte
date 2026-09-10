@@ -706,7 +706,6 @@
   // Git & Collaboration state (LP-0701 - LP-0713)
   let showDiffModal = $state(false);
   let showHistoryModal = $state(false);
-  let showProjectFileModal = $state(false);
   let gitActiveTab = $state<"sync" | "conflicts" | "github" | "projectfile">("sync");
 
   let gitSettings = $state<ProjectGitSettings | null>(null);
@@ -2490,7 +2489,6 @@
     try {
       projectFileJson = await api.exportProjectFile(selectedProjectId, !projectFileMaskSecrets);
       projectFileStatus = "Canonical project file generated.";
-      showProjectFileModal = true;
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -2898,6 +2896,8 @@
                     onclick={async () => {
                       await selectProject(project.id);
                       await exportProjectFileAction();
+                      gitActiveTab = "projectfile";
+                      activeScreen = "git";
                     }}
                   >💾</button>
                   <button class="icon-btn" title="Rename" onclick={() => startRenameProject(project)}>✎</button>

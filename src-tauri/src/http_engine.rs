@@ -15,7 +15,7 @@ use reqwest::{Client, Method};
 use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
-use crate::models::{HeaderEntry, RequestSettings, ResponseCookie};
+use crate::models::{HeaderEntry, RequestSettings, ResolvedFormPart, ResponseCookie};
 
 pub struct HttpRequestSpec {
     pub method: String,
@@ -23,6 +23,14 @@ pub struct HttpRequestSpec {
     /// Only `enabled` headers are sent.
     pub headers: Vec<HeaderEntry>,
     pub body: Option<String>,
+    /// Mutually exclusive with `body` — set for FormData requests. See `execute()`: this is
+    /// sent via reqwest's `.multipart()` so the boundary is generated correctly, never via
+    /// `.body()` with a hand-rolled Content-Type.
+    pub multipart: Option<Vec<ResolvedFormPart>>,
+    /// Set for `Binary` bodies — a path to read raw bytes from at send time, instead of `body`
+    /// carrying the path as literal text (that used to be the actual bug: the file path string
+    /// itself was sent as the body).
+    pub body_file_path: Option<String>,
     pub timeout_ms: u64,
     pub settings: Option<RequestSettings>,
 }
@@ -77,9 +85,7 @@ pub struct HttpResult {
     pub status: u16,
     pub status_text: String,
     pub headers: Vec<HeaderEntry>,
-    #[allow(dead_code)]
     pub content_type: Option<String>,
-    #[allow(dead_code)]
     pub cookies: Vec<ResponseCookie>,
     pub duration_ms: u64,
     pub body_size: u64,
@@ -123,7 +129,17 @@ pub async fn execute(
             builder = builder.header(&header.key, &header.value);
         }
     }
-    if let Some(body) = spec.body {
+    if let Some(parts) = spec.multipart {
+        // `.multipart()` sets Content-Type: multipart/form-data; boundary=... itself — never
+        // set that header manually (a hand-rolled boundary is exactly the "fake behavior" the
+        // canonical model is built to avoid; see canonical_request::build).
+        builder = builder.multipart(build_multipart_form(parts).await?);
+    } else if let Some(path) = spec.body_file_path {
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|err| AppError::Validation(format!("cannot read file '{path}': {err}")))?;
+        builder = builder.body(bytes);
+    } else if let Some(body) = spec.body {
         builder = builder.body(body);
     }
 
@@ -170,6 +186,31 @@ pub async fn execute(
         body_size,
         body,
     })
+}
+
+/// Builds a real `reqwest::multipart::Form` — text fields as-is, file fields read from disk.
+/// A missing/unreadable file surfaces as a clear `AppError::Validation` naming the field and
+/// path, rather than silently dropping the part (the bug this replaces silently dropped every
+/// file field and mislabeled a urlencoded-style string as multipart/form-data).
+async fn build_multipart_form(parts: Vec<ResolvedFormPart>) -> Result<reqwest::multipart::Form, AppError> {
+    let mut form = reqwest::multipart::Form::new();
+    for part in parts {
+        match part {
+            ResolvedFormPart::Text { key, value } => {
+                form = form.text(key, value);
+            }
+            ResolvedFormPart::File { key, file_name, file_path } => {
+                let bytes = tokio::fs::read(&file_path).await.map_err(|err| {
+                    AppError::Validation(format!(
+                        "form field '{key}': cannot read file '{file_path}': {err}"
+                    ))
+                })?;
+                let file_part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
+                form = form.part(key, file_part);
+            }
+        }
+    }
+    Ok(form)
 }
 
 pub fn parse_cookie_header(header: &str) -> Option<ResponseCookie> {
@@ -313,8 +354,209 @@ mod tests {
         port
     }
 
+    /// Same as `spawn_mock_server`, but hands the request line back to the caller so a test
+    /// can assert on which method (and headers) were actually sent on the wire, not just that
+    /// *some* request arrived (README §22 — the pipeline must be validated against a real
+    /// local server, not asserted against by assumption).
+    fn spawn_recording_server(response: Vec<u8>) -> (u16, std::sync::Arc<std::sync::Mutex<Option<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = captured.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_nodelay(true);
+                let mut received = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            received.extend_from_slice(&buf[..n]);
+                            if received.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                *captured_clone.lock().unwrap() = Some(String::from_utf8_lossy(&received).to_string());
+                let _ = stream.write_all(&response);
+                let _ = stream.flush();
+            }
+        });
+        (port, captured)
+    }
+
+    /// Reads the full request (headers + body, using Content-Length to know when to stop)
+    /// and hands the raw bytes back — needed to assert on multipart bodies, which
+    /// `spawn_recording_server` (headers-only) can't see.
+    fn spawn_full_capture_server(response: Vec<u8>) -> (u16, std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = captured.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_nodelay(true);
+                let mut received = Vec::new();
+                let mut buf = [0u8; 4096];
+                let mut header_end = None;
+                let mut content_length: usize = 0;
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            received.extend_from_slice(&buf[..n]);
+                            if header_end.is_none() {
+                                if let Some(pos) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                                    header_end = Some(pos + 4);
+                                    let header_text = String::from_utf8_lossy(&received[..pos]).to_lowercase();
+                                    content_length = header_text
+                                        .lines()
+                                        .find_map(|l| l.strip_prefix("content-length:"))
+                                        .and_then(|v| v.trim().parse().ok())
+                                        .unwrap_or(0);
+                                }
+                            }
+                            if let Some(end) = header_end {
+                                if received.len() >= end + content_length {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                *captured_clone.lock().unwrap() = Some(received);
+                let _ = stream.write_all(&response);
+                let _ = stream.flush();
+            }
+        });
+        (port, captured)
+    }
+
     fn spec(url: String) -> HttpRequestSpec {
-        HttpRequestSpec { method: "GET".into(), url, headers: vec![], body: None, timeout_ms: 5000, settings: None }
+        HttpRequestSpec { method: "GET".into(), url, headers: vec![], body: None, multipart: None, body_file_path: None, timeout_ms: 5000, settings: None }
+    }
+
+    /// Every method the UI offers must actually reach the wire as that exact method — not be
+    /// silently coerced to GET/POST. Covers all of `models::VALID_METHODS` plus TRACE, which
+    /// `Method::from_bytes` accepts but which isn't offered in the picker today.
+    #[tokio::test]
+    async fn every_supported_method_is_sent_verbatim_on_the_wire() {
+        for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"] {
+            let (port, captured) = spawn_recording_server(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            );
+            let client = Client::new();
+            let tmp = std::env::temp_dir().join("postman-client-test-methods");
+
+            let mut s = spec(format!("http://127.0.0.1:{port}/"));
+            s.method = method.into();
+            let result = execute(&client, s, 1024, &tmp).await;
+            assert!(result.is_ok(), "{method} should execute cleanly, got {:?}", result.err());
+
+            let request_text = captured.lock().unwrap().clone().unwrap_or_default();
+            let request_line = request_text.lines().next().unwrap_or("");
+            assert!(
+                request_line.starts_with(method),
+                "expected {method} on the wire, got request line {request_line:?}"
+            );
+        }
+    }
+
+    /// CONNECT is fundamentally a proxy-tunnel-establishment method, not a request you send to
+    /// an arbitrary origin — reqwest/hyper reject it client-side rather than putting it on the
+    /// wire. Documenting this here (rather than silently listing CONNECT as "supported" in the
+    /// UI) is the "clear validation/error handling rather than fake behavior" the spec asks for.
+    #[tokio::test]
+    async fn connect_is_rejected_before_touching_the_network_not_silently_downgraded() {
+        let client = Client::new();
+        let tmp = std::env::temp_dir().join("postman-client-test-connect");
+        let mut s = spec("http://127.0.0.1:1/".into());
+        s.method = "CONNECT".into();
+        let result = execute(&client, s, 1024, &tmp).await;
+        assert!(result.is_err(), "CONNECT to an arbitrary origin must not silently succeed");
+    }
+
+    /// Regression test for a real bug found during audit: FormData used to be flattened into a
+    /// `key=value&key=value` string (urlencoded syntax) under a `multipart/form-data` header
+    /// with no boundary — file fields were silently dropped entirely, and no compliant server
+    /// could have parsed the body. This asserts the wire bytes are *actually* multipart: a real
+    /// boundary, `Content-Disposition` per part, the text value, and the file's real content.
+    #[tokio::test]
+    async fn multipart_form_data_sends_real_boundary_and_file_bytes_on_the_wire() {
+        let (port, captured) = spawn_full_capture_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+
+        let file_path = std::env::temp_dir().join(format!("postman-client-test-upload-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&file_path, b"file contents here").unwrap();
+
+        let client = Client::new();
+        let tmp = std::env::temp_dir().join("postman-client-test-multipart");
+        let mut s = spec(format!("http://127.0.0.1:{port}/"));
+        s.method = "POST".into();
+        s.multipart = Some(vec![
+            crate::models::ResolvedFormPart::Text { key: "username".into(), value: "ada".into() },
+            crate::models::ResolvedFormPart::File {
+                key: "avatar".into(),
+                file_name: "avatar.txt".into(),
+                file_path: file_path.to_string_lossy().to_string(),
+            },
+        ]);
+
+        let result = execute(&client, s, 1024 * 64, &tmp).await;
+        assert!(result.is_ok(), "multipart send should succeed, got {:?}", result.err());
+        let _ = std::fs::remove_file(&file_path);
+
+        let raw = captured.lock().unwrap().clone().unwrap();
+        let text = String::from_utf8_lossy(&raw);
+
+        // Content-Type must carry a real boundary — never a bare "multipart/form-data".
+        let ct_line = text.lines().find(|l| l.to_lowercase().starts_with("content-type:")).unwrap();
+        assert!(ct_line.to_lowercase().contains("boundary="), "missing boundary in {ct_line:?}");
+        let boundary = ct_line.split("boundary=").nth(1).unwrap().trim().to_string();
+
+        assert!(text.contains(&boundary), "body must contain the declared boundary");
+        assert!(text.contains("name=\"username\""));
+        assert!(text.contains("ada"));
+        assert!(text.contains("name=\"avatar\""));
+        assert!(text.contains("filename=\"avatar.txt\""));
+        assert!(text.contains("file contents here"), "actual file bytes must be on the wire");
+    }
+
+    /// Regression test for a real bug found during audit: a Binary body used to put the file
+    /// *path string* into `HttpRequestSpec.body`, so `.body(body)` sent the literal text of the
+    /// path (e.g. "C:\photo.png") instead of the file's bytes. `body_file_path` is the only
+    /// correct channel for this.
+    #[tokio::test]
+    async fn binary_body_sends_actual_file_bytes_not_the_path_string() {
+        let (port, captured) = spawn_full_capture_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+
+        let file_path = std::env::temp_dir().join(format!("postman-client-test-binary-{}.bin", uuid::Uuid::new_v4()));
+        std::fs::write(&file_path, b"\x00\x01BINARYPAYLOAD\x02\x03").unwrap();
+
+        let client = Client::new();
+        let tmp = std::env::temp_dir().join("postman-client-test-binary");
+        let mut s = spec(format!("http://127.0.0.1:{port}/"));
+        s.method = "POST".into();
+        s.body_file_path = Some(file_path.to_string_lossy().to_string());
+
+        let result = execute(&client, s, 1024 * 64, &tmp).await;
+        assert!(result.is_ok(), "binary send should succeed, got {:?}", result.err());
+        let _ = std::fs::remove_file(&file_path);
+
+        let raw = captured.lock().unwrap().clone().unwrap();
+        assert!(
+            raw.windows(b"BINARYPAYLOAD".len()).any(|w| w == b"BINARYPAYLOAD"),
+            "actual file bytes must be on the wire"
+        );
+        let text = String::from_utf8_lossy(&raw);
+        assert!(!text.contains("postman-client-test-binary"), "the path string must never be sent as the body");
     }
 
     #[tokio::test]

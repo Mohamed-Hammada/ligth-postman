@@ -41,9 +41,15 @@ pub async fn execute_request(
 
     // ---- Load + resolve (synchronous DB section — the guard must never cross an .await,
     // or every other DB-touching command would block for the duration of the network call). ----
-    let (spec, request_id, project_id_for_cookies, target_domain, post_request_script, post_script_env, post_script_vars) = {
+    let (spec, request_id, project_id_for_cookies, target_domain, post_request_script, post_script_env, post_script_vars, auth_type_label) = {
         let conn = db.lock().expect("db mutex poisoned");
         let request = request_store::get_request(&conn, &input.request_id)?;
+        let auth_type_label = match &request.auth {
+            crate::models::Auth::None => "none",
+            crate::models::Auth::Bearer { .. } => "bearer",
+            crate::models::Auth::Basic { .. } => "basic",
+            crate::models::Auth::ApiKey { .. } => "api_key",
+        };
 
         let (global, mut environment, mut request_vars) = variable_store::load_scope_maps(
             &conn,
@@ -138,6 +144,8 @@ pub async fn execute_request(
                 url: canonical.url,
                 headers,
                 body: canonical.body,
+                multipart: canonical.multipart,
+                body_file_path: canonical.body_file_path,
                 timeout_ms: request
                     .settings
                     .as_ref()
@@ -151,6 +159,7 @@ pub async fn execute_request(
             request.post_request_script,
             environment,
             request_vars,
+            auth_type_label,
         )
     };
 
@@ -178,6 +187,14 @@ pub async fn execute_request(
                 "url": redacted_url,
                 "headers": redacted_headers,
                 "body_bytes": spec.body.as_ref().map(|b| b.len()).unwrap_or(0),
+                "project_id": project_id_for_cookies,
+                "environment_id": input.environment_id,
+                "auth_type": auth_type_label,
+                "timeout_ms": spec.timeout_ms,
+                "follow_redirects": spec.settings.as_ref().and_then(|s| s.follow_redirects).unwrap_or(true),
+                "verify_ssl": spec.settings.as_ref().and_then(|s| s.verify_ssl).unwrap_or(true),
+                "proxy": spec.settings.as_ref().and_then(|s| s.proxy_url.clone()),
+                "http_version": spec.settings.as_ref().and_then(|s| s.http_version.clone()),
             })),
         );
     }
@@ -194,6 +211,23 @@ pub async fn execute_request(
                         serde_json::json!({
                             "key": h.key,
                             "value": crate::console::redact_header_value(&h.key, &h.value),
+                        })
+                    })
+                    .collect();
+                // Cookie values may carry session/auth material — same redaction stance as the
+                // Set-Cookie header above (name/domain/path/flags stay visible for debugging,
+                // the value never appears in the console).
+                let redacted_cookies: Vec<serde_json::Value> = res
+                    .cookies
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "name": c.name,
+                            "value": if c.value.is_empty() { "" } else { "[REDACTED]" },
+                            "domain": c.domain,
+                            "path": c.path,
+                            "http_only": c.http_only,
+                            "secure": c.secure,
                         })
                     })
                     .collect();
@@ -216,6 +250,8 @@ pub async fn execute_request(
                         "duration_ms": res.duration_ms,
                         "body_size": res.body_size,
                         "headers": redacted_resp_headers,
+                        "cookies": redacted_cookies,
+                        "content_type": res.content_type,
                     })),
                 );
             }
@@ -568,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn console_logs_request_and_response_lifecycle_with_redaction() {
         let (port, _) = spawn_recording_server(
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: session_id=sess_abc; Path=/\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"
                 .to_vec(),
         );
 
@@ -626,5 +662,21 @@ mod tests {
         let details_str = serde_json::to_string(&start_evt.details).unwrap();
         assert!(details_str.contains("[REDACTED]"));
         assert!(!details_str.contains("super_secret_bearer"));
+
+        // Debugging metadata the spec explicitly asks for is present on request_start.
+        let start_details = start_evt.details.as_ref().unwrap();
+        assert_eq!(start_details["auth_type"], "bearer");
+        assert_eq!(start_details["project_id"], project.id);
+        assert!(start_details["environment_id"].is_null());
+        assert_eq!(start_details["timeout_ms"], 5000);
+
+        // Response metadata: content type surfaced, cookie name/flags visible but value redacted.
+        let resp_details = resp_evt.details.as_ref().unwrap();
+        assert_eq!(resp_details["content_type"], "application/json");
+        let cookies = resp_details["cookies"].as_array().unwrap();
+        assert_eq!(cookies[0]["name"], "session_id");
+        assert_eq!(cookies[0]["value"], "[REDACTED]");
+        let resp_details_str = serde_json::to_string(resp_details).unwrap();
+        assert!(!resp_details_str.contains("sess_abc"));
     }
 }

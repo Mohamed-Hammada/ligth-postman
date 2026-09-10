@@ -23,6 +23,37 @@ export interface QueryParam {
   description?: string | null;
 }
 
+/** One multipart/form-data row. `file_path` is an absolute path on disk — the backend reads
+ * and streams its bytes at send time via `reqwest::multipart::Form`, so the frontend never
+ * loads file contents into memory itself. Matches Rust `models::FormDataPart`. */
+export interface FormDataPart {
+  key: string;
+  value: string;
+  enabled: boolean;
+  description?: string | null;
+  is_file: boolean;
+  file_path?: string | null;
+}
+
+/** One application/x-www-form-urlencoded row. Matches Rust `models::UrlEncodedItem`. */
+export interface UrlEncodedItem {
+  key: string;
+  value: string;
+  enabled: boolean;
+  description?: string | null;
+}
+
+/**
+ * The stored `body` column is a plain string, but for structured body types it's actually one
+ * of these shapes serialized as JSON (matches Rust `models::RequestBody`, `#[serde(tag =
+ * "type")]`). `describeBodyForEditing`/`serializeBodyForStorage` in +page.svelte convert
+ * between this and the editor's per-type state.
+ */
+export type StructuredRequestBody =
+  | { type: "form_data"; items: FormDataPart[] }
+  | { type: "url_encoded"; items: UrlEncodedItem[] }
+  | { type: "binary"; file_path?: string | null };
+
 /** LP-0107. `token`/`username`/`password`/`key`/`value` are raw templates — `{{var}}` is
  * resolved at send/snippet time, never baked into storage. No `inherit`/OAuth2 variant yet:
  * there is no Collection/Folder to inherit from and no OAuth2 flow implemented. */

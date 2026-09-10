@@ -173,11 +173,18 @@ Show request-side diagnostics such as:
 - request ID/correlation ID
 - timestamps
 
+**2026-09-10 audit finding + fix:** "auth summary" wasn't actually in `request_start`'s JSON
+details before this pass — only the redacted `Authorization` header value was (no distinct
+`auth_type` label), and `project_id`/`environment_id`/`timeout_ms`/redirect-policy/proxy/HTTP-version
+weren't present either despite being explicitly required by the architecture spec's Developer
+Console section. Added all of them to the event's `details` payload — the frontend's existing
+"Copy Details JSON" / expandable raw-JSON view needed no changes to pick them up.
+
 **Verification:**
-- [x] Implementation complete — Backend logs `request_start` with method, resolved URL, query params, redacted headers, auth summary, body type and size, correlation ID, timestamp.
-- [x] Relevant tests pass — `execution::tests::console_logs_request_and_response_lifecycle_with_redaction`.
-- [x] Build/type-check passes — `cargo test --lib`.
-- [x] Runtime smoke test completed when user-facing — Visible in console drawer with correlation ID.
+- [x] Implementation complete — Backend logs `request_start` with method, resolved URL, query params (baked into the URL), redacted headers, `auth_type`, `project_id`, `environment_id`, `timeout_ms`, `follow_redirects`, `verify_ssl`, `proxy`, `http_version`, body size, correlation ID, timestamp.
+- [x] Relevant tests pass — `execution::tests::console_logs_request_and_response_lifecycle_with_redaction` now asserts on `auth_type`, `project_id`, `environment_id`, and `timeout_ms` in the emitted event, not just that the event exists.
+- [x] Build/type-check passes — `cargo test --lib` (134 passed).
+- [x] Runtime smoke test completed when user-facing — Visible in console drawer with correlation ID; verified live by expanding a `request_start` event after a real send.
 - [x] PROJECT_MAP.md updated
 
 ---
@@ -198,11 +205,19 @@ Show response-side diagnostics such as:
 
 Large response bodies must remain lazy.
 
+**2026-09-10 audit finding + fix:** `cookies` and `content_type` were NOT actually in
+`response_received`'s details before this pass, despite the task claiming otherwise —
+`http_engine::HttpResult.cookies`/`.content_type` were marked `#[allow(dead_code)]` (cookies
+were read elsewhere for the cookie-jar feature, but never surfaced to the console; content_type
+had zero callers anywhere). Added both, with cookie values redacted the same way the
+`Set-Cookie` header already was (name/domain/path/flags visible, value replaced with
+`[REDACTED]` since cookies routinely carry session/auth material).
+
 **Verification:**
-- [x] Implementation complete — Backend logs `response_received` with status code/text, response headers, cookies, duration, response size, content type, correlation ID.
-- [x] Relevant tests pass — `execution::tests::console_logs_request_and_response_lifecycle_with_redaction`.
-- [x] Build/type-check passes — `cargo test --lib`.
-- [x] Runtime smoke test completed when user-facing — Displayed with duration and status code.
+- [x] Implementation complete — Backend logs `response_received` with status code/text, response headers, cookies (redacted values), content type, duration, response size, correlation ID.
+- [x] Relevant tests pass — `execution::tests::console_logs_request_and_response_lifecycle_with_redaction` now sends a response with a `Set-Cookie` header and asserts the cookie's name/flags are visible while its value is `[REDACTED]` and never appears in the serialized event.
+- [x] Build/type-check passes — `cargo test --lib` (134 passed).
+- [x] Runtime smoke test completed when user-facing — Displayed with duration and status code; verified live against a local server returning a real cookie.
 - [x] PROJECT_MAP.md updated
 
 ---

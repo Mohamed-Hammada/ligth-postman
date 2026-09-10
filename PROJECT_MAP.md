@@ -7,9 +7,9 @@ Every feature and phase across the entire project (146 of 146 tasks) has been fu
 
 ## 1. Project Status Summary
 
-- **Total Tasks**: 146 / 146 (100% Complete)
+- **Total Tasks**: 146 / 146 marked done in the task pack — **see §7 for an independent 2026-09-10 re-audit that found several of these were done-on-paper but broken or unreachable in practice, and has since fixed them.** Treat "146/146" as "all tasks have an implementation," not as "nothing here has bugs."
 - **Phases Completed**: 10 of 10 (Phases 00 through 09)
-- **Backend Quality**: 132 automated tests passed (126 unit tests + 6 integration tests, 0 failures, 0 warnings).
+- **Backend Quality**: 140 automated tests passed (134 unit tests + 6 integration tests, 0 failures, 0 warnings) as of the §7 audit.
 - **Frontend Quality**: `npm run check` found 0 errors and 0 warnings; `npm run build` compiled cleanly into static bundle.
 - **Packaging Verified**: Windows NSIS `.exe` (4.48 MB) and WiX3 `.msi` (8.07 MB) installers; Linux `.deb` and `.AppImage` bundle configurations; GitHub Actions matrix CI/CD.
 
@@ -161,3 +161,119 @@ Verification for this pass: `cargo test` (127 unit + 6 integration, 0 failures),
 (0 errors/0 warnings), `npm run build` (clean), plus live screenshots at 1280×720, 1440×900, and
 1920×1080 with no overflow, and two real end-to-end sends against a local HTTP server exercising
 the new response tabs, error banner, and test-results view.
+
+---
+
+## 7. Independent Re-Audit (2026-09-10)
+
+Commissioned specifically to distrust the "146/146 complete" claim and verify the *actual*
+codebase rather than the task pack's own checklists. Method: for the highest-priority items in
+the architecture spec (canonical request model, HTTP methods, body types, headers/auth,
+Developer Console diagnostics, response viewer, scripts/tests, cURL, Postman compatibility),
+read the real implementation, then proved behavior with tests that hit a real local socket
+(`spawn_recording_server`/`spawn_full_capture_server` in `http_engine.rs`'s test module) rather
+than trusting existing assertions — several existing tests turned out to assert against
+mocked/dead code paths rather than the live one. Every fix below was verified two ways: a new
+automated test against real wire bytes, *and* a live send through the actual running app
+(WebView2 remote debugging + Playwright, `npm run tauri dev`).
+
+**Commit this audit started from:** `2343199` ("Update +page.svelte"), i.e. immediately after
+the UI/UX redesign pass in §6. All changes below are currently uncommitted in the working tree.
+
+### 7.1 Real bugs found and fixed (not cosmetic — these were silently broken or unreachable)
+
+1. **`multipart/form-data` bodies were completely non-functional.** `canonical_request.rs`
+   flattened FormData into a `key=value&key=value` string (urlencoded syntax) under a
+   `Content-Type: multipart/form-data` header with **no boundary parameter** — invalid per RFC
+   7578, unparseable by any compliant server — and silently dropped every file field entirely.
+   Fixed: `CanonicalRequest` now carries `multipart: Option<Vec<models::ResolvedFormPart>>`;
+   `http_engine::execute` builds a real `reqwest::multipart::Form` (correct boundary generated
+   by reqwest itself, file bytes read from disk). Proven with a test that captures the actual
+   bytes sent to a local socket and asserts on the real boundary, `Content-Disposition` headers,
+   and file content (`http_engine::tests::multipart_form_data_sends_real_boundary_and_file_bytes_on_the_wire`).
+2. **Binary bodies sent the file path as literal text, not the file's contents.**
+   `RequestBody::Binary { file_path }` put the path string itself into the wire body. Fixed with
+   a dedicated `body_file_path` channel through `CanonicalRequest`/`HttpRequestSpec`, read via
+   `tokio::fs::read` at send time. Proven the same way
+   (`http_engine::tests::binary_body_sends_actual_file_bytes_not_the_path_string`).
+3. **No UI ever existed to create a form-data/urlencoded/binary body.** The editor's `editBodyType`
+   union declared these variants but the template only rendered Raw/GraphQL radios — meaning
+   fixes #1/#2 were previously unreachable from the actual product for any hand-built request.
+   Added row editors for all three (checkbox/key/value/file-toggle/add/remove, matching the
+   existing Params/Headers pattern) plus `parseBodyForEditing`/`serializeBodyForStorage` so
+   reopening a saved request correctly restores its body type instead of always defaulting to
+   Raw (a related pre-existing bug: `editBodyType` was never derived from the loaded request,
+   only from an in-memory tab draft — switching between a GraphQL request and a plain one could
+   show stale GraphQL editor state for the wrong request).
+4. **Postman collection import had the identical flattening bug** for `formdata`/`urlencoded`
+   body modes — imported multipart file fields became a literal `"field=<file:/path>"` string
+   with no way to ever become real bytes, and urlencoded bodies had no Content-Type. Fixed to
+   emit the same tagged `RequestBody` JSON the editor and send pipeline use.
+5. **A dead, differently-broken duplicate request-body model existed.**
+   `models::RequestBody::to_wire_representation()` (`#[allow(dead_code)]`, zero callers) had the
+   same multipart bug independently, plus its own inconsistencies — deleted rather than fixed,
+   since keeping two incompatible body-encoding implementations around violates the "one
+   canonical request representation" architecture invariant even when one is provably inert.
+6. **Send could silently execute stale data.** `sendCurrentRequest()` called the backend with
+   only the request ID; the execution pipeline always re-reads the *persisted* row. Editing the
+   URL/headers/body/auth/params and clicking Send without clicking Save first sent the old saved
+   values. Fixed by awaiting the existing (idempotent, diff-based) `saveRequest()` at the top of
+   `sendCurrentRequest()`.
+7. **`AppError`'s wire format never actually carried `remediation_hint()`** despite it being
+   implemented and unit-tested — `describeError()` showed raw strings like `"network error:
+   connection refused"` as the primary UI error text. Fixed with a hand-written `Serialize` impl
+   (`{kind, message, hint}`); verified live against a real failed request. *(Found/fixed in the
+   §6 session, listed here too since it directly serves this audit's error-UX priority.)*
+8. **TRACE was missing from `VALID_METHODS`** despite `http_engine::execute`'s `Method::from_bytes`
+   already handling it correctly — added. **CONNECT was tested empirically** rather than assumed:
+   reqwest/hyper refuse to put it on the wire to an arbitrary origin at all (it's a proxy-tunnel
+   method), so it's deliberately excluded from the picker with that reasoning in code, instead of
+   offering a control that always fails.
+9. **Two Developer Console fields the architecture spec explicitly requires were never actually
+   emitted**, despite the task pack claiming them done: `auth_type`/`project_id`/`environment_id`/
+   `timeout_ms`/redirect-policy/proxy/HTTP-version on `request_start`, and `cookies`/`content_type`
+   on `response_received` (`HttpResult.cookies`/`.content_type` were `#[allow(dead_code)]` —
+   read by nothing). Added all of them; cookie values are redacted the same way `Set-Cookie`
+   header values already were (name/domain/path/flags visible, value never shown).
+
+### 7.2 Verified correct as-is (checked, not just trusted)
+
+- **Canonical request model**: confirmed genuinely single-sourced — `canonical_request::build`
+  is the only place that resolves a request, and both `execution.rs` (real sends) and
+  `codegen.rs` (snippets) call it, so a snippet can't drift from what's actually sent. `ai.rs`
+  and `store/request_store.rs` both validate methods against the same `models::VALID_METHODS`
+  constant rather than a second hardcoded list.
+- **Script sandbox / pm.test results**: real, not fake — `script_engine.rs`'s post-request
+  script execution genuinely runs assertions and reports pass/fail with error messages; these
+  were already flowing into the console event log, just not surfaced next to the response (see
+  §6's Tests tab, which reads this same real data).
+- **Secret redaction**: header/cookie/URL redaction in `console.rs` is real (keyword-matches on
+  header/param names, not a client-side-only mask) and covers the new fields added in 7.1.9.
+
+### 7.3 Explicitly not attempted (scope decision, documented rather than silently skipped)
+
+- **cURL import (`curl_importer.rs`) does not parse `-F`/`--form` flags.** A multipart cURL
+  command imports today with the file/form data silently dropped (only `-d`/`--data*` raw
+  bodies are recognized). This is a real, confirmed gap of the same shape as 7.1.4, not yet
+  fixed — flagged here rather than left implicitly "done" by the task pack's LP-0608/0609.
+- **No native file picker.** Form-data file fields and the Binary body's path are plain text
+  inputs (the user types/pastes an absolute path) — no `@tauri-apps/plugin-dialog` is installed.
+  Adding one is a reasonable follow-up; not done here to avoid an unreviewed new Tauri
+  capability/permission surface in this pass.
+- **Raw body has no content-type selector.** `RequestBody::Raw { content_type, data }` exists
+  and is honored end-to-end, but the editor's Raw mode still just sends `editBody` as a plain
+  string (unchanged, to avoid touching an already-working, heavily-exercised path) — there's no
+  UI to pick JSON/XML/Text/HTML/JS for it.
+- **Developer Console still doesn't show**: redirect chain, per-hop timing, or a TLS
+  configuration summary. `follow_redirects`/`verify_ssl`/`http_version` (the *settings*) are now
+  logged; the actual negotiated protocol/cert details are not, since `reqwest::Response` doesn't
+  expose the TLS session and adding a parallel low-level HTTP client just for this was judged
+  out of proportion to the benefit.
+- A full second re-audit of Git/GitHub, AI, and packaging (§7's priority list items 11-12) was
+  not performed in this pass — time went to the higher-priority canonical-request/HTTP-method/
+  body-type/console items instead, per the audit's own stated priority order.
+
+### 7.4 Test counts after this pass
+
+`cargo test` (from `src-tauri/`): **134 unit + 6 integration = 140 passed, 0 failed.**
+`npm run check`: 0 errors, 0 warnings. `npm run build`: clean static bundle.

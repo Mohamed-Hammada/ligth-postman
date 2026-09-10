@@ -43,13 +43,21 @@ One resolved representation shared by execution, snippets, and future import/exp
 
 ## [x] LP-0304 — Execute supported methods
 
-GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS.
+GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE. CONNECT deliberately excluded (see below).
+
+**2026-09-10 audit note:** re-verified against the full HTTP method list in the architecture
+spec (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS/TRACE/CONNECT), not just the original seven.
+TRACE was already handled correctly by `Method::from_bytes` but wasn't in `VALID_METHODS` or
+the method picker — added to both. CONNECT was tested empirically (not assumed): reqwest/hyper
+refuse to put a `CONNECT` request to an arbitrary origin on the wire at all (it's a proxy-tunnel
+method, not something a client sends to an API), so it's kept out of `VALID_METHODS` with that
+reasoning documented in code, rather than offering a button that always fails.
 
 **Verification:**
-- [x] Implementation complete — `http_engine::execute` resolves the method dynamically via `Method::from_bytes`, not hardcoded per verb, so all seven go through the identical code path.
-- [x] Relevant tests pass — `executes_get_request_and_captures_status_headers_body` proves the dynamic-method mechanism against a real server; not each verb individually tested (low risk since it's the same code path).
+- [x] Implementation complete — `http_engine::execute` resolves the method dynamically via `Method::from_bytes`, not hardcoded per verb, so every accepted verb goes through the identical code path. `models::VALID_METHODS` now includes TRACE with a doc comment explaining CONNECT's exclusion.
+- [x] Relevant tests pass — `http_engine::tests::every_supported_method_is_sent_verbatim_on_the_wire` sends all 8 methods against a real local socket and asserts the exact request line for each (not just GET); `connect_is_rejected_before_touching_the_network_not_silently_downgraded` proves CONNECT fails closed rather than being silently coerced into something else.
 - [x] Build/type-check passes
-- [x] Runtime smoke test completed when user-facing — frontend method `<select>` sends GET/POST/etc.
+- [x] Runtime smoke test completed when user-facing — frontend method `<select>` (both the new-request form and the main editor) now offers all 8 methods; verified live by sending a real POST through the running app.
 - [x] PROJECT_MAP.md updated
 
 ---

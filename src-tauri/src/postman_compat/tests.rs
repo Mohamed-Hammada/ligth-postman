@@ -320,3 +320,69 @@ fn unsupported_auth_adds_warning_and_falls_back_to_none() {
     let req = request_store::get_request(&conn, &reqs[0].id).unwrap();
     assert_eq!(req.auth, Auth::None);
 }
+
+/// Regression test for a real bug found during audit: imported `urlencoded`/`formdata` bodies
+/// used to be flattened into "key=value"/"key: value" placeholder text with no `type` tag, so
+/// on send they fell through to the generic raw-string path — urlencoded went out malformed and
+/// file fields became a literal "field=<file:/path>" string that could never become real
+/// multipart bytes. This verifies the imported body round-trips through
+/// `canonical_request::resolve_body` into a correctly structured, sendable body.
+#[test]
+fn imports_formdata_and_urlencoded_bodies_as_structured_sendable_bodies() {
+    let conn = setup_db();
+    let json = r#"{
+        "info": { "name": "Body Types Test" },
+        "item": [
+            {
+                "name": "Submit Form",
+                "request": {
+                    "method": "POST",
+                    "url": "https://api.test.com/upload",
+                    "body": {
+                        "mode": "formdata",
+                        "formdata": [
+                            { "key": "username", "value": "ada", "type": "text" },
+                            { "key": "avatar", "src": "/tmp/pic.png", "type": "file" },
+                            { "key": "ignored", "value": "x", "type": "text", "disabled": true }
+                        ]
+                    }
+                }
+            },
+            {
+                "name": "Login",
+                "request": {
+                    "method": "POST",
+                    "url": "https://api.test.com/login",
+                    "body": {
+                        "mode": "urlencoded",
+                        "urlencoded": [
+                            { "key": "user", "value": "ada" },
+                            { "key": "pass", "value": "secret" }
+                        ]
+                    }
+                }
+            }
+        ]
+    }"#;
+
+    let report = import_collection(&conn, json, None).unwrap();
+    let reqs = request_store::list_requests(&conn, &report.project_id).unwrap();
+
+    let form_req = reqs.iter().find(|r| r.name == "Submit Form").unwrap();
+    let form_req = request_store::get_request(&conn, &form_req.id).unwrap();
+    let resolve = |t: &str| t.to_string();
+    let (body, multipart, _, _) = crate::canonical_request::resolve_body(form_req.body.as_deref(), &resolve);
+    assert!(body.is_none(), "formdata must resolve to structured multipart, not a flat string");
+    let parts = multipart.expect("formdata import must produce real multipart parts");
+    assert_eq!(parts.len(), 2, "the disabled item must be excluded");
+    assert!(parts.iter().any(|p| matches!(p, crate::models::ResolvedFormPart::Text { key, value } if key == "username" && value == "ada")));
+    assert!(parts.iter().any(|p| matches!(p, crate::models::ResolvedFormPart::File { key, file_path, .. } if key == "avatar" && file_path == "/tmp/pic.png")));
+    assert!(report.warnings.iter().any(|w| w.contains("avatar")), "a file field should surface a re-select-on-this-machine warning");
+
+    let login_req = reqs.iter().find(|r| r.name == "Login").unwrap();
+    let login_req = request_store::get_request(&conn, &login_req.id).unwrap();
+    let (body, multipart, _, ct) = crate::canonical_request::resolve_body(login_req.body.as_deref(), &resolve);
+    assert!(multipart.is_none());
+    assert_eq!(body, Some("user=ada&pass=secret".to_string()));
+    assert_eq!(ct, Some("application/x-www-form-urlencoded".to_string()));
+}

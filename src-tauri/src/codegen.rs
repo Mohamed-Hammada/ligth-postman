@@ -67,6 +67,23 @@ pub fn generate_snippet(
     }
 }
 
+/// `-F key=value` for text parts, `-F key=@path;filename=name` for files — curl generates its
+/// own multipart boundary from these flags, so the snippet never has to (and never could)
+/// spell one out itself.
+fn multipart_curl_flags(parts: &[crate::models::ResolvedFormPart], quote: impl Fn(&str) -> String) -> Vec<String> {
+    parts
+        .iter()
+        .map(|p| match p {
+            crate::models::ResolvedFormPart::Text { key, value } => {
+                format!("-F {}", quote(&format!("{key}={value}")))
+            }
+            crate::models::ResolvedFormPart::File { key, file_name, file_path } => {
+                format!("-F {}", quote(&format!("{key}=@{file_path};filename={file_name}")))
+            }
+        })
+        .collect()
+}
+
 pub fn generate_curl_bash(canonical: &canonical_request::CanonicalRequest) -> String {
     let mut parts = vec![format!("curl -X {}", canonical.method), shell_single_quote(&canonical.url)];
     for header in &canonical.headers {
@@ -75,7 +92,11 @@ pub fn generate_curl_bash(canonical: &canonical_request::CanonicalRequest) -> St
             shell_single_quote(&format!("{}: {}", header.key, header.value))
         ));
     }
-    if let Some(body) = &canonical.body {
+    if let Some(multipart) = &canonical.multipart {
+        parts.extend(multipart_curl_flags(multipart, shell_single_quote));
+    } else if let Some(path) = &canonical.body_file_path {
+        parts.push(format!("--data-binary @{}", shell_single_quote(path)));
+    } else if let Some(body) = &canonical.body {
         parts.push(format!("--data-raw {}", shell_single_quote(body)));
     }
     parts.join(" \\\n  ")
@@ -92,7 +113,11 @@ pub fn generate_curl_powershell(canonical: &canonical_request::CanonicalRequest)
             powershell_single_quote(&format!("{}: {}", header.key, header.value))
         ));
     }
-    if let Some(body) = &canonical.body {
+    if let Some(multipart) = &canonical.multipart {
+        parts.extend(multipart_curl_flags(multipart, powershell_single_quote));
+    } else if let Some(path) = &canonical.body_file_path {
+        parts.push(format!("--data-binary @{}", powershell_single_quote(path)));
+    } else if let Some(body) = &canonical.body {
         parts.push(format!("--data-raw {}", powershell_single_quote(body)));
     }
     parts.join(" `\n  ")
@@ -109,7 +134,11 @@ pub fn generate_curl_cmd(canonical: &canonical_request::CanonicalRequest) -> Str
             cmd_double_quote(&format!("{}: {}", header.key, header.value))
         ));
     }
-    if let Some(body) = &canonical.body {
+    if let Some(multipart) = &canonical.multipart {
+        parts.extend(multipart_curl_flags(multipart, cmd_double_quote));
+    } else if let Some(path) = &canonical.body_file_path {
+        parts.push(format!("--data-binary @{}", cmd_double_quote(path)));
+    } else if let Some(body) = &canonical.body {
         parts.push(format!("--data-raw {}", cmd_double_quote(body)));
     }
     parts.join(" ^\n  ")
@@ -131,7 +160,35 @@ pub fn generate_python(canonical: &canonical_request::CanonicalRequest) -> Strin
         lines.push("headers = {}".to_string());
     }
 
-    if let Some(body) = &canonical.body {
+    if let Some(multipart) = &canonical.multipart {
+        let mut has_files = false;
+        lines.push("files = {".to_string());
+        for part in multipart {
+            match part {
+                crate::models::ResolvedFormPart::Text { key, value } => {
+                    lines.push(format!("    \"{}\": (None, \"{}\"),", key, value.replace('\\', "\\\\").replace('"', "\\\"")));
+                }
+                crate::models::ResolvedFormPart::File { key, file_name, file_path } => {
+                    has_files = true;
+                    lines.push(format!(
+                        "    \"{}\": (\"{}\", open(\"{}\", \"rb\")),",
+                        key, file_name, file_path.replace('\\', "\\\\")
+                    ));
+                }
+            }
+        }
+        lines.push("}".to_string());
+        if !has_files {
+            lines.push("# note: no file fields — 'files=' still triggers multipart/form-data encoding".to_string());
+        }
+        lines.push(format!(
+            "response = requests.request(\"{}\", url, headers=headers, files=files)",
+            canonical.method
+        ));
+    } else if let Some(path) = &canonical.body_file_path {
+        lines.push(format!("data = open(\"{}\", \"rb\")", path.replace('\\', "\\\\")));
+        lines.push(format!("response = requests.request(\"{}\", url, headers=headers, data=data)", canonical.method));
+    } else if let Some(body) = &canonical.body {
         lines.push(format!("data = \"\"\"{}\"\"\"", body));
         lines.push(format!("response = requests.request(\"{}\", url, headers=headers, data=data)", canonical.method));
     } else {
@@ -143,22 +200,59 @@ pub fn generate_python(canonical: &canonical_request::CanonicalRequest) -> Strin
 }
 
 pub fn generate_javascript(canonical: &canonical_request::CanonicalRequest) -> String {
-    let mut lines = vec![
-        format!("const url = \"{}\";", canonical.url),
-        "const options = {".to_string(),
-        format!("  method: \"{}\",", canonical.method),
-    ];
-    if !canonical.headers.is_empty() {
-        lines.push("  headers: {".to_string());
-        for h in &canonical.headers {
-            lines.push(format!("    \"{}\": \"{}\",", h.key, h.value.replace('\\', "\\\\").replace('"', "\\\"")));
+    let mut lines = vec![format!("const url = \"{}\";", canonical.url)];
+
+    if let Some(multipart) = &canonical.multipart {
+        // FormData sets its own multipart/form-data + boundary Content-Type when passed as
+        // fetch's body — same reasoning as the Rust engine, just via the browser/Node API
+        // instead of reqwest. File fields need an actual File/Blob, which a code snippet can't
+        // synthesize from a path string, so those are left as a clear TODO rather than faked.
+        lines.push("const form = new FormData();".to_string());
+        for part in multipart {
+            match part {
+                crate::models::ResolvedFormPart::Text { key, value } => {
+                    lines.push(format!(
+                        "form.append(\"{}\", \"{}\");",
+                        key,
+                        value.replace('\\', "\\\\").replace('"', "\\\"")
+                    ));
+                }
+                crate::models::ResolvedFormPart::File { key, file_name, .. } => {
+                    lines.push(format!(
+                        "form.append(\"{key}\", /* TODO: File/Blob for \"{file_name}\" */ undefined, \"{file_name}\");"
+                    ));
+                }
+            }
         }
-        lines.push("  },".to_string());
+        lines.push("const options = {".to_string());
+        lines.push(format!("  method: \"{}\",", canonical.method));
+        if !canonical.headers.is_empty() {
+            lines.push("  headers: {".to_string());
+            for h in &canonical.headers {
+                lines.push(format!("    \"{}\": \"{}\",", h.key, h.value.replace('\\', "\\\\").replace('"', "\\\"")));
+            }
+            lines.push("  },".to_string());
+        }
+        lines.push("  body: form,".to_string());
+        lines.push("};".to_string());
+    } else {
+        lines.push("const options = {".to_string());
+        lines.push(format!("  method: \"{}\",", canonical.method));
+        if !canonical.headers.is_empty() {
+            lines.push("  headers: {".to_string());
+            for h in &canonical.headers {
+                lines.push(format!("    \"{}\": \"{}\",", h.key, h.value.replace('\\', "\\\\").replace('"', "\\\"")));
+            }
+            lines.push("  },".to_string());
+        }
+        if let Some(path) = &canonical.body_file_path {
+            lines.push(format!("  body: /* TODO: read file bytes for \"{path}\" (e.g. fs.readFileSync in Node) */ undefined,"));
+        } else if let Some(body) = &canonical.body {
+            lines.push(format!("  body: JSON.stringify({}),", body));
+        }
+        lines.push("};".to_string());
     }
-    if let Some(body) = &canonical.body {
-        lines.push(format!("  body: JSON.stringify({}),", body));
-    }
-    lines.push("};".to_string());
+
     lines.push("".to_string());
     lines.push("const response = await fetch(url, options);".to_string());
     lines.push("const result = await response.text();".to_string());
@@ -298,6 +392,35 @@ mod tests {
         assert!(snippet.contains("curl -X POST"));
         assert!(snippet.contains("verbose=true"));
         assert!(snippet.ends_with(r#"--data-raw '{"name":"Ada"}'"#));
+    }
+
+    #[test]
+    fn multipart_form_data_generates_dash_f_flags_not_a_fake_data_raw_body() {
+        let mut req = request();
+        req.method = "POST".into();
+        req.body = Some(
+            r#"{"type":"form_data","items":[
+                {"key":"name","value":"ada","enabled":true,"is_file":false},
+                {"key":"avatar","value":"","enabled":true,"is_file":true,"file_path":"/tmp/pic.png"}
+            ]}"#
+                .into(),
+        );
+
+        let bash = generate_snippet(&req, &ScopeChain::default(), SnippetMode::Placeholder, SnippetTarget::Bash).unwrap();
+        assert!(bash.contains("-F 'name=ada'"));
+        assert!(bash.contains("-F 'avatar=@/tmp/pic.png;filename=pic.png'"));
+        assert!(!bash.contains("--data-raw"), "must not fall back to a flattened data-raw body");
+
+        let python =
+            generate_snippet(&req, &ScopeChain::default(), SnippetMode::Placeholder, SnippetTarget::PythonRequests).unwrap();
+        assert!(python.contains("files = {"));
+        assert!(python.contains("open(\"/tmp/pic.png\", \"rb\")"));
+
+        let js =
+            generate_snippet(&req, &ScopeChain::default(), SnippetMode::Placeholder, SnippetTarget::JavaScriptFetch).unwrap();
+        assert!(js.contains("new FormData()"));
+        assert!(js.contains(r#"form.append("name", "ada")"#));
+        assert!(js.contains("body: form"));
     }
 
     #[test]

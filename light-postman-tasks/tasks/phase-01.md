@@ -99,11 +99,29 @@ None, Bearer, Basic, API Key, inheritance foundation, OAuth2 extension point.
 
 None, form-data, x-www-form-urlencoded, raw, binary, GraphQL.
 
+**2026-09-10 audit finding + fix (this was previously marked DONE but was broken/unreachable):**
+Independent re-audit found `RequestBody::FormData` and `RequestBody::Binary` were reachable
+nowhere in the actual product — no editor UI existed for form-data/urlencoded/binary (the type
+union declared them but the template only rendered Raw/GraphQL radios), and the one code path
+that *did* resolve them (`canonical_request::resolve_body`, used by every real send) had a real
+bug: FormData was flattened into a `key=value&key=value` string under a boundary-less
+`multipart/form-data` header (invalid on the wire; no compliant server could parse it), file
+fields were silently dropped, and Binary put the literal file *path string* into the body
+instead of the file's bytes. A dead, differently-broken duplicate (`RequestBody::to_wire_representation`,
+`#[allow(dead_code)]`, never called) also existed as a second, inconsistent model — deleted.
+Fixed: `CanonicalRequest` now carries structured `multipart: Option<Vec<ResolvedFormPart>>` and
+`body_file_path: Option<String>` fields; `http_engine::execute` sends multipart via reqwest's
+`.multipart()` (real boundary, real file bytes) and binary via `tokio::fs::read` into `.body()`.
+Added the missing editor UI (Form Data / URL Encoded / Binary radios + row editors in the Body
+tab), plus hydration logic (`parseBodyForEditing`) so reopening a saved request restores the
+right body type instead of always defaulting to Raw. Postman-collection import's `formdata`/
+`urlencoded` modes had the identical flattening bug — fixed to emit the same tagged JSON.
+
 **Verification:**
-- [x] Implementation complete — `models::RequestBody` supports `None`, `Raw { content_type, data }`, `FormData { items }`, `UrlEncoded { items }`, `BinaryFile { path, filename }`, `GraphQL { query, variables }`.
-- [x] Relevant tests pass — serialization and wire representation unit tests.
-- [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
-- [x] Runtime smoke test completed when user-facing — Raw and GraphQL body editing supported in UI.
+- [x] Implementation complete — `models::RequestBody` supports `None`, `Raw { content_type, data }`, `FormData { items }`, `UrlEncoded { items }`, `Binary { file_path }`, `GraphQL { query, variables }`; `canonical_request::resolve_body` now returns `(body, multipart, body_file_path, content_type)` with exactly one of the first three set.
+- [x] Relevant tests pass — `http_engine::tests::multipart_form_data_sends_real_boundary_and_file_bytes_on_the_wire` and `binary_body_sends_actual_file_bytes_not_the_path_string` assert against actual captured wire bytes from a local socket (not mocked assumptions); `canonical_request::tests::form_data_resolves_into_structured_multipart_parts_not_a_flattened_string`; `codegen::tests::multipart_form_data_generates_dash_f_flags_not_a_fake_data_raw_body`; `postman_compat::tests::imports_formdata_and_urlencoded_bodies_as_structured_sendable_bodies`.
+- [x] Build/type-check passes — `cargo test --lib` (134 passed), `npm run check` (0 errors/warnings).
+- [x] Runtime smoke test completed when user-facing — verified live through the running app: built a Form Data body with a text field via the new editor, sent it to a local test server, got 200 OK with the server having received a real multipart body.
 - [x] PROJECT_MAP.md updated
 
 ---
@@ -125,11 +143,18 @@ JSON, text, XML, HTML, JavaScript metadata.
 
 Represent file parts without assuming everything is a string.
 
+**2026-09-10 audit finding + fix:** the previous verification cited tests against
+`to_wire_representation` — dead code (`#[allow(dead_code)]`, zero callers) that flattened file
+parts into a string and dropped them. That function has been deleted; the real resolution path
+(`canonical_request::resolve_body` → `models::ResolvedFormPart`) now keeps file parts
+structured all the way to `http_engine::execute`, which reads the file's actual bytes at send
+time via `reqwest::multipart::Part`. See LP-0108 for the full fix and its tests.
+
 **Verification:**
-- [x] Implementation complete — `FormDataPart` supports text or file parts (`key`, `value`, `filename`, `content_type`, `enabled`).
-- [x] Relevant tests pass — `models::RequestBody` wire representation tests pass.
+- [x] Implementation complete — `models::ResolvedFormPart::{Text, File}` (key/value or key/file_name/file_path) is the one real representation; `FormDataPart` (the stored/editor row shape) converts into it in `canonical_request::resolve_body`.
+- [x] Relevant tests pass — see LP-0108's multipart wire-bytes tests.
 - [x] Build/type-check passes — `cargo test --lib`, `npm run check`.
-- [x] Runtime smoke test completed when user-facing.
+- [x] Runtime smoke test completed when user-facing — file field row exists in the Form Data editor (checkbox toggles a field between text/file, file path is a plain text input since no native file-picker plugin is installed — see PROJECT_MAP.md follow-ups).
 - [x] PROJECT_MAP.md updated
 
 ---

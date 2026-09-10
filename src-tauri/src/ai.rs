@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_method() {
         let result = parse_and_validate(
-            r#"{"name":"Weird","method":"TRACE","url":"https://api.example.com"}"#,
+            r#"{"name":"Weird","method":"CONNECT","url":"https://api.example.com"}"#,
         );
         assert!(matches!(result, Err(AppError::Ai(_))));
     }

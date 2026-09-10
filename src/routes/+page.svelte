@@ -8,9 +8,11 @@
     type Environment,
     type EnvironmentImportReport,
     type GeneratedApiDefinition,
+    type FormDataPart,
     type HeaderEntry,
     type Project,
     type QueryParam,
+    type UrlEncodedItem,
     type RequestFull,
     type RequestDiagnostics,
     type RequestSettings,
@@ -101,9 +103,89 @@
   let editHttpVersion = $state("");
 
   // Body format helpers (LP-0110, LP-0111, LP-0112)
-  let editBodyType = $state<"raw" | "form-data" | "x-www-form-urlencoded" | "graphql">("raw");
+  let editBodyType = $state<"raw" | "form-data" | "x-www-form-urlencoded" | "binary" | "graphql">("raw");
   let editGraphqlQuery = $state("");
   let editGraphqlVariables = $state("");
+  let editFormDataItems = $state<FormDataPart[]>([]);
+  let editUrlEncodedItems = $state<UrlEncodedItem[]>([]);
+  let editBinaryFilePath = $state("");
+
+  /** Reads the stored `body` string into the editor's per-type state. Mirrors the shapes Rust's
+   * `RequestBody` (tagged `type`) and the frontend's own GraphQL editor (untagged
+   * `{query, variables}`) can produce — anything else is treated as plain "raw" text, which
+   * covers JSON API bodies, AI-generated bodies, and cURL/Postman-imported raw bodies alike. */
+  function parseBodyForEditing(body: string | null | undefined): {
+    bodyType: typeof editBodyType;
+    rawBody: string;
+    graphqlQuery: string;
+    graphqlVariables: string;
+    formDataItems: FormDataPart[];
+    urlEncodedItems: UrlEncodedItem[];
+    binaryFilePath: string;
+  } {
+    const empty = { bodyType: "raw" as const, rawBody: body ?? "", graphqlQuery: "", graphqlVariables: "", formDataItems: [], urlEncodedItems: [], binaryFilePath: "" };
+    if (!body || !body.trim()) return empty;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return empty;
+    }
+    if (typeof parsed !== "object" || parsed === null) return empty;
+    const obj = parsed as Record<string, unknown>;
+
+    if (obj.type === "form_data" && Array.isArray(obj.items)) {
+      return { ...empty, bodyType: "form-data", formDataItems: obj.items as FormDataPart[] };
+    }
+    if (obj.type === "url_encoded" && Array.isArray(obj.items)) {
+      return { ...empty, bodyType: "x-www-form-urlencoded", urlEncodedItems: obj.items as UrlEncodedItem[] };
+    }
+    if (obj.type === "binary") {
+      return { ...empty, bodyType: "binary", binaryFilePath: (obj.file_path as string | null) ?? "" };
+    }
+    if (obj.type === "raw" && typeof obj.data === "string") {
+      return { ...empty, bodyType: "raw", rawBody: obj.data };
+    }
+    if (obj.type === "graphql" || (typeof obj.query === "string" && !("type" in obj))) {
+      const query = typeof obj.query === "string" ? obj.query : "";
+      const variables = obj.variables !== undefined ? JSON.stringify(obj.variables, null, 2) : "";
+      return { ...empty, bodyType: "graphql", graphqlQuery: query, graphqlVariables: variables };
+    }
+    return empty;
+  }
+
+  /** Inverse of `parseBodyForEditing` — builds the exact string the backend's canonical
+   * request model expects for the current `editBodyType`. Raw/GraphQL are sent as plain text
+   * (unchanged, already-working behavior); form-data/urlencoded/binary are wrapped in the
+   * tagged shape `canonical_request::resolve_body` parses into structured, correctly-encoded
+   * bodies (real multipart with a boundary, real percent-encoding, etc.) instead of raw text. */
+  function serializeBodyForStorage(): string {
+    switch (editBodyType) {
+      case "form-data":
+        return JSON.stringify({ type: "form_data", items: editFormDataItems });
+      case "x-www-form-urlencoded":
+        return JSON.stringify({ type: "url_encoded", items: editUrlEncodedItems });
+      case "binary":
+        return JSON.stringify({ type: "binary", file_path: editBinaryFilePath || null });
+      case "raw":
+      case "graphql":
+      default:
+        return editBody;
+    }
+  }
+
+  function addFormDataItem() {
+    editFormDataItems = [...editFormDataItems, { key: "", value: "", enabled: true, is_file: false, file_path: null }];
+  }
+  function removeFormDataItem(index: number) {
+    editFormDataItems = editFormDataItems.filter((_, i) => i !== index);
+  }
+  function addUrlEncodedItem() {
+    editUrlEncodedItems = [...editUrlEncodedItems, { key: "", value: "", enabled: true }];
+  }
+  function removeUrlEncodedItem(index: number) {
+    editUrlEncodedItems = editUrlEncodedItems.filter((_, i) => i !== index);
+  }
 
   // cURL importer (LP-0608, LP-0609)
   let showCurlImport = $state(false);
@@ -279,9 +361,12 @@
     editVerifySsl: boolean;
     editProxyUrl: string;
     editHttpVersion: string;
-    editBodyType: "raw" | "form-data" | "x-www-form-urlencoded" | "graphql";
+    editBodyType: "raw" | "form-data" | "x-www-form-urlencoded" | "binary" | "graphql";
     editGraphqlQuery: string;
     editGraphqlVariables: string;
+    editFormDataItems: FormDataPart[];
+    editUrlEncodedItems: UrlEncodedItem[];
+    editBinaryFilePath: string;
     activeEditorTab: "params" | "headers" | "auth" | "body" | "scripts" | "settings" | "docs" | "code";
     activeResponse: ResponseMeta | null;
     activeResponseBody: string;
@@ -388,7 +473,14 @@
         editUrl = selectedRequest.url;
         editHeaders = selectedRequest.headers.map((h) => ({ ...h }));
         editQueryParams = selectedRequest.query_params.map((p) => ({ ...p }));
-        editBody = selectedRequest.body ?? "";
+        const parsedBody = parseBodyForEditing(selectedRequest.body);
+        editBodyType = parsedBody.bodyType;
+        editBody = parsedBody.rawBody;
+        editGraphqlQuery = parsedBody.graphqlQuery;
+        editGraphqlVariables = parsedBody.graphqlVariables;
+        editFormDataItems = parsedBody.formDataItems;
+        editUrlEncodedItems = parsedBody.urlEncodedItems;
+        editBinaryFilePath = parsedBody.binaryFilePath;
         editDescription = selectedRequest.description ?? "";
 
         const auth = selectedRequest.auth;
@@ -503,6 +595,9 @@
       editBodyType,
       editGraphqlQuery,
       editGraphqlVariables,
+      editFormDataItems,
+      editUrlEncodedItems,
+      editBinaryFilePath,
       activeEditorTab,
       activeResponse,
       activeResponseBody,
@@ -544,6 +639,9 @@
     editBodyType = draft.editBodyType;
     editGraphqlQuery = draft.editGraphqlQuery;
     editGraphqlVariables = draft.editGraphqlVariables;
+    editFormDataItems = draft.editFormDataItems.map((i) => ({ ...i }));
+    editUrlEncodedItems = draft.editUrlEncodedItems.map((i) => ({ ...i }));
+    editBinaryFilePath = draft.editBinaryFilePath;
     activeEditorTab = draft.activeEditorTab;
     activeResponse = draft.activeResponse;
     activeResponseBody = draft.activeResponseBody;
@@ -1116,10 +1214,11 @@
           : {}),
         ...(JSON.stringify(auth) !== JSON.stringify(original.auth) ? { auth } : {}),
         ...(() => {
-          if (editBody !== (original.body ?? "")) {
-            return editBody.trim().length === 0
+          const serialized = serializeBodyForStorage();
+          if (serialized !== (original.body ?? "")) {
+            return serialized.trim().length === 0
               ? { clear_body: true }
-              : { body: editBody };
+              : { body: serialized };
           }
           return {};
         })(),
@@ -1944,6 +2043,7 @@
                     <option>DELETE</option>
                     <option>HEAD</option>
                     <option>OPTIONS</option>
+                    <option>TRACE</option>
                   </select>
                   <input placeholder="Name" bind:value={newRequestName} />
                   <input placeholder="URL" bind:value={newRequestUrl} />
@@ -2063,6 +2163,7 @@
                   <option>DELETE</option>
                   <option>HEAD</option>
                   <option>OPTIONS</option>
+                  <option>TRACE</option>
                 </select>
                 <span class="url-pill-divider"></span>
                 <input placeholder="Enter request URL" bind:value={editUrl} class="url-input" />
@@ -2220,6 +2321,15 @@
                     <input type="radio" bind:group={editBodyType} value="raw" /> Raw
                   </label>
                   <label class="radio-label">
+                    <input type="radio" bind:group={editBodyType} value="form-data" /> Form Data
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" bind:group={editBodyType} value="x-www-form-urlencoded" /> URL Encoded
+                  </label>
+                  <label class="radio-label">
+                    <input type="radio" bind:group={editBodyType} value="binary" /> Binary
+                  </label>
+                  <label class="radio-label">
                     <input type="radio" bind:group={editBodyType} value="graphql" /> GraphQL
                   </label>
                   {#if editBodyType === "raw"}
@@ -2235,6 +2345,52 @@
                     class="body-input"
                     rows="8"
                   ></textarea>
+                {:else if editBodyType === "form-data"}
+                  <div class="params-table">
+                    {#each editFormDataItems as item, i (i)}
+                      <div class="params-row">
+                        <input type="checkbox" bind:checked={item.enabled} title="Enabled" />
+                        <input placeholder="Key" bind:value={item.key} />
+                        {#if item.is_file}
+                          <input placeholder="File path" bind:value={item.file_path} />
+                        {:else}
+                          <input placeholder="Value" bind:value={item.value} />
+                        {/if}
+                        <label class="checkbox-label" title="Send this field as a file (path on disk) instead of text">
+                          <input type="checkbox" bind:checked={item.is_file} /> File
+                        </label>
+                        <button type="button" class="icon-btn" title="Remove" onclick={() => removeFormDataItem(i)}>🗑</button>
+                      </div>
+                    {:else}
+                      <p class="hint">No form fields.</p>
+                    {/each}
+                    <div class="params-row">
+                      <button type="button" onclick={addFormDataItem}>Add field</button>
+                    </div>
+                  </div>
+                {:else if editBodyType === "x-www-form-urlencoded"}
+                  <div class="params-table">
+                    {#each editUrlEncodedItems as item, i (i)}
+                      <div class="params-row">
+                        <input type="checkbox" bind:checked={item.enabled} title="Enabled" />
+                        <input placeholder="Key" bind:value={item.key} />
+                        <input placeholder="Value" bind:value={item.value} />
+                        <button type="button" class="icon-btn" title="Remove" onclick={() => removeUrlEncodedItem(i)}>🗑</button>
+                      </div>
+                    {:else}
+                      <p class="hint">No fields.</p>
+                    {/each}
+                    <div class="params-row">
+                      <button type="button" onclick={addUrlEncodedItem}>Add field</button>
+                    </div>
+                  </div>
+                {:else if editBodyType === "binary"}
+                  <div class="params-table">
+                    <div class="params-row">
+                      <input placeholder="Absolute file path (e.g. C:\files\photo.png)" bind:value={editBinaryFilePath} />
+                    </div>
+                    <p class="hint">The file is streamed from disk at send time — it's never loaded into the app's memory ahead of time.</p>
+                  </div>
                 {:else if editBodyType === "graphql"}
                   <div class="graphql-editor">
                     <h4>Query</h4>
@@ -3735,6 +3891,7 @@
     --method-delete: #ff5c5c;
     --method-head: #3fc7d6;
     --method-options: #9a9aa3;
+    --method-trace: #d68a3f;
 
     --radius-sm: 4px;
     --radius-md: 6px;
@@ -4261,6 +4418,7 @@
   .method-delete { color: var(--method-delete); }
   .method-head { color: var(--method-head); }
   .method-options { color: var(--method-options); }
+  .method-trace { color: var(--method-trace); }
 
   /* ---------- Main content ---------- */
   .main {

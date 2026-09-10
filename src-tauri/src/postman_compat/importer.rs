@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use super::schema::*;
 use crate::error::AppError;
 use crate::models::{
-    Auth, HeaderEntry, NewEnvironmentInput, NewProjectInput, NewRequestInput,
-    NewSampleResponseInput, NewVariableInput, QueryParam, VariableScope,
+    Auth, FormDataPart, HeaderEntry, NewEnvironmentInput, NewProjectInput, NewRequestInput,
+    NewSampleResponseInput, NewVariableInput, QueryParam, RequestBody, UrlEncodedItem,
+    VariableScope,
 };
 use crate::store::{environment_store, project_store, request_store, variable_store};
 
@@ -427,41 +428,54 @@ fn parse_postman_body(
                 body.raw.clone()
             }
         }
+        // Both branches build the same tagged `RequestBody` JSON the request editor and
+        // `canonical_request::resolve_body` use — not a flattened placeholder string. Importing
+        // used to join fields into "key=value" (urlencoded) or "key: value" (formdata) text with
+        // no `type` tag at all, so on send it fell through to the generic "unstructured raw
+        // string" path: urlencoded bodies went out malformed, and file fields were reduced to a
+        // literal "field=<file:/path>" string with no way to ever become real multipart bytes.
         "urlencoded" => {
             if let Some(items) = &body.urlencoded {
-                let mut parts = Vec::new();
-                for item in items {
-                    if !item.disabled.unwrap_or(false) && !item.key.is_empty() {
-                        parts.push(format!(
-                            "{}={}",
-                            item.key,
-                            item.value.as_deref().unwrap_or_default()
-                        ));
-                    }
-                }
-                Some(parts.join("&"))
+                let parsed_items: Vec<UrlEncodedItem> = items
+                    .iter()
+                    .filter(|i| !i.key.is_empty())
+                    .map(|i| UrlEncodedItem {
+                        key: i.key.clone(),
+                        value: i.value.clone().unwrap_or_default(),
+                        enabled: !i.disabled.unwrap_or(false),
+                        description: i.description.clone(),
+                    })
+                    .collect();
+                serde_json::to_string(&RequestBody::UrlEncoded { items: parsed_items }).ok()
             } else {
                 None
             }
         }
         "formdata" => {
             if let Some(items) = &body.formdata {
-                let mut parts = Vec::new();
-                for item in items {
-                    if !item.disabled.unwrap_or(false) && !item.key.is_empty() {
-                        if item.r#type.as_deref() == Some("file") {
+                let parsed_items: Vec<FormDataPart> = items
+                    .iter()
+                    .filter(|i| !i.key.is_empty())
+                    .map(|i| {
+                        let is_file = i.r#type.as_deref() == Some("file");
+                        if is_file {
                             warnings.push(format!(
-                                "Request '{req_name}': multipart file part '{}' references local file '{}'; file path noted.",
-                                item.key,
-                                item.src.as_deref().unwrap_or("<empty>")
+                                "Request '{req_name}': multipart file part '{}' references local file '{}' — re-select it on this machine if the path doesn't exist here.",
+                                i.key,
+                                i.src.as_deref().unwrap_or("<empty>")
                             ));
-                            parts.push(format!("{}=<file:{}>", item.key, item.src.as_deref().unwrap_or_default()));
-                        } else {
-                            parts.push(format!("{}: {}", item.key, item.value.as_deref().unwrap_or_default()));
                         }
-                    }
-                }
-                Some(parts.join("\n"))
+                        FormDataPart {
+                            key: i.key.clone(),
+                            value: i.value.clone().unwrap_or_default(),
+                            enabled: !i.disabled.unwrap_or(false),
+                            description: i.description.clone(),
+                            is_file,
+                            file_path: i.src.clone(),
+                        }
+                    })
+                    .collect();
+                serde_json::to_string(&RequestBody::FormData { items: parsed_items }).ok()
             } else {
                 None
             }

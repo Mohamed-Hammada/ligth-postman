@@ -119,6 +119,7 @@ pub fn run() {
             commands::list_cookies_for_project,
             commands::delete_cookie,
             commands::import_postman_collection,
+            commands::import_local_postman_workspace,
             commands::import_postman_environment,
             commands::export_postman_collection,
             commands::export_postman_environment,

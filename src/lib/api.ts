@@ -282,6 +282,11 @@ export interface NewSampleResponseInput {
   body?: string | null;
 }
 
+export interface UpdateSampleResponseInput {
+  id: string;
+  name: string;
+}
+
 export interface CookieEntry {
   id: string;
   project_id: string;
@@ -489,6 +494,8 @@ export const api = {
     invoke<SampleResponse[]>("list_sample_responses", { requestId }),
   deleteSampleResponse: (id: string) =>
     invoke<void>("delete_sample_response", { id }),
+  updateSampleResponse: (input: UpdateSampleResponseInput) =>
+    invoke<SampleResponse>("update_sample_response", { input }),
 
   createCookie: (input: NewCookieInput) =>
     invoke<CookieEntry>("create_cookie", { input }),

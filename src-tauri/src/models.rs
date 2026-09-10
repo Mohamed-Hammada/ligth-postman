@@ -263,6 +263,12 @@ pub struct NewSampleResponseInput {
     pub content_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateSampleResponseInput {
+    pub id: String,
+    pub name: String,
+}
+
 /// Lightweight row for lists — never carries headers/body (README §4/§20 lazy loading).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestSummary {

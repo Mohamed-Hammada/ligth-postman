@@ -114,6 +114,7 @@ pub fn run() {
             commands::create_sample_response,
             commands::list_sample_responses,
             commands::delete_sample_response,
+            commands::update_sample_response,
             commands::create_cookie,
             commands::list_cookies_for_project,
             commands::delete_cookie,

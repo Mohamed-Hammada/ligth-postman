@@ -6,7 +6,7 @@ use crate::error::AppError;
 use crate::models::{
     Auth, Cookie, HeaderEntry, NewCookieInput, NewRequestInput, NewSampleResponseInput,
     QueryParam, RequestFull, RequestSettings, RequestSummary, SampleResponse,
-    UpdateRequestInput, VALID_METHODS,
+    UpdateRequestInput, UpdateSampleResponseInput, VALID_METHODS,
 };
 
 pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<RequestFull, AppError> {
@@ -361,6 +361,47 @@ pub fn delete_sample_response(conn: &Connection, id: &str) -> Result<(), AppErro
         return Err(AppError::NotFound(format!("sample response {id} not found")));
     }
     Ok(())
+}
+
+pub fn update_sample_response(
+    conn: &Connection,
+    input: UpdateSampleResponseInput,
+) -> Result<SampleResponse, AppError> {
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err(AppError::Validation("sample response name must not be empty".into()));
+    }
+    let affected = conn.execute(
+        "UPDATE sample_responses SET name = ?1 WHERE id = ?2",
+        params![name, input.id],
+    )?;
+    if affected == 0 {
+        return Err(AppError::NotFound(format!(
+            "sample response {} not found",
+            input.id
+        )));
+    }
+    conn.query_row(
+        "SELECT id, request_id, name, status, status_text, headers, body, content_type, created_at
+         FROM sample_responses WHERE id = ?1",
+        params![input.id],
+        |row| {
+            let headers_json: String = row.get(5)?;
+            let created_at: String = row.get(8)?;
+            Ok(SampleResponse {
+                id: row.get(0)?,
+                request_id: row.get(1)?,
+                name: row.get(2)?,
+                status: row.get(3)?,
+                status_text: row.get(4)?,
+                headers: serde_json::from_str::<Vec<HeaderEntry>>(&headers_json).unwrap_or_default(),
+                body: row.get(6)?,
+                content_type: row.get(7)?,
+                created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
+            })
+        },
+    )
+    .map_err(AppError::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +984,76 @@ mod tests {
         delete_sample_response(&conn, &sample.id).unwrap();
         let empty = list_sample_responses(&conn, &request.id).unwrap();
         assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn update_sample_response_renames_it() {
+        let conn = db::open_in_memory().unwrap();
+        let project_id = seed_project(&conn);
+        let request = seed_request(&conn, &project_id);
+
+        let sample = create_sample_response(
+            &conn,
+            NewSampleResponseInput {
+                request_id: request.id.clone(),
+                name: "Original Name".into(),
+                status: 200,
+                status_text: "OK".into(),
+                headers: vec![],
+                body: None,
+                content_type: None,
+            },
+        )
+        .unwrap();
+
+        let renamed = update_sample_response(
+            &conn,
+            UpdateSampleResponseInput { id: sample.id.clone(), name: "Renamed Sample".into() },
+        )
+        .unwrap();
+        assert_eq!(renamed.name, "Renamed Sample");
+        assert_eq!(renamed.id, sample.id);
+
+        let list = list_sample_responses(&conn, &request.id).unwrap();
+        assert_eq!(list[0].name, "Renamed Sample");
+    }
+
+    #[test]
+    fn update_sample_response_rejects_blank_name() {
+        let conn = db::open_in_memory().unwrap();
+        let project_id = seed_project(&conn);
+        let request = seed_request(&conn, &project_id);
+        let sample = create_sample_response(
+            &conn,
+            NewSampleResponseInput {
+                request_id: request.id.clone(),
+                name: "Original Name".into(),
+                status: 200,
+                status_text: "OK".into(),
+                headers: vec![],
+                body: None,
+                content_type: None,
+            },
+        )
+        .unwrap();
+
+        let err = update_sample_response(
+            &conn,
+            UpdateSampleResponseInput { id: sample.id, name: "   ".into() },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)));
+    }
+
+    #[test]
+    fn update_sample_response_missing_id_returns_not_found() {
+        let conn = db::open_in_memory().unwrap();
+        let err = update_sample_response(
+            &conn,
+            UpdateSampleResponseInput { id: "does-not-exist".into(), name: "New Name".into() },
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
     }
 
     #[test]

@@ -669,6 +669,15 @@ pub fn delete_sample_response(state: State<AppState>, id: String) -> Result<(), 
 }
 
 #[tauri::command]
+pub fn update_sample_response(
+    state: State<AppState>,
+    input: crate::models::UpdateSampleResponseInput,
+) -> Result<crate::models::SampleResponse, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    request_store::update_sample_response(&conn, input)
+}
+
+#[tauri::command]
 pub fn create_cookie(
     state: State<AppState>,
     input: crate::models::NewCookieInput,

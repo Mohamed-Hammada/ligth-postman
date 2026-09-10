@@ -625,9 +625,17 @@
   // Request-level AI generation state (LP-0806, LP-0819)
   let generatingSample = $state(false);
   let sampleFeedback = $state("");
-  let sampleResponses = $state<SampleResponse[]>([]);
+  // Keyed by request id so the project tree can show/lazy-load any request's saved samples,
+  // not just the one currently open in the editor (which reads its own entry via `sampleResponses` below).
+  let sampleResponsesByRequestId = $state<Map<string, SampleResponse[]>>(new Map());
+  let sampleResponses = $derived(selectedRequest ? (sampleResponsesByRequestId.get(selectedRequest.id) ?? []) : []);
   let generatingTestsDocs = $state(false);
   let testsDocsFeedback = $state("");
+
+  // Tree nesting: expand a request row to lazy-load and show its saved sample responses.
+  let expandedTreeRequestIds = $state<Set<string>>(new Set());
+  let renamingSampleResponseId = $state<string | null>(null);
+  let renameSampleResponseValue = $state("");
 
   // Tab management (LP-0407, LP-0408, LP-0411)
   interface RequestTab {
@@ -676,23 +684,96 @@
 
   // Project search — filters the sidebar's project list by name.
   let projectSearchQuery = $state("");
+
+  // Advanced sort: projects list + requests/folders within a project. Persisted so the chosen
+  // order survives a reload, same as the other small UI prefs (uiScale, locale, theme).
+  type ProjectSortField = "name" | "created" | "updated";
+  type RequestSortField = "name" | "method" | "updated";
+  type SortDir = "asc" | "desc";
+  let projectSortField = $state<ProjectSortField>("name");
+  let projectSortDir = $state<SortDir>("asc");
+  let requestSortField = $state<RequestSortField>("name");
+  let requestSortDir = $state<SortDir>("asc");
+
+  function setProjectSortField(field: ProjectSortField) {
+    projectSortField = field;
+    try { localStorage.setItem("lp-project-sort", JSON.stringify({ field: projectSortField, dir: projectSortDir })); } catch {}
+  }
+  function toggleProjectSortDir() {
+    projectSortDir = projectSortDir === "asc" ? "desc" : "asc";
+    try { localStorage.setItem("lp-project-sort", JSON.stringify({ field: projectSortField, dir: projectSortDir })); } catch {}
+  }
+  function setRequestSortField(field: RequestSortField) {
+    requestSortField = field;
+    try { localStorage.setItem("lp-request-sort", JSON.stringify({ field: requestSortField, dir: requestSortDir })); } catch {}
+  }
+  function toggleRequestSortDir() {
+    requestSortDir = requestSortDir === "asc" ? "desc" : "asc";
+    try { localStorage.setItem("lp-request-sort", JSON.stringify({ field: requestSortField, dir: requestSortDir })); } catch {}
+  }
+
+  // A field already selected toggles direction on click; a different field switches to it (ascending).
+  function pickProjectSortField(field: ProjectSortField) {
+    if (projectSortField === field) toggleProjectSortDir();
+    else setProjectSortField(field);
+  }
+  function pickRequestSortField(field: RequestSortField) {
+    if (requestSortField === field) toggleRequestSortDir();
+    else setRequestSortField(field);
+  }
+
+  const PROJECT_SORT_FIELDS: { field: ProjectSortField; label: string }[] = [
+    { field: "name", label: "sidebar.sortByName" },
+    { field: "created", label: "sidebar.sortByCreated" },
+    { field: "updated", label: "sidebar.sortByUpdated" },
+  ];
+  const REQUEST_SORT_FIELDS: { field: RequestSortField; label: string }[] = [
+    { field: "name", label: "sidebar.sortByName" },
+    { field: "method", label: "sidebar.sortByMethod" },
+    { field: "updated", label: "sidebar.sortByUpdated" },
+  ];
+  let projectSortMenuOpen = $state(false);
+  let requestSortMenuOpen = $state(false);
+
+  // Only one project's "more actions" overflow menu is open at a time.
+  let openProjectMenuId = $state<string | null>(null);
+
+  function sortProjectList(list: Project[]): Project[] {
+    const dir = projectSortDir === "asc" ? 1 : -1;
+    return [...list].sort((a, b) => {
+      if (projectSortField === "name") return a.name.localeCompare(b.name) * dir;
+      if (projectSortField === "created") return a.created_at.localeCompare(b.created_at) * dir;
+      return a.updated_at.localeCompare(b.updated_at) * dir;
+    });
+  }
+  function sortRequestList(list: RequestSummary[]): RequestSummary[] {
+    const dir = requestSortDir === "asc" ? 1 : -1;
+    return [...list].sort((a, b) => {
+      if (requestSortField === "name") return a.name.localeCompare(b.name) * dir;
+      if (requestSortField === "method") return a.method.localeCompare(b.method) * dir;
+      return a.updated_at.localeCompare(b.updated_at) * dir;
+    });
+  }
+
   let filteredProjects = $derived.by(() => {
     const q = projectSearchQuery.trim().toLowerCase();
-    if (!q) return projects;
-    return projects.filter((p) => p.name.toLowerCase().includes(q));
+    const base = q ? projects.filter((p) => p.name.toLowerCase().includes(q)) : projects;
+    return sortProjectList(base);
   });
 
   // Request search & windowing (LP-0409, LP-0410)
   let requestSearchQuery = $state("");
   let filteredRequests = $derived.by(() => {
     const q = requestSearchQuery.trim().toLowerCase();
-    if (!q) return requests;
-    return requests.filter(
-      (r) =>
-        r.name.toLowerCase().includes(q) ||
-        r.method.toLowerCase().includes(q) ||
-        r.url.toLowerCase().includes(q),
-    );
+    const base = q
+      ? requests.filter(
+          (r) =>
+            r.name.toLowerCase().includes(q) ||
+            r.method.toLowerCase().includes(q) ||
+            r.url.toLowerCase().includes(q),
+        )
+      : requests;
+    return sortRequestList(base);
   });
   let requestPageSize = $state(50);
   let requestPage = $state(0);
@@ -705,7 +786,7 @@
 
   // Folder-grouped tree (used when not actively searching — a search flattens across folders,
   // same as it already flattens everything else).
-  let rootRequests = $derived(requests.filter((r) => !r.folder_id));
+  let rootRequests = $derived(sortRequestList(requests.filter((r) => !r.folder_id)));
   let requestsByFolderId = $derived.by(() => {
     const map = new Map<string, RequestSummary[]>();
     for (const r of requests) {
@@ -715,8 +796,29 @@
         map.set(r.folder_id, list);
       }
     }
+    for (const [key, list] of map) {
+      map.set(key, sortRequestList(list));
+    }
     return map;
   });
+
+  // Folders don't have a "method" field, so that sort criterion falls back to name for them.
+  let sortedFolders = $derived.by(() => {
+    const dir = requestSortDir === "asc" ? 1 : -1;
+    return [...folders].sort((a, b) => {
+      if (requestSortField === "updated") return a.updated_at.localeCompare(b.updated_at) * dir;
+      return a.name.localeCompare(b.name) * dir;
+    });
+  });
+
+  // Expand/collapse every folder in the current project's tree at once.
+  function toggleExpandAllFolders() {
+    if (expandedFolderIds.size < folders.length) {
+      expandedFolderIds = new Set(folders.map((f) => f.id));
+    } else {
+      expandedFolderIds = new Set();
+    }
+  }
 
   // Developer Console state (LP-0412 - LP-0421)
   let showConsole = $state(false);
@@ -975,6 +1077,18 @@
         locale = savedLocale;
       }
       applyLocale(locale);
+      const savedProjectSort = localStorage.getItem("lp-project-sort");
+      if (savedProjectSort) {
+        const parsed = JSON.parse(savedProjectSort);
+        if (parsed.field === "name" || parsed.field === "created" || parsed.field === "updated") projectSortField = parsed.field;
+        if (parsed.dir === "asc" || parsed.dir === "desc") projectSortDir = parsed.dir;
+      }
+      const savedRequestSort = localStorage.getItem("lp-request-sort");
+      if (savedRequestSort) {
+        const parsed = JSON.parse(savedRequestSort);
+        if (parsed.field === "name" || parsed.field === "method" || parsed.field === "updated") requestSortField = parsed.field;
+        if (parsed.dir === "asc" || parsed.dir === "desc") requestSortDir = parsed.dir;
+      }
     } catch {
       // ignore — settings just stay at their defaults
     }
@@ -1309,20 +1423,56 @@
 
   async function loadSampleResponses(requestId: string) {
     try {
-      sampleResponses = await api.listSampleResponses(requestId);
+      const list = await api.listSampleResponses(requestId);
+      const next = new Map(sampleResponsesByRequestId);
+      next.set(requestId, list);
+      sampleResponsesByRequestId = next;
     } catch (err) {
       console.error("Failed to load sample responses", err);
     }
   }
 
-  async function deleteSampleResponseAction(id: string) {
-    if (!selectedRequest) return;
+  async function deleteSampleResponseAction(requestId: string, id: string) {
     try {
       await api.deleteSampleResponse(id);
-      await loadSampleResponses(selectedRequest.id);
+      await loadSampleResponses(requestId);
     } catch (err) {
       errorMessage = describeError(err);
     }
+  }
+
+  function startRenameSampleResponse(sr: SampleResponse) {
+    renamingSampleResponseId = sr.id;
+    renameSampleResponseValue = sr.name;
+  }
+
+  async function submitRenameSampleResponse(requestId: string) {
+    if (!renamingSampleResponseId) return;
+    const id = renamingSampleResponseId;
+    const name = renameSampleResponseValue.trim();
+    renamingSampleResponseId = null;
+    if (!name) return;
+    try {
+      await api.updateSampleResponse({ id, name });
+      await loadSampleResponses(requestId);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Expanding a request row in the tree lazy-loads its samples the first time — same
+  // lazy-loading discipline as the rest of the app (README §4/§20).
+  async function toggleTreeRequestExpanded(requestId: string) {
+    const next = new Set(expandedTreeRequestIds);
+    if (next.has(requestId)) {
+      next.delete(requestId);
+    } else {
+      next.add(requestId);
+      if (!sampleResponsesByRequestId.has(requestId)) {
+        await loadSampleResponses(requestId);
+      }
+    }
+    expandedTreeRequestIds = next;
   }
 
   async function generateSampleResponseWithAiAction() {
@@ -2742,19 +2892,59 @@
   {/snippet}
 
   {#snippet requestRow(req: RequestSummary)}
-    <li class="request-item" class:active={req.id === selectedRequest?.id}>
-      {#if renamingRequestId === req.id && req.id !== selectedRequest?.id}
-        <form class="inline-form" onsubmit={submitRenameRequest}>
-          <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
-          <button type="submit" title={t("sidebar.save")}>✓</button>
-          <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>✕</button>
-        </form>
-      {:else}
-        <button type="button" class="request-link" onclick={() => openRequest(req.id)} ondblclick={() => startRenameRequest(req.id, req.name)}>
-          <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
-          <span class="request-name">{req.name}</span>
-        </button>
-        <button class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteRequest(req.id)}>🗑</button>
+    {@const sampleCount = sampleResponsesByRequestId.get(req.id)?.length}
+    <li class="request-item-wrapper">
+      <div class="request-item" class:active={req.id === selectedRequest?.id}>
+        {#if renamingRequestId === req.id && req.id !== selectedRequest?.id}
+          <form class="inline-form" onsubmit={submitRenameRequest}>
+            <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
+            <button type="submit" title={t("sidebar.save")}>✓</button>
+            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>✕</button>
+          </form>
+        {:else}
+          <button
+            type="button"
+            class="tree-expand-btn"
+            title={expandedTreeRequestIds.has(req.id) ? t("sidebar.collapseSamples") : t("sidebar.expandSamples")}
+            onclick={() => toggleTreeRequestExpanded(req.id)}
+          >{expandedTreeRequestIds.has(req.id) ? "▾" : "▸"}</button>
+          <button type="button" class="request-link" onclick={() => openRequest(req.id)} ondblclick={() => startRenameRequest(req.id, req.name)}>
+            <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
+            <span class="request-name">{req.name}</span>
+            {#if sampleCount}<span class="tab-badge">{sampleCount}</span>{/if}
+          </button>
+          <button class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteRequest(req.id)}>🗑</button>
+        {/if}
+      </div>
+      {#if expandedTreeRequestIds.has(req.id)}
+        <ul class="sample-tree-list">
+          {#each sampleResponsesByRequestId.get(req.id) ?? [] as sr (sr.id)}
+            <li class="sample-tree-item">
+              {#if renamingSampleResponseId === sr.id}
+                <form class="inline-form" onsubmit={(e) => { e.preventDefault(); submitRenameSampleResponse(req.id); }}>
+                  <input bind:value={renameSampleResponseValue} use:focusOnMount onblur={() => submitRenameSampleResponse(req.id)} />
+                  <button type="submit" title={t("sidebar.save")}>✓</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingSampleResponseId = null)}>✕</button>
+                </form>
+              {:else}
+                <button
+                  type="button"
+                  class="sample-tree-link"
+                  title={t("sample.badge")}
+                  onclick={() => openRequest(req.id)}
+                  ondblclick={() => startRenameSampleResponse(sr)}
+                >
+                  <span class="status-chip" class:status-ok={sr.status < 400} class:status-err={sr.status >= 400}>{sr.status}</span>
+                  <span class="sample-tree-name">{sr.name}</span>
+                </button>
+                <button class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameSampleResponse(sr)}>✎</button>
+                <button class="icon-btn icon-btn-ghost" title={t("sample.delete")} onclick={() => deleteSampleResponseAction(req.id, sr.id)}>🗑</button>
+              {/if}
+            </li>
+          {:else}
+            <li class="empty">{t("sidebar.noSamplesYet")}</li>
+          {/each}
+        </ul>
       {/if}
     </li>
   {/snippet}
@@ -3005,6 +3195,32 @@
         {#if projectSearchQuery}
           <span class="request-count-badge">{filteredProjects.length}/{projects.length}</span>
         {/if}
+        <div class="menu-wrap">
+          <button
+            type="button"
+            class="icon-btn"
+            title={t("sidebar.sortOptions")}
+            onclick={() => (projectSortMenuOpen = !projectSortMenuOpen)}
+          >⋮</button>
+          {#if projectSortMenuOpen}
+            <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (projectSortMenuOpen = false)}></button>
+            <div class="dropdown-menu">
+              {#each PROJECT_SORT_FIELDS as f (f.field)}
+                <button
+                  type="button"
+                  class="dropdown-menu-item"
+                  class:active={projectSortField === f.field}
+                  onclick={() => pickProjectSortField(f.field)}
+                >
+                  <span>{t(f.label)}</span>
+                  {#if projectSortField === f.field}
+                    <span class="sort-dir-indicator">{projectSortDir === "asc" ? "↑" : "↓"}</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
       </div>
 
       <div class="project-list">
@@ -3022,34 +3238,65 @@
                   <span class="folder-icon">{project.id === selectedProjectId ? "📂" : "📁"}</span>
                   <span class="project-name">{project.name}</span>
                 </button>
-                <div class="project-row-actions">
+                <div class="project-row-actions" class:force-visible={openProjectMenuId === project.id}>
                   <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id)}>+</button>
-                  <button class="icon-btn" title={t("sidebar.addFolder")} onclick={() => quickCreateFolder(project.id)}>📁+</button>
-                  <button
-                    class="icon-btn"
-                    title={t("sidebar.importInto")}
-                    onclick={async () => {
-                      await selectProject(project.id);
-                      collectionImportTarget = "current";
-                      importActiveTab = "collection";
-                      collectionImportReport = null;
-                      collectionImportError = "";
-                      activeScreen = "import";
-                    }}
-                  >📥</button>
-                  <button class="icon-btn" title={t("sidebar.exportCollection")} onclick={() => exportPostmanCollectionAction(project.id)}>⤓</button>
-                  <button
-                    class="icon-btn"
-                    title={t("sidebar.exportProjectFile")}
-                    onclick={async () => {
-                      await selectProject(project.id);
-                      await exportProjectFileAction();
-                      gitActiveTab = "projectfile";
-                      activeScreen = "git";
-                    }}
-                  >💾</button>
-                  <button class="icon-btn" title={t("sidebar.rename")} onclick={() => startRenameProject(project)}>✎</button>
-                  <button class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteProject(project.id)}>🗑</button>
+                  <div class="menu-wrap">
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      title={t("sidebar.moreActions")}
+                      onclick={() => (openProjectMenuId = openProjectMenuId === project.id ? null : project.id)}
+                    >⋮</button>
+                    {#if openProjectMenuId === project.id}
+                      <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (openProjectMenuId = null)}></button>
+                      <div class="dropdown-menu">
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={() => { openProjectMenuId = null; quickCreateFolder(project.id); }}
+                        >{t("sidebar.addFolder")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={async () => {
+                            openProjectMenuId = null;
+                            await selectProject(project.id);
+                            collectionImportTarget = "current";
+                            importActiveTab = "collection";
+                            collectionImportReport = null;
+                            collectionImportError = "";
+                            activeScreen = "import";
+                          }}
+                        >{t("sidebar.importInto")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={() => { openProjectMenuId = null; exportPostmanCollectionAction(project.id); }}
+                        >{t("sidebar.exportCollection")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={async () => {
+                            openProjectMenuId = null;
+                            await selectProject(project.id);
+                            await exportProjectFileAction();
+                            gitActiveTab = "projectfile";
+                            activeScreen = "git";
+                          }}
+                        >{t("sidebar.exportProjectFile")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={() => { openProjectMenuId = null; startRenameProject(project); }}
+                        >{t("sidebar.rename")}</button>
+                        <button
+                          type="button"
+                          class="dropdown-menu-item"
+                          onclick={() => { openProjectMenuId = null; deleteProject(project.id); }}
+                        >{t("sidebar.delete")}</button>
+                      </div>
+                    {/if}
+                  </div>
                 </div>
               {/if}
             </div>
@@ -3066,6 +3313,40 @@
                   {#if requestSearchQuery}
                     <span class="request-count-badge">{filteredRequests.length}/{requests.length}</span>
                   {/if}
+                  {#if !requestSearchQuery && folders.length > 0}
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      title={expandedFolderIds.size < folders.length ? t("sidebar.expandAllFolders") : t("sidebar.collapseAllFolders")}
+                      onclick={toggleExpandAllFolders}
+                    >{expandedFolderIds.size < folders.length ? "⊞" : "⊟"}</button>
+                  {/if}
+                  <div class="menu-wrap">
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      title={t("sidebar.sortOptions")}
+                      onclick={() => (requestSortMenuOpen = !requestSortMenuOpen)}
+                    >⋮</button>
+                    {#if requestSortMenuOpen}
+                      <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (requestSortMenuOpen = false)}></button>
+                      <div class="dropdown-menu">
+                        {#each REQUEST_SORT_FIELDS as f (f.field)}
+                          <button
+                            type="button"
+                            class="dropdown-menu-item"
+                            class:active={requestSortField === f.field}
+                            onclick={() => pickRequestSortField(f.field)}
+                          >
+                            <span>{t(f.label)}</span>
+                            {#if requestSortField === f.field}
+                              <span class="sort-dir-indicator">{requestSortDir === "asc" ? "↑" : "↓"}</span>
+                            {/if}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
                 </div>
 
                 {#if loadingRequests}
@@ -3087,7 +3368,7 @@
                     </div>
                   {/if}
                 {:else}
-                  {#each folders as folder (folder.id)}
+                  {#each sortedFolders as folder (folder.id)}
                     <div class="folder-node">
                       <div class="folder-row">
                         {#if renamingFolderId === folder.id}
@@ -3816,7 +4097,7 @@
                       <button
                         type="button"
                         class="btn-delete-icon"
-                        onclick={(e) => { e.stopPropagation(); deleteSampleResponseAction(sr.id); }}
+                        onclick={(e) => { e.stopPropagation(); deleteSampleResponseAction(sr.request_id, sr.id); }}
                         title={t("sample.delete")}
                       >✕</button>
                     </summary>
@@ -5800,8 +6081,9 @@
     background: var(--color-bg-secondary);
   }
 
-  .env-screen-item-row:hover .icon-btn-ghost {
-    opacity: 1;
+  .env-screen-item-row:hover .icon-btn-ghost,
+  .env-screen-item-row:focus-within .icon-btn-ghost {
+    display: inline-block;
   }
 
   .env-screen-item-row.active {
@@ -6611,7 +6893,7 @@
   }
 
   .icon-btn-ghost {
-    opacity: 0;
+    display: none;
   }
 
   /* ---------- Banners ---------- */
@@ -6878,14 +7160,15 @@
   }
 
   .project-row-actions {
-    display: flex;
+    display: none;
     gap: 0.1rem;
-    opacity: 0;
     flex-shrink: 0;
   }
 
-  .project-row:hover .project-row-actions {
-    opacity: 1;
+  .project-row:hover .project-row-actions,
+  .project-row:focus-within .project-row-actions,
+  .project-row-actions.force-visible {
+    display: flex;
   }
 
   .project-requests {
@@ -6918,6 +7201,64 @@
   .request-search-input {
     flex: 1;
     width: 100%;
+  }
+
+  .menu-wrap {
+    position: relative;
+    flex: none;
+  }
+
+  .dropdown-backdrop {
+    position: fixed;
+    inset: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+    z-index: 55;
+    cursor: default;
+  }
+
+  .dropdown-menu {
+    position: absolute;
+    top: calc(100% + 0.2rem);
+    inset-inline-end: 0;
+    z-index: 56;
+    min-width: 10rem;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+    padding: 0.25rem;
+  }
+
+  .dropdown-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.4rem 0.5rem;
+    font-size: 0.78rem;
+    color: var(--color-text);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+
+  .dropdown-menu-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .dropdown-menu-item.active {
+    font-weight: 700;
+    color: var(--color-accent);
+  }
+
+  .sort-dir-indicator {
+    flex: none;
   }
 
   .request-count-badge {
@@ -6956,8 +7297,9 @@
     background: var(--color-bg-hover);
   }
 
-  .folder-row:hover .project-row-actions {
-    opacity: 1;
+  .folder-row:hover .project-row-actions,
+  .folder-row:focus-within .project-row-actions {
+    display: flex;
   }
 
   .folder-link {
@@ -7014,8 +7356,81 @@
     font-size: 0.78rem;
   }
 
-  .request-item:hover .icon-btn-ghost {
-    opacity: 1;
+  .request-item:hover .icon-btn-ghost,
+  .request-item:focus-within .icon-btn-ghost {
+    display: inline-block;
+  }
+
+  .request-item-wrapper {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .tree-expand-btn {
+    flex: none;
+    width: 1rem;
+    background: none;
+    border: none;
+    color: var(--color-text-tertiary);
+    cursor: pointer;
+    font-size: 0.65rem;
+  }
+
+  .sample-tree-list {
+    list-style: none;
+    margin: 0;
+    padding: 0.1rem 0 0.2rem 1.6rem;
+    border-left: 2px solid var(--color-border);
+    margin-left: 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .sample-tree-item {
+    display: flex;
+    align-items: center;
+    border-radius: var(--radius-sm);
+  }
+
+  .sample-tree-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .sample-tree-item:hover .icon-btn-ghost,
+  .sample-tree-item:focus-within .icon-btn-ghost {
+    display: inline-block;
+  }
+
+  .sample-tree-link {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.3rem 0.2rem;
+    min-width: 0;
+    color: var(--color-text);
+  }
+
+  .sample-tree-link:hover {
+    background: none;
+  }
+
+  .status-chip {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 700;
+  }
+
+  .sample-tree-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.76rem;
   }
 
   .request-pagination {

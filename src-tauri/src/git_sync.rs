@@ -21,6 +21,18 @@ pub struct GitStatus {
     pub conflict_files: Vec<String>,
 }
 
+/// The three sides of an unmerged conflict, read straight from Git's index stages (`:1:`
+/// common ancestor, `:2:` ours/local, `:3:` theirs/remote) rather than any hand-rolled diff —
+/// a real 3-way view, not the 2-way `diff HEAD` the app already had. Any side can be absent
+/// (e.g. an add/add conflict has no common ancestor) — `git show` on a missing stage fails
+/// and that side is simply `None`, never a fabricated value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictVersions {
+    pub base: Option<String>,
+    pub local: Option<String>,
+    pub remote: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitCommit {
     pub hash: String,
@@ -303,6 +315,18 @@ impl GitService {
         Ok(())
     }
 
+    /// Reads all three sides of a conflicted file directly from the index (LP-0711 follow-up:
+    /// a real 3-way view instead of only exposing the filename + an "ours vs theirs" binary
+    /// choice). `file` should be repo-relative, as returned in `GitStatus.conflict_files`.
+    pub fn get_conflict_versions(dir: &Path, file: &str) -> ConflictVersions {
+        let read_stage = |stage: u8| Self::run_git_cmd(&["show", &format!(":{stage}:{file}")], dir).ok();
+        ConflictVersions {
+            base: read_stage(1),
+            local: read_stage(2),
+            remote: read_stage(3),
+        }
+    }
+
     /// Writes `light-postman.json` into the target directory.
     pub fn export_to_repo(
         conn: &Connection,
@@ -441,5 +465,56 @@ mod tests {
         assert_eq!(status.status_kind, "conflict");
         assert!(status.has_conflicts);
         assert_eq!(status.conflict_files, vec!["light-postman.json"]);
+    }
+
+    /// Real end-to-end proof against an actual repository (not a parsed-string fixture): builds
+    /// a genuine 3-way conflict with `git merge`, then asserts `get_conflict_versions` returns
+    /// the real base/local/remote blob content read from the index — not the 2-way `diff HEAD`
+    /// the app exposed before this, and not a fabricated "ours vs theirs" pair.
+    #[test]
+    fn get_conflict_versions_reads_real_base_local_remote_from_a_genuine_merge_conflict() {
+        if !GitService::is_git_installed() {
+            eprintln!("git not installed on this machine — skipping");
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("lp-git-conflict-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = "shared.txt";
+
+        let run = |args: &[&str]| GitService::run_git_cmd(args, &dir).unwrap();
+        run(&["init"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["checkout", "-b", "main"]);
+
+        std::fs::write(dir.join(file), "base line\n").unwrap();
+        run(&["add", file]);
+        run(&["commit", "-m", "base"]);
+
+        run(&["checkout", "-b", "feature"]);
+        std::fs::write(dir.join(file), "feature line\n").unwrap();
+        run(&["add", file]);
+        run(&["commit", "-m", "feature change"]);
+
+        run(&["checkout", "main"]);
+        std::fs::write(dir.join(file), "main line\n").unwrap();
+        run(&["add", file]);
+        run(&["commit", "-m", "main change"]);
+
+        // This merge is expected to conflict — ignore run_git_cmd's Err (merge with conflicts
+        // exits non-zero) and verify via get_status instead.
+        let _ = GitService::run_git_cmd(&["merge", "feature"], &dir);
+
+        let status = GitService::get_status(&dir).unwrap();
+        assert!(status.has_conflicts, "the merge must have produced a real conflict");
+        assert_eq!(status.conflict_files, vec![file.to_string()]);
+
+        let versions = GitService::get_conflict_versions(&dir, file);
+        assert_eq!(versions.base.as_deref(), Some("base line\n"));
+        assert_eq!(versions.local.as_deref(), Some("main line\n"));
+        assert_eq!(versions.remote.as_deref(), Some("feature line\n"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

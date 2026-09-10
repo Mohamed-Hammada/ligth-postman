@@ -5,7 +5,8 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::http_engine::BodyCapture;
 use crate::models::{
-    HeaderEntry, ResponseBodyPayload, ResponseCookie, ResponseMeta, ResponseSummary,
+    HeaderEntry, ProjectHistoryEntry, ResponseBodyPayload, ResponseCookie, ResponseMeta,
+    ResponseSummary,
 };
 
 /// How much of a disk-backed body `get_response_body` will actually read back over the
@@ -98,6 +99,41 @@ pub fn list_summaries(conn: &Connection, request_id: &str) -> Result<Vec<Respons
             status_text: row.get(3)?,
             duration_ms: row.get(4)?,
             body_size: row.get(5)?,
+            created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// Project-wide History screen — every response across every request in the project, newest
+/// first, joined with the request's name/method/url. Bounded by `limit` (the SQLite index on
+/// `responses.request_id` doesn't cover cross-request ordering, so this scans the project's
+/// responses; fine at the scale this app targets — see `LIMIT` rather than an unbounded read).
+pub fn list_history_for_project(
+    conn: &Connection,
+    project_id: &str,
+    limit: usize,
+) -> Result<Vec<ProjectHistoryEntry>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.request_id, q.name, q.method, q.url, r.status, r.status_text, r.duration_ms, r.body_size, r.created_at
+         FROM responses r
+         JOIN requests q ON q.id = r.request_id
+         WHERE q.project_id = ?1
+         ORDER BY r.created_at DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![project_id, limit as i64], |row| {
+        let created_at: String = row.get(9)?;
+        Ok(ProjectHistoryEntry {
+            id: row.get(0)?,
+            request_id: row.get(1)?,
+            request_name: row.get(2)?,
+            method: row.get(3)?,
+            url: row.get(4)?,
+            status: row.get(5)?,
+            status_text: row.get(6)?,
+            duration_ms: row.get(7)?,
+            body_size: row.get(8)?,
             created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
         })
     })?;
@@ -268,6 +304,48 @@ mod tests {
         let body = get_response_body(&conn, &meta.id).unwrap();
         assert_eq!(body.text, "hello");
         assert!(!body.truncated);
+    }
+
+    #[test]
+    fn project_history_joins_request_name_and_scopes_to_the_project() {
+        let conn = db::open_in_memory().unwrap();
+        let (project_id, request_id) = seed_request(&conn);
+        create_response(
+            &conn,
+            NewResponseInput {
+                request_id: request_id.clone(),
+                status: 200,
+                status_text: "OK".into(),
+                headers: vec![],
+                duration_ms: 10,
+                body_size: 2,
+                body: BodyCapture::Inline(b"ok".to_vec()),
+            },
+        )
+        .unwrap();
+
+        // A response on a request in a DIFFERENT project must never show up in this project's history.
+        let (_other_project, other_request) = seed_request(&conn);
+        create_response(
+            &conn,
+            NewResponseInput {
+                request_id: other_request,
+                status: 500,
+                status_text: "Internal Server Error".into(),
+                headers: vec![],
+                duration_ms: 5,
+                body_size: 1,
+                body: BodyCapture::Inline(b"x".to_vec()),
+            },
+        )
+        .unwrap();
+
+        let history = list_history_for_project(&conn, &project_id, 200).unwrap();
+        assert_eq!(history.len(), 1, "must not include the other project's response");
+        assert_eq!(history[0].request_id, request_id);
+        assert_eq!(history[0].request_name, "Get");
+        assert_eq!(history[0].method, "GET");
+        assert_eq!(history[0].status, 200);
     }
 
     #[test]

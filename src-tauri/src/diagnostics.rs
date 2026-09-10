@@ -46,7 +46,7 @@ pub fn collect_system_diagnostics(
         (0, 0)
     };
 
-    let process_rss_bytes = 35 * 1024 * 1024; // ~35MB verified idle baseline
+    let process_rss_bytes = current_process_rss_bytes();
 
     Ok(SystemDiagnostics {
         process_rss_bytes,
@@ -64,6 +64,15 @@ pub fn collect_system_diagnostics(
     })
 }
 
+/// Real current-process RSS, via `sysinfo`. Replaces a previous hardcoded `35 * 1024 * 1024`
+/// placeholder that was never an actual measurement — found during audit.
+fn current_process_rss_bytes() -> u64 {
+    let pid = sysinfo::get_current_pid().expect("current pid must be resolvable");
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).map(|p| p.memory()).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +87,9 @@ mod tests {
         assert!(diag.ai_configured);
         assert_eq!(diag.uptime_seconds, 42);
         assert_eq!(diag.total_projects, 0);
-        assert!(diag.process_rss_bytes < 50 * 1024 * 1024, "Idle RSS must be below 50MB baseline");
+        // This measures the `cargo test` harness process, not the shipped app, so it carries
+        // no idle-baseline guarantee — just confirms `current_process_rss_bytes()` returns a
+        // real, non-zero reading rather than the old hardcoded placeholder.
+        assert!(diag.process_rss_bytes > 0, "RSS must be a real measurement, not zero/placeholder");
     }
 }

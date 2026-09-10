@@ -277,3 +277,77 @@ the UI/UX redesign pass in §6. All changes below are currently uncommitted in t
 
 `cargo test` (from `src-tauri/`): **134 unit + 6 integration = 140 passed, 0 failed.**
 `npm run check`: 0 errors, 0 warnings. `npm run build`: clean static bundle.
+
+---
+
+## 8. "Modernist" Design Implementation — Full IA Rebuild (2026-09-10)
+
+The user supplied a design mockup (`Lightpost Modernist.dc.html` + its `_ds/modernist-*`
+design-system export: flat, architectural, near-mono red-on-off-white, zero corner radius,
+strong 2px rules, Archivo typeface) and asked for a **full IA rebuild**: a left-rail switcher
+between 9 full-page screens (Workspace, Response, Environments, Git & Conflicts, Import,
+Launcher, History, Settings, Light/dark), replacing the previous modal-based navigation and the
+dark "Postman clone" visual language from §6. Every screen below was verified live through the
+running app (WebView2 CDP + Playwright), not just compiled.
+
+**Design tokens**: the entire `:root` custom-property block was remapped to the Modernist
+palette (light default, `[data-theme="dark"]` as a real second palette using the same tonal
+ramps) — since existing CSS throughout the file already reads these same variable names, the
+remap alone repainted the whole app with no per-rule changes needed. HTTP methods are no longer
+rainbow-colored (the system is deliberately near-mono; verb text is plain ink, red only when
+active), matching the source design's own stated philosophy.
+
+**New, real capabilities added specifically to build this honestly** (matching the same
+no-fake-data discipline as §7):
+- **Global History screen** — `list_project_history` (new command, cross-request, joined with
+  request name/method/url) + a real search/filter bar. Verified live against 5 real historical
+  sends.
+- **Launcher screen** — `get_project_request_counts` (new command, one `GROUP BY` query for
+  every project) for real per-project request counts; real `updated_at` timestamps, no
+  fabricated "last opened" or GitHub metadata for projects that were never opened.
+- **Real system diagnostics wired to the UI** — `get_system_diagnostics` existed but was never
+  called from the frontend; now powers the rail's resource-budget widget and the Settings
+  screen's diagnostics grid. Its RSS figure was itself a hardcoded `35 * 1024 * 1024` placeholder
+  (found during this pass) — fixed with a real `sysinfo`-based measurement (new dependency).
+- **Real 3-way conflict view** — `git_get_conflict_versions` (new command, reads Git's `:1:`/
+  `:2:`/`:3:` index stages) replaces the old binary "keep ours/keep theirs with no diff" flow.
+  Verified against a real `git merge` conflict in a throwaway repo, not a mocked fixture.
+- **Real, working light/dark toggle** — not a static comparison graphic; `themeMode` is
+  persisted and the Theme screen's side-by-side swatches use nested `[data-theme]` scoping (CSS
+  custom properties inherit) so both halves render correctly regardless of the app's own theme.
+- **Real command palette** (⌘K) — searches actual `projects`/`requests` state, opens the real
+  project/request; no fabricated "commands" beyond what the app can actually do.
+- **Auto-sync interval made genuinely adjustable** — was a hardcoded `60000` literal; now a
+  persisted setting exposed as a segmented control on the Settings screen.
+- **Sidebar show/hide** — plain boolean state, per explicit request mid-session.
+
+**Deliberately simplified rather than faked** (the mockup's own placeholder data couldn't be
+reproduced honestly without much larger scope — see §7's research for why): the Import screen
+shows the real `CollectionImportReport` counts/warnings instead of the mockup's fabricated
+live per-category progress bars and dual-choice "decision" panel; the Response screen omits the
+mockup's fake DNS/TCP/TLS timing waterfall and "Attempts" counter (nothing backs them — only a
+single total `duration_ms` exists); Settings shows script-timeout/response-cache/history-retention
+as honest read-only text rather than sliders that would move nothing.
+
+**Known follow-up work, not done in this pass**: the old per-feature modals for cURL/Postman
+collection import (`showCollectionImport`/`showCurlImport`/`showEnvironmentImport`) are now
+unreachable dead code (superseded by the Import screen) but weren't deleted, to avoid a repeat
+of a structural mistake made mid-pass (see below); a stray outdated code comment near
+`.btn-send` still claims blue is the primary action color, which is no longer true now that
+`--color-accent`/`--color-primary` are unified into one red per the mono design system.
+
+**A real mistake made and caught during this pass, for the record**: the Git screen's content
+was initially spliced in by converting the *old in-workspace Git modal* in place, rather than
+being written at the dedicated placeholder location in the top-level screen-switch chain — this
+produced an `{:else if}`-attached-to-the-wrong-`{#if}` Svelte compile error. Caught immediately
+by `npm run check`, diagnosed, and fixed by moving the content to the correct location before
+continuing to the remaining screens (each of which was then built directly at its placeholder,
+avoiding the mistake a second time).
+
+Verification for this pass: `cargo test` **137 unit + 6 integration = 143 passed, 0 failed**
+(the RSS-fix test update, the `request_counts_by_project` test, the `list_history_for_project`
+test, and the real-git-merge-conflict test together added 3 net tests versus §7.4's count —
+all are unit tests in their respective modules, not new integration-test files); `npm run check`
+0 errors/warnings; `npm run build` clean; every one of the 9 screens screenshotted live via
+WebView2 CDP, including the dark-theme toggle applying app-wide and the command palette
+returning a real, correctly-filtered result.

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface Project {
   id: string;
   name: string;
+  default_environment_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -114,6 +115,8 @@ export interface NewRequestInput {
 export interface UpdateProjectInput {
   id: string;
   name?: string;
+  default_environment_id?: string;
+  clear_default_environment_id?: boolean;
 }
 
 export interface UpdateRequestInput {
@@ -201,6 +204,20 @@ export interface AppError {
 export interface ResponseSummary {
   id: string;
   request_id: string;
+  status: number;
+  status_text: string;
+  duration_ms: number;
+  body_size: number;
+  created_at: string;
+}
+
+/** One row of the project-wide History screen. Matches Rust `models::ProjectHistoryEntry`. */
+export interface ProjectHistoryEntry {
+  id: string;
+  request_id: string;
+  request_name: string;
+  method: string;
+  url: string;
   status: number;
   status_text: string;
   duration_ms: number;
@@ -303,6 +320,24 @@ export interface ConsoleEvent {
   details?: Record<string, unknown> | null;
 }
 
+/** Matches Rust `diagnostics::SystemDiagnostics` exactly — every field here is a real
+ * measurement (RSS via `sysinfo`, SQLite/WAL file sizes, real `COUNT(*)` totals), never a
+ * placeholder. */
+export interface SystemDiagnostics {
+  process_rss_bytes: number;
+  db_size_bytes: number;
+  db_wal_size_bytes: number;
+  total_projects: number;
+  total_requests: number;
+  total_environments: number;
+  total_variables: number;
+  total_responses: number;
+  total_sample_responses: number;
+  console_events_count: number;
+  ai_configured: boolean;
+  uptime_seconds: number;
+}
+
 export type SnippetMode = "placeholder" | "resolved";
 export type SnippetTarget = "bash" | "powershell" | "windows_cmd" | "python" | "javascript";
 
@@ -356,6 +391,7 @@ export const api = {
   createProject: (name: string) => invoke<Project>("create_project", { name }),
   listProjects: () => invoke<Project[]>("list_projects"),
   getProject: (id: string) => invoke<Project>("get_project", { id }),
+  getProjectRequestCounts: () => invoke<Record<string, number>>("get_project_request_counts"),
   updateProject: (input: UpdateProjectInput) =>
     invoke<Project>("update_project", { input }),
   deleteProject: (id: string) => invoke<void>("delete_project", { id }),
@@ -373,6 +409,8 @@ export const api = {
     invoke<Environment>("create_environment", { input: { project_id: projectId, name } }),
   listEnvironments: (projectId: string) =>
     invoke<Environment[]>("list_environments", { projectId }),
+  updateEnvironment: (input: { id: string; name?: string }) =>
+    invoke<Environment>("update_environment", { input }),
   deleteEnvironment: (id: string) => invoke<void>("delete_environment", { id }),
 
   createVariable: (input: NewVariableInput) =>
@@ -412,6 +450,8 @@ export const api = {
   cancelSend: (requestId: string) => invoke<void>("cancel_send", { requestId }),
   listResponseSummaries: (requestId: string) =>
     invoke<ResponseSummary[]>("list_response_summaries", { requestId }),
+  listProjectHistory: (projectId: string, limit?: number) =>
+    invoke<ProjectHistoryEntry[]>("list_project_history", { projectId, limit: limit ?? null }),
   getResponse: (id: string) => invoke<ResponseMeta>("get_response", { id }),
   getResponseBody: (id: string) => invoke<ResponseBodyPayload>("get_response_body", { id }),
   deleteResponse: (id: string) => invoke<void>("delete_response", { id }),
@@ -473,6 +513,8 @@ export const api = {
   clearConsoleEvents: () => invoke<void>("clear_console_events"),
 
   exportConsoleEvents: () => invoke<string>("export_console_events"),
+
+  getSystemDiagnostics: () => invoke<SystemDiagnostics>("get_system_diagnostics"),
 
   exportProjectFile: (projectId: string, includeSecrets?: boolean) =>
     invoke<string>("export_project_file", {
@@ -548,6 +590,9 @@ export const api = {
 
   gitResolveConflict: (directory: string, file: string, choice: string) =>
     invoke<void>("git_resolve_conflict", { directory, file, choice }),
+
+  gitGetConflictVersions: (directory: string, file: string) =>
+    invoke<ConflictVersions>("git_get_conflict_versions", { directory, file }),
 
   getProjectGitSettings: (projectId: string) =>
     invoke<ProjectGitSettings | null>("get_project_git_settings", {
@@ -627,6 +672,15 @@ export interface GitStatus {
   untracked_files: string[];
   has_conflicts: boolean;
   conflict_files: string[];
+}
+
+/** The three sides of a real merge conflict, read from Git's index stages. Any side can be
+ * `null` (e.g. an add/add conflict has no common ancestor) — never fabricated. Matches Rust
+ * `git_sync::ConflictVersions`. */
+export interface ConflictVersions {
+  base: string | null;
+  local: string | null;
+  remote: string | null;
 }
 
 export interface GitCommit {

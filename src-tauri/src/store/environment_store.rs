@@ -99,6 +99,12 @@ pub fn update_environment(
 /// `variables.environment_id` foreign key (README §41 shared-vs-local design note applies
 /// once we add secure storage — see PROJECT_MAP).
 pub fn delete_environment(conn: &Connection, id: &str) -> Result<(), AppError> {
+    // No DB-level FK action on default_environment_id (see db.rs migration 12) — clear it here
+    // instead, so a project never points at an environment that no longer exists.
+    conn.execute(
+        "UPDATE projects SET default_environment_id = NULL WHERE default_environment_id = ?1",
+        params![id],
+    )?;
     let affected = conn.execute("DELETE FROM environments WHERE id = ?1", params![id])?;
     if affected == 0 {
         return Err(AppError::NotFound(format!("environment {id} not found")));

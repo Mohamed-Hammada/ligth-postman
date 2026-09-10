@@ -44,6 +44,9 @@ base64 = "0.22"
 url = "2"
 regex = "1"
 boa_engine = { version = "0.22", default-features = false }
+# Real process RSS memory reading for the diagnostics/resource-budget widget — replaces a
+# hardcoded placeholder constant. Only the "system" feature (process listing) is needed.
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

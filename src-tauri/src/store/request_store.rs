@@ -14,10 +14,9 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
     if name.is_empty() {
         return Err(AppError::Validation("request name must not be empty".into()));
     }
+    // Empty is allowed here — a request is a draft-in-progress until it's actually sent, and
+    // send time already produces a clear error for an unparseable/empty URL there.
     let url = input.url.trim();
-    if url.is_empty() {
-        return Err(AppError::Validation("request url must not be empty".into()));
-    }
     let method = input.method.trim().to_uppercase();
     if !VALID_METHODS.contains(&method.as_str()) {
         return Err(AppError::Validation(format!(
@@ -175,14 +174,9 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
         None => existing.method,
     };
 
+    // Empty is allowed here too, for the same reason as create_request — see comment there.
     let url = match input.url {
-        Some(url) => {
-            let trimmed = url.trim();
-            if trimmed.is_empty() {
-                return Err(AppError::Validation("request url must not be empty".into()));
-            }
-            trimmed.to_string()
-        }
+        Some(url) => url.trim().to_string(),
         None => existing.url,
     };
 

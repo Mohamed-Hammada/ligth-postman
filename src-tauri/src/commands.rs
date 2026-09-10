@@ -59,6 +59,14 @@ pub fn get_project(state: State<AppState>, id: String) -> Result<Project, AppErr
 }
 
 #[tauri::command]
+pub fn get_project_request_counts(
+    state: State<AppState>,
+) -> Result<std::collections::HashMap<String, usize>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    project_store::request_counts_by_project(&conn)
+}
+
+#[tauri::command]
 pub fn update_project(state: State<AppState>, input: UpdateProjectInput) -> Result<Project, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
     let project = project_store::update_project(&conn, input)?;
@@ -270,6 +278,16 @@ pub fn list_response_summaries(
 ) -> Result<Vec<ResponseSummary>, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
     response_store::list_summaries(&conn, &request_id)
+}
+
+#[tauri::command]
+pub fn list_project_history(
+    state: State<AppState>,
+    project_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<crate::models::ProjectHistoryEntry>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    response_store::list_history_for_project(&conn, &project_id, limit.unwrap_or(200))
 }
 
 #[tauri::command]
@@ -818,6 +836,15 @@ pub fn git_resolve_conflict(
 ) -> Result<(), AppError> {
     let path = std::path::Path::new(&directory);
     crate::git_sync::GitService::resolve_conflict(path, &file, &choice)
+}
+
+#[tauri::command]
+pub fn git_get_conflict_versions(
+    directory: String,
+    file: String,
+) -> Result<crate::git_sync::ConflictVersions, AppError> {
+    let path = std::path::Path::new(&directory);
+    Ok(crate::git_sync::GitService::get_conflict_versions(path, &file))
 }
 
 #[tauri::command]

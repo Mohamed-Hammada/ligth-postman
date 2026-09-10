@@ -14,6 +14,10 @@ pub const VALID_METHODS: &[&str] = &[
 pub struct Project {
     pub id: String,
     pub name: String,
+    /// The environment that should be auto-selected whenever this project is opened. `None`
+    /// means "No Environment" — travels with the project (export/import, git sync), same as
+    /// any other project-level setting.
+    pub default_environment_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -24,11 +28,18 @@ pub struct NewProjectInput {
 }
 
 /// `name: None` means "leave unchanged" — omitted fields must never clobber existing data.
-#[derive(Debug, Clone, Deserialize)]
+/// `default_environment_id: Some(id)` sets it; `clear_default_environment_id: true` explicitly
+/// resets it to "No Environment" (the two are distinguished the same way request body/description
+/// clearing already is elsewhere in this file — a bare `None` can't tell "omitted" from "null").
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct UpdateProjectInput {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub default_environment_id: Option<String>,
+    #[serde(default)]
+    pub clear_default_environment_id: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,6 +478,23 @@ pub struct UpdateVariableInput {
 pub struct ResponseSummary {
     pub id: String,
     pub request_id: String,
+    pub status: u16,
+    pub status_text: String,
+    pub duration_ms: u64,
+    pub body_size: u64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One row of the project-wide History screen — a response joined with its request's
+/// name/method/url so the list is browsable without opening each request individually.
+/// Still never carries the body (same lazy-loading rule as `ResponseSummary`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectHistoryEntry {
+    pub id: String,
+    pub request_id: String,
+    pub request_name: String,
+    pub method: String,
+    pub url: String,
     pub status: u16,
     pub status_text: String,
     pub duration_ms: u64,

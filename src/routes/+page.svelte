@@ -22,7 +22,6 @@
     type ResponseSummary,
     type SnippetMode,
     type SnippetTarget,
-    type VariableScope,
     type VariableView,
     type ConsoleEvent,
     type ConsoleLevel,
@@ -37,7 +36,22 @@
     type SampleResponse,
     type SourceProjectReport,
     type UpdateAiSettingsInput,
+    type SystemDiagnostics,
+    type ProjectHistoryEntry,
+    type ConflictVersions,
   } from "$lib/api";
+
+  // Svelte action: focuses an element as soon as it mounts (e.g. an inline-rename input that
+  // just appeared). Same effect as the `autofocus` attribute, without the a11y lint warning
+  // that attribute triggers — this is the accessible-equivalent pattern.
+  function focusOnMount(node: HTMLElement) {
+    node.focus();
+    // Select any placeholder/existing text (e.g. "New Project") so typing replaces it outright —
+    // the whole point of dropping straight into rename mode is writing the name in one go.
+    if (node instanceof HTMLInputElement) {
+      node.select();
+    }
+  }
 
   let projects = $state<Project[]>([]);
   let selectedProjectId = $state<string | null>(null);
@@ -47,31 +61,58 @@
 
   let environments = $state<Environment[]>([]);
   let selectedEnvironmentId = $state<string | null>(null);
-  let newEnvironmentName = $state("");
+  let renamingEnvironmentId = $state<string | null>(null);
+  let renameEnvironmentValue = $state("");
   let urlPreview = $state<ResolvedTemplate | null>(null);
 
-  let showVariables = $state(false);
   let projectVariables = $state<VariableView[]>([]);
   let environmentVariables = $state<VariableView[]>([]);
-  let newVarKey = $state("");
-  let newVarValue = $state("");
-  let newVarIsSecret = $state(false);
-  let newVarIsLocal = $state(false);
-  let newVarScope = $state<VariableScope>("global");
+  // Trailing draft rows for the Global/Environment variable tables — same "always one empty
+  // row, commits when you're done with it" pattern as Params/Headers, just committing to a
+  // real backend variable (createVariable) instead of a client-side array, since each row here
+  // is its own persisted entity rather than a field on the currently-open request.
+  function emptyVarDraft() {
+    return { key: "", value: "", isSecret: false, isLocal: false };
+  }
+  let newGlobalVarDraft = $state(emptyVarDraft());
+  let newEnvVarDraft = $state(emptyVarDraft());
   let revealedSecrets = $state<Record<string, string>>({});
   let requestDiagnostics = $state<RequestDiagnostics | null>(null);
   let copyFeedback = $state("");
 
-  let newProjectName = $state("");
-  let newRequestName = $state("");
-  let newRequestMethod = $state("GET");
-  let newRequestUrl = $state("");
+  // Draft values typed into the hover-to-add popover on an "Unresolved variable" chip.
+  let missingVarDrafts = $state<Record<string, string>>({});
 
   let renamingProjectId = $state<string | null>(null);
   let renameProjectValue = $state("");
 
+  let renamingRequestId = $state<string | null>(null);
+  let renameRequestValue = $state("");
+  function startRenameRequest(id: string, currentName: string) {
+    renamingRequestId = id;
+    renameRequestValue = currentName;
+  }
+  async function submitRenameRequest() {
+    const id = renamingRequestId;
+    const value = renameRequestValue.trim();
+    renamingRequestId = null;
+    if (!id || !value) return;
+    try {
+      const updated = await api.updateRequest({ id, name: value });
+      requests = requests.map((r) => (r.id === updated.id ? { ...r, name: updated.name } : r));
+      openTabs = openTabs.map((t) => (t.id === updated.id ? { ...t, name: updated.name } : t));
+      if (selectedRequest?.id === updated.id) {
+        selectedRequest = { ...selectedRequest, name: updated.name };
+        editName = updated.name;
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
   // Editor tab selection (LP-0406)
   let activeEditorTab = $state<"params" | "headers" | "auth" | "body" | "scripts" | "settings" | "docs" | "code">("params");
+  let activeScriptTab = $state<"pre" | "post">("pre");
 
   // Mirrors the active request while it's being edited; reset whenever a
   // different request is opened (README §5 "editor state" step).
@@ -162,9 +203,9 @@
   function serializeBodyForStorage(): string {
     switch (editBodyType) {
       case "form-data":
-        return JSON.stringify({ type: "form_data", items: editFormDataItems });
+        return JSON.stringify({ type: "form_data", items: withoutEmptyKeyRows(editFormDataItems) });
       case "x-www-form-urlencoded":
-        return JSON.stringify({ type: "url_encoded", items: editUrlEncodedItems });
+        return JSON.stringify({ type: "url_encoded", items: withoutEmptyKeyRows(editUrlEncodedItems) });
       case "binary":
         return JSON.stringify({ type: "binary", file_path: editBinaryFilePath || null });
       case "raw":
@@ -174,17 +215,31 @@
     }
   }
 
-  function addFormDataItem() {
-    editFormDataItems = [...editFormDataItems, { key: "", value: "", enabled: true, is_file: false, file_path: null }];
+  // Auto-expanding rows (Params/Headers/Form Data/URL Encoded): the table always keeps exactly
+  // one empty trailing row, so typing a key into it is the "add row" action — no separate
+  // Add-row button needed. Rows with an empty key are stripped again before saving.
+  function withTrailingEmptyRow<T extends { key: string }>(items: T[], makeEmpty: () => T): T[] {
+    const last = items[items.length - 1];
+    if (!last || last.key.trim() !== "") {
+      return [...items, makeEmpty()];
+    }
+    return items;
+  }
+  function withoutEmptyKeyRows<T extends { key: string }>(items: T[]): T[] {
+    return items.filter((item) => item.key.trim() !== "");
+  }
+
+  function growFormDataItems() {
+    editFormDataItems = withTrailingEmptyRow(editFormDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
   }
   function removeFormDataItem(index: number) {
-    editFormDataItems = editFormDataItems.filter((_, i) => i !== index);
+    editFormDataItems = withTrailingEmptyRow(editFormDataItems.filter((_, i) => i !== index), () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
   }
-  function addUrlEncodedItem() {
-    editUrlEncodedItems = [...editUrlEncodedItems, { key: "", value: "", enabled: true }];
+  function growUrlEncodedItems() {
+    editUrlEncodedItems = withTrailingEmptyRow(editUrlEncodedItems, () => ({ key: "", value: "", enabled: true }));
   }
   function removeUrlEncodedItem(index: number) {
-    editUrlEncodedItems = editUrlEncodedItems.filter((_, i) => i !== index);
+    editUrlEncodedItems = withTrailingEmptyRow(editUrlEncodedItems.filter((_, i) => i !== index), () => ({ key: "", value: "", enabled: true }));
   }
 
   // cURL importer (LP-0608, LP-0609)
@@ -192,6 +247,9 @@
   let curlImportText = $state("");
   let curlImportName = $state("");
   let curlImportError = $state("");
+
+  // Import screen tab (collection / environment / cURL) — the full-page Import screen.
+  let importActiveTab = $state<"collection" | "environment" | "curl">("collection");
 
   // Postman compatibility import/export (LP-0501 - LP-0507, LP-0212)
   let showCollectionImport = $state(false);
@@ -210,7 +268,9 @@
   let exportFeedback = $state("");
 
   let snippetMode = $state<SnippetMode>("placeholder");
-  let snippetTarget = $state<SnippetTarget>("bash");
+  // Windows CMD curl by default — this app's dev/target environment is Windows; anything else
+  // is one click away in the same dropdown.
+  let snippetTarget = $state<SnippetTarget>("windows_cmd");
   let snippet = $state("");
   let snippetError = $state("");
 
@@ -264,15 +324,24 @@
       }));
   });
 
-  // Resizable sidebar (drag handle between the project tree and the main workspace).
+  // Resizable sidebar (drag handle between the project tree and the main workspace). Its default
+  // width scales with the window instead of staying pinned at one small fixed value — otherwise
+  // a maximized/fullscreen or ultrawide window leaves project and request names truncated behind
+  // the same narrow default a small laptop window would use. Once the user drags the handle
+  // themselves, their choice sticks and window resizes stop overriding it.
+  function adaptiveSidebarWidth(): number {
+    return Math.min(420, Math.max(260, Math.round(window.innerWidth * 0.18)));
+  }
   let sidebarWidth = $state(300);
   let sidebarResizing = $state(false);
+  let sidebarManuallyResized = false;
 
   function startSidebarResize(e: MouseEvent) {
     e.preventDefault();
     sidebarResizing = true;
+    sidebarManuallyResized = true;
     const onMove = (ev: MouseEvent) => {
-      sidebarWidth = Math.min(480, Math.max(200, ev.clientX));
+      sidebarWidth = Math.min(600, Math.max(200, ev.clientX));
     };
     const onUp = () => {
       sidebarResizing = false;
@@ -282,6 +351,200 @@
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   }
+
+  // Screen navigation shell — a real left-rail switcher between full-page screens. Each
+  // screen reuses the exact same state/functions the old modal-based UI used; nothing here
+  // introduces a second source of truth for projects/requests/environments/git/etc.
+  type ScreenId = "workspace" | "environments" | "git" | "import" | "launcher" | "history" | "settings" | "theme";
+  let activeScreen = $state<ScreenId>("workspace");
+  const SCREENS: { id: ScreenId; label: string }[] = [
+    { id: "workspace", label: "Workspace" },
+    { id: "environments", label: "Environments" },
+    { id: "git", label: "Git & conflicts" },
+    { id: "import", label: "Import" },
+    { id: "launcher", label: "Launcher" },
+    { id: "history", label: "History" },
+    { id: "settings", label: "Settings" },
+    { id: "theme", label: "Light / dark" },
+  ];
+
+  // Sidebar show/hide, for the Workspace screen's project/request explorer.
+  let sidebarVisible = $state(true);
+  let screensRailVisible = $state(true);
+  // The full-detail response view (stat sidebar, tests, bigger body) used to be its own rail
+  // screen, but it's meaningless without Workspace's request context — it's now an expand
+  // mode reached from the inline response panel instead of a peer top-level destination.
+  let responseExpanded = $state(false);
+
+  // Real, persisted light/dark toggle — light is this design system's own default, dark is a
+  // genuine alternate palette (see the :root[data-theme="dark"] block), not a static mockup.
+  let themeMode = $state<"light" | "dark">("light");
+
+  // Real, user-adjustable auto-sync interval (Settings screen) — previously a hardcoded 60000ms
+  // literal with no way to change it. Persisted so it survives a restart.
+  let autoSyncIntervalMs = $state(60000);
+  function setAutoSyncIntervalMs(ms: number) {
+    autoSyncIntervalMs = ms;
+    try {
+      localStorage.setItem("lp-auto-sync-interval-ms", String(ms));
+    } catch {
+      // interval just won't persist across restarts
+    }
+  }
+  function setThemeMode(mode: "light" | "dark") {
+    themeMode = mode;
+    try {
+      localStorage.setItem("lp-theme", mode);
+    } catch {
+      // localStorage can throw in a locked-down webview profile — theme just won't persist.
+    }
+  }
+
+  // Icon & text size: every size in this stylesheet is in rem, which is relative to the root
+  // <html> element's font-size specifically (not the nearest ancestor's) — so scaling that one
+  // root value scales every rem-sized icon and text label app-wide with no per-element changes.
+  let uiScale = $state(100);
+  function setUiScale(pct: number) {
+    uiScale = pct;
+    try {
+      document.documentElement.style.fontSize = `${pct}%`;
+      localStorage.setItem("lp-ui-scale", String(pct));
+    } catch {
+      // won't persist across restarts, and this one load won't be scaled — not fatal.
+    }
+  }
+
+  // Real system diagnostics (RSS via sysinfo, SQLite/WAL size, entity counts) for the
+  // resource-budget widget — never a placeholder number.
+  let systemDiagnostics = $state<SystemDiagnostics | null>(null);
+  async function refreshSystemDiagnostics() {
+    try {
+      systemDiagnostics = await api.getSystemDiagnostics();
+    } catch {
+      // Diagnostics are informational — a failure here shouldn't surface as an app error.
+    }
+  }
+
+  // Real per-project request counts for the Launcher screen (one query for every project).
+  let projectRequestCounts = $state<Record<string, number>>({});
+  async function refreshProjectRequestCounts() {
+    try {
+      projectRequestCounts = await api.getProjectRequestCounts();
+    } catch {
+      // Informational only.
+    }
+  }
+
+  // Real project-wide History screen state.
+  let projectHistory = $state<ProjectHistoryEntry[]>([]);
+  let historyLoading = $state(false);
+  let historySearchQuery = $state("");
+  let historyShowFailuresOnly = $state(false);
+  async function refreshProjectHistory() {
+    if (!selectedProjectId) {
+      projectHistory = [];
+      return;
+    }
+    historyLoading = true;
+    try {
+      projectHistory = await api.listProjectHistory(selectedProjectId, 200);
+    } catch (err) {
+      errorMessage = describeError(err);
+    } finally {
+      historyLoading = false;
+    }
+  }
+  let filteredProjectHistory = $derived.by(() => {
+    const q = historySearchQuery.trim().toLowerCase();
+    return projectHistory.filter((h) => {
+      if (historyShowFailuresOnly && h.status < 400) return false;
+      if (!q) return true;
+      return (
+        h.request_name.toLowerCase().includes(q) ||
+        h.method.toLowerCase().includes(q) ||
+        h.url.toLowerCase().includes(q) ||
+        String(h.status).includes(q)
+      );
+    });
+  });
+
+  // Command palette — real fuzzy-ish search over actual projects/requests, real actions only
+  // (open the project, open the request). No fabricated "commands".
+  let paletteOpen = $state(false);
+  let paletteQuery = $state("");
+  let paletteInputEl = $state<HTMLInputElement | null>(null);
+  function openPalette() {
+    paletteOpen = true;
+    paletteQuery = "";
+  }
+  function closePalette() {
+    paletteOpen = false;
+  }
+
+  // Keyboard shortcuts — each one maps to a real, already-existing action (nothing fabricated
+  // for the sake of having a shortcuts list). Individually toggleable from Settings, persisted
+  // to localStorage the same way theme/auto-sync-interval already are.
+  type ShortcutId = "commandPalette" | "sendRequest" | "saveRequest" | "newRequest";
+  const SHORTCUT_DEFS: { id: ShortcutId; label: string; keys: string }[] = [
+    { id: "commandPalette", label: "Open the command palette", keys: "Ctrl/⌘ K" },
+    { id: "sendRequest", label: "Send the current request", keys: "Ctrl/⌘ Enter" },
+    { id: "saveRequest", label: "Save the current request immediately", keys: "Ctrl/⌘ S" },
+    { id: "newRequest", label: "New request in the current project", keys: "Ctrl/⌘ N" },
+  ];
+  let shortcutsEnabled = $state<Record<ShortcutId, boolean>>({
+    commandPalette: true,
+    sendRequest: true,
+    saveRequest: true,
+    newRequest: true,
+  });
+  function setShortcutEnabled(id: ShortcutId, enabled: boolean) {
+    shortcutsEnabled = { ...shortcutsEnabled, [id]: enabled };
+    try {
+      localStorage.setItem("lp-shortcuts-enabled", JSON.stringify(shortcutsEnabled));
+    } catch {
+      // shortcut prefs just won't persist across restarts
+    }
+  }
+  $effect(() => {
+    if (paletteOpen) paletteInputEl?.focus();
+  });
+  type PaletteItem = { kind: "project" | "request"; label: string; method?: string; hint: string; onSelect: () => void };
+  let paletteItems = $derived.by((): PaletteItem[] => {
+    const q = paletteQuery.trim().toLowerCase();
+    const items: PaletteItem[] = [];
+    for (const p of projects) {
+      if (!q || p.name.toLowerCase().includes(q)) {
+        items.push({
+          kind: "project",
+          label: p.name,
+          hint: "project",
+          onSelect: () => {
+            selectProject(p.id);
+            activeScreen = "workspace";
+            closePalette();
+          },
+        });
+      }
+    }
+    if (selectedProjectId) {
+      for (const r of requests) {
+        if (!q || r.name.toLowerCase().includes(q) || r.url.toLowerCase().includes(q)) {
+          items.push({
+            kind: "request",
+            label: r.name,
+            method: r.method,
+            hint: r.url,
+            onSelect: () => {
+              openRequest(r.id);
+              activeScreen = "workspace";
+              closePalette();
+            },
+          });
+        }
+      }
+    }
+    return items.slice(0, 30);
+  });
 
   let aiConfigured = $state(false);
   let showAiPanel = $state(false);
@@ -376,6 +639,14 @@
   let openTabs = $state<RequestTab[]>([]);
   const tabDrafts = new Map<string, RequestDraft>();
 
+  // Project search — filters the sidebar's project list by name.
+  let projectSearchQuery = $state("");
+  let filteredProjects = $derived.by(() => {
+    const q = projectSearchQuery.trim().toLowerCase();
+    if (!q) return projects;
+    return projects.filter((p) => p.name.toLowerCase().includes(q));
+  });
+
   // Request search & windowing (LP-0409, LP-0410)
   let requestSearchQuery = $state("");
   let filteredRequests = $derived.by(() => {
@@ -433,7 +704,6 @@
   );
 
   // Git & Collaboration state (LP-0701 - LP-0713)
-  let showGitModal = $state(false);
   let showDiffModal = $state(false);
   let showHistoryModal = $state(false);
   let showProjectFileModal = $state(false);
@@ -448,6 +718,24 @@
   let gitStatusLoading = $state(false);
   let gitActionFeedback = $state("");
   let gitActionError = $state("");
+
+  // Real 3-way conflict view (LP-0711 follow-up) — base/local/remote content read straight
+  // from Git's index stages, not a fabricated diff.
+  let selectedConflictFile = $state<string | null>(null);
+  let conflictVersions = $state<ConflictVersions | null>(null);
+  let conflictVersionsLoading = $state(false);
+  async function loadConflictVersions(file: string) {
+    if (!gitRepoPathInput.trim()) return;
+    selectedConflictFile = file;
+    conflictVersionsLoading = true;
+    try {
+      conflictVersions = await api.gitGetConflictVersions(gitRepoPathInput.trim(), file);
+    } catch (err) {
+      gitActionError = describeError(err);
+    } finally {
+      conflictVersionsLoading = false;
+    }
+  }
 
   let gitRepoPathInput = $state("");
   let gitRemoteUrlInput = $state("");
@@ -465,21 +753,30 @@
 
   let autoSyncTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Guards the hydration effect below so it only re-populates the editor from `selectedRequest`
+  // when the SELECTION actually changes to a different request. `selectedRequest` is also
+  // reassigned in place for the same request (autosave's `selectedRequest = updated`, a rename's
+  // optimistic `{...selectedRequest, name}`) — without this guard, each of those would re-run
+  // the hydration and clobber whatever the user had typed into some other field since the last
+  // hydration, since it always reads from the (possibly slightly stale) object being assigned.
+  let hydratedRequestId: string | null = null;
+
   $effect(() => {
-    if (selectedRequest) {
+    if (selectedRequest && selectedRequest.id !== hydratedRequestId) {
+      hydratedRequestId = selectedRequest.id;
       if (!tabDrafts.has(selectedRequest.id)) {
         editName = selectedRequest.name;
         editMethod = selectedRequest.method;
         editUrl = selectedRequest.url;
-        editHeaders = selectedRequest.headers.map((h) => ({ ...h }));
-        editQueryParams = selectedRequest.query_params.map((p) => ({ ...p }));
+        editHeaders = withTrailingEmptyRow(selectedRequest.headers.map((h) => ({ ...h })), () => ({ key: "", value: "", enabled: true, description: "" }));
+        editQueryParams = withTrailingEmptyRow(selectedRequest.query_params.map((p) => ({ ...p })), () => ({ key: "", value: "", enabled: true }));
         const parsedBody = parseBodyForEditing(selectedRequest.body);
         editBodyType = parsedBody.bodyType;
         editBody = parsedBody.rawBody;
         editGraphqlQuery = parsedBody.graphqlQuery;
         editGraphqlVariables = parsedBody.graphqlVariables;
-        editFormDataItems = parsedBody.formDataItems;
-        editUrlEncodedItems = parsedBody.urlEncodedItems;
+        editFormDataItems = withTrailingEmptyRow(parsedBody.formDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
+        editUrlEncodedItems = withTrailingEmptyRow(parsedBody.urlEncodedItems, () => ({ key: "", value: "", enabled: true }));
         editBinaryFilePath = parsedBody.binaryFilePath;
         editDescription = selectedRequest.description ?? "";
 
@@ -507,7 +804,13 @@
 
         snippet = "";
         snippetError = "";
+        autoSaveStatus = "saved";
+        curlDetectedFeedback = "";
       }
+    } else if (!selectedRequest) {
+      // Nothing open — clear the guard so reopening this same request later (e.g. after
+      // closing its tab) is treated as a fresh selection and hydrates from the server again.
+      hydratedRequestId = null;
     }
   });
 
@@ -546,7 +849,7 @@
   // Live preview of what {{vars}} in the URL resolve to for the currently selected
   // environment — same resolver code path the HTTP engine will use to build the real
   // request (README §14 "Stored Request -> ... -> Final HTTP Request").
-  $effect(() => {
+  async function refreshUrlPreview() {
     const projectId = selectedProjectId;
     const requestId = selectedRequest?.id ?? null;
     const template = editUrl;
@@ -554,17 +857,126 @@
       urlPreview = null;
       return;
     }
-    api
-      .resolvePreview(projectId, selectedEnvironmentId, requestId, template)
-      .then((result) => (urlPreview = result))
-      .catch(() => (urlPreview = null));
+    try {
+      urlPreview = await api.resolvePreview(projectId, selectedEnvironmentId, requestId, template);
+    } catch {
+      urlPreview = null;
+    }
+  }
+
+  $effect(() => {
+    // Re-run whenever any of these change — reading them here (rather than inside
+    // refreshUrlPreview) is what makes them tracked dependencies of this effect.
+    void selectedProjectId;
+    void selectedRequest?.id;
+    void selectedEnvironmentId;
+    void editUrl;
+    refreshUrlPreview();
   });
+
+  // Splits the raw URL template into plain-text runs and {{variable}} references, so the URL
+  // bar can render each variable as its own highlighted, hoverable token directly in place —
+  // matching where the user is actually looking, instead of only in the warning banner below.
+  type UrlToken = { type: "text"; text: string } | { type: "var"; name: string; raw: string };
+  function parseUrlTokens(url: string): UrlToken[] {
+    const tokens: UrlToken[] = [];
+    const re = /\{\{([^{}]+)\}\}/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(url))) {
+      if (match.index > lastIndex) tokens.push({ type: "text", text: url.slice(lastIndex, match.index) });
+      tokens.push({ type: "var", name: match[1].trim(), raw: match[0] });
+      lastIndex = match.index + match[0].length;
+    }
+    if (lastIndex < url.length) tokens.push({ type: "text", text: url.slice(lastIndex) });
+    return tokens;
+  }
+  let urlTokens = $derived(parseUrlTokens(editUrl));
+
+  // Keeps the highlight overlay's horizontal scroll glued to the real (invisible-text) input
+  // underneath it, so long URLs that scroll internally don't desync the two layers.
+  function syncUrlOverlayScroll(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const overlay = input.previousElementSibling as HTMLElement | null;
+    if (overlay) overlay.scrollLeft = input.scrollLeft;
+  }
 
   onMount(() => {
     loadProjects();
     loadAiSettings();
     api.isAiConfigured().then((configured) => (aiConfigured = configured));
     refreshConsoleEvents();
+    refreshSystemDiagnostics();
+    try {
+      const saved = localStorage.getItem("lp-theme");
+      if (saved === "dark" || saved === "light") themeMode = saved;
+      const savedInterval = localStorage.getItem("lp-auto-sync-interval-ms");
+      if (savedInterval && Number(savedInterval) > 0) autoSyncIntervalMs = Number(savedInterval);
+      const savedShortcuts = localStorage.getItem("lp-shortcuts-enabled");
+      if (savedShortcuts) {
+        shortcutsEnabled = { ...shortcutsEnabled, ...JSON.parse(savedShortcuts) };
+      }
+      const savedScale = localStorage.getItem("lp-ui-scale");
+      if (savedScale && Number(savedScale) > 0) {
+        uiScale = Number(savedScale);
+        document.documentElement.style.fontSize = `${uiScale}%`;
+      }
+    } catch {
+      // ignore — settings just stay at their defaults
+    }
+
+    sidebarWidth = adaptiveSidebarWidth();
+    const onWindowResize = () => {
+      if (!sidebarManuallyResized) sidebarWidth = adaptiveSidebarWidth();
+    };
+    window.addEventListener("resize", onWindowResize);
+
+    const onGlobalKeydown = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === "k" && shortcutsEnabled.commandPalette) {
+        e.preventDefault();
+        openPalette();
+      } else if (e.key === "Enter" && shortcutsEnabled.sendRequest) {
+        if (selectedRequest && !sending) {
+          e.preventDefault();
+          sendCurrentRequest();
+        }
+      } else if (key === "s" && shortcutsEnabled.saveRequest) {
+        if (selectedRequest) {
+          e.preventDefault();
+          saveRequest();
+        }
+      } else if (key === "n" && shortcutsEnabled.newRequest) {
+        if (selectedProjectId) {
+          e.preventDefault();
+          quickCreateRequest(selectedProjectId);
+        }
+      }
+    };
+    window.addEventListener("keydown", onGlobalKeydown);
+    return () => {
+      window.removeEventListener("resize", onWindowResize);
+      window.removeEventListener("keydown", onGlobalKeydown);
+    };
+  });
+
+  // Keep each screen's real data fresh only while it's actually visible, without polling when
+  // nobody can see it.
+  $effect(() => {
+    if (activeScreen === "workspace" || activeScreen === "settings") {
+      refreshSystemDiagnostics();
+    }
+    if (activeScreen === "launcher") {
+      refreshProjectRequestCounts();
+    }
+    if (activeScreen === "history") {
+      refreshProjectHistory();
+    }
+    if (activeScreen !== "workspace") {
+      responseExpanded = false;
+    }
   });
 
   function saveCurrentDraft() {
@@ -646,6 +1058,9 @@
     activeResponse = draft.activeResponse;
     activeResponseBody = draft.activeResponseBody;
     activeResponseTruncated = draft.activeResponseTruncated;
+    // A surviving draft means the autosave debounce didn't get to fire before the user tabbed
+    // away — pick up where it left off instead of leaving those edits stuck unsaved.
+    scheduleAutoSave();
   }
 
   function isTabDirty(tabId: string): boolean {
@@ -980,14 +1395,15 @@
     }
   }
 
-  async function createProject(event: Event) {
-    event.preventDefault();
-    if (!newProjectName.trim()) return;
+  // "+" with no upfront text field: create with a placeholder name, then drop straight into
+  // the same inline-rename UI used for renaming an existing project, so the user types the
+  // real name in place instead of in a separate form first.
+  async function quickCreateProject() {
     try {
-      const project = await api.createProject(newProjectName.trim());
-      newProjectName = "";
+      const project = await api.createProject("New Project");
       projects = [project, ...projects];
       await selectProject(project.id);
+      startRenameProject(project);
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -1005,6 +1421,13 @@
     try {
       requests = await api.listRequests(id);
       environments = await api.listEnvironments(id);
+      // Auto-select the project's preferred environment, if it set one and that environment
+      // still exists (it may have been deleted since — the backend already clears the
+      // reference then, but the frontend's stale `projects` entry might not have refreshed yet).
+      const defaultEnvId = projects.find((p) => p.id === id)?.default_environment_id;
+      if (defaultEnvId && environments.some((e) => e.id === defaultEnvId)) {
+        selectedEnvironmentId = defaultEnvId;
+      }
       await loadVariables();
       await loadGitSettings(id);
       await loadSourceAssociation(id);
@@ -1015,36 +1438,90 @@
     }
   }
 
-  async function createEnvironment(event: Event) {
-    event.preventDefault();
-    if (!selectedProjectId || !newEnvironmentName.trim()) return;
+  // Marks (or clears) the currently-selected environment as this project's default — the one
+  // auto-selected the next time the project is opened.
+  async function toggleDefaultEnvironment() {
+    if (!selectedProjectId) return;
+    const project = projects.find((p) => p.id === selectedProjectId);
+    if (!project) return;
     try {
-      const env = await api.createEnvironment(selectedProjectId, newEnvironmentName.trim());
-      newEnvironmentName = "";
-      environments = [...environments, env];
-      selectedEnvironmentId = env.id;
-      await loadVariables();
+      const isCurrentlyDefault = project.default_environment_id === selectedEnvironmentId;
+      const updated = isCurrentlyDefault
+        ? await api.updateProject({ id: selectedProjectId, clear_default_environment_id: true })
+        : await api.updateProject({ id: selectedProjectId, default_environment_id: selectedEnvironmentId ?? undefined, clear_default_environment_id: !selectedEnvironmentId });
+      projects = projects.map((p) => (p.id === updated.id ? updated : p));
     } catch (err) {
       errorMessage = describeError(err);
     }
   }
 
-  async function createRequest(event: Event) {
-    event.preventDefault();
-    if (!selectedProjectId || !newRequestName.trim() || !newRequestUrl.trim()) return;
+  // "+ Add new environment…" sticky option in the env select, and the "+" in the Environments
+  // screen sidebar: create with a placeholder name, then drop straight into inline-rename —
+  // same pattern as quickCreateProject/quickCreateRequest, no persistent text field needed.
+  async function quickCreateEnvironment() {
+    if (!selectedProjectId) return;
     try {
+      const env = await api.createEnvironment(selectedProjectId, "New Environment");
+      environments = [...environments, env];
+      selectedEnvironmentId = env.id;
+      await loadVariables();
+      startRenameEnvironment(env);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function startRenameEnvironment(env: Environment) {
+    renamingEnvironmentId = env.id;
+    renameEnvironmentValue = env.name;
+  }
+
+  async function submitRenameEnvironment() {
+    const id = renamingEnvironmentId;
+    const value = renameEnvironmentValue.trim();
+    renamingEnvironmentId = null;
+    if (!id || !value) return;
+    try {
+      const updated = await api.updateEnvironment({ id, name: value });
+      environments = environments.map((e) => (e.id === updated.id ? updated : e));
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function deleteEnvironmentAction(id: string) {
+    try {
+      await api.deleteEnvironment(id);
+      environments = environments.filter((e) => e.id !== id);
+      if (selectedEnvironmentId === id) {
+        selectedEnvironmentId = null;
+        await loadVariables();
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // "+" next to a project: create a request with sensible defaults (no upfront method/name/URL
+  // form) and drop straight into inline-rename, same pattern as quickCreateProject. Works from
+  // any project row, not just the currently-selected one — the sidebar only renders a project's
+  // request tree while it's selected, so a non-selected project must be selected first or the
+  // new request would be created correctly on the backend but never appear anywhere in the UI.
+  async function quickCreateRequest(projectId: string) {
+    try {
+      if (selectedProjectId !== projectId) {
+        await selectProject(projectId);
+      }
       const request = await api.createRequest({
-        project_id: selectedProjectId,
-        name: newRequestName.trim(),
-        method: newRequestMethod,
-        url: newRequestUrl.trim(),
+        project_id: projectId,
+        name: "New Request",
+        method: "GET",
+        url: "",
         headers: [],
         query_params: [],
         auth: { type: "none" },
         body: null,
       });
-      newRequestName = "";
-      newRequestUrl = "";
       requests = [
         {
           id: request.id,
@@ -1056,14 +1533,12 @@
         },
         ...requests,
       ];
-      openTabs = [
-        ...openTabs,
-        { id: request.id, name: request.name, method: request.method },
-      ];
+      openTabs = [...openTabs, { id: request.id, name: request.name, method: request.method }];
       selectedRequest = request;
       activeResponse = null;
       activeResponseBody = "";
       responseHistory = [];
+      startRenameRequest(request.id, request.name);
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -1185,11 +1660,75 @@
     }
   }
 
+  // Autosave: every editable field schedules a debounced save instead of requiring an explicit
+  // "Save" click. sendCurrentRequest() also flushes synchronously before sending, so a send never
+  // races an unsaved edit even if the debounce hasn't fired yet.
+  let autoSaveStatus = $state<"saved" | "unsaved" | "saving" | "error">("saved");
+  let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleAutoSave() {
+    if (!selectedRequest) return;
+    autoSaveStatus = "unsaved";
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      autoSaveTimer = null;
+      saveRequest();
+    }, 700);
+  }
+
+  let curlDetectedFeedback = $state("");
+
+  function looksLikeCurlCommand(text: string): boolean {
+    return /^\s*curl(\.exe)?\s/i.test(text);
+  }
+
+  // Pasting a full `curl ...` command into the URL field parses it with the same importer the
+  // dedicated Import screen uses, then fills in method/URL/headers/auth/body in place — instead
+  // of requiring a trip to Import just because the user had a curl snippet handy.
+  async function handleUrlPaste(event: ClipboardEvent) {
+    const text = event.clipboardData?.getData("text") ?? "";
+    if (!looksLikeCurlCommand(text) || !selectedRequest) return;
+    event.preventDefault();
+    curlDetectedFeedback = "Detecting curl command…";
+    try {
+      const parsed = await api.importCurl(text.trim());
+      editMethod = parsed.method;
+      editUrl = parsed.url;
+      editHeaders = withTrailingEmptyRow(parsed.headers.map((h) => ({ ...h })), () => ({ key: "", value: "", enabled: true, description: "" }));
+      editQueryParams = withTrailingEmptyRow(parsed.query_params.map((p) => ({ ...p })), () => ({ key: "", value: "", enabled: true }));
+      const auth = parsed.auth;
+      editAuthType = auth.type;
+      editAuthBearerToken = auth.type === "bearer" ? auth.token : "";
+      editAuthBasicUsername = auth.type === "basic" ? auth.username : "";
+      editAuthBasicPassword = auth.type === "basic" ? auth.password : "";
+      editAuthApiKeyKey = auth.type === "api_key" ? auth.key : "";
+      editAuthApiKeyValue = auth.type === "api_key" ? auth.value : "";
+      editAuthApiKeyLocation = auth.type === "api_key" ? auth.location : "header";
+      const parsedBody = parseBodyForEditing(parsed.body);
+      editBodyType = parsedBody.bodyType;
+      editBody = parsedBody.rawBody;
+      editGraphqlQuery = parsedBody.graphqlQuery;
+      editGraphqlVariables = parsedBody.graphqlVariables;
+      editFormDataItems = withTrailingEmptyRow(parsedBody.formDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
+      editUrlEncodedItems = withTrailingEmptyRow(parsedBody.urlEncodedItems, () => ({ key: "", value: "", enabled: true }));
+      editBinaryFilePath = parsedBody.binaryFilePath;
+      curlDetectedFeedback = "Detected a curl command — filled in method, headers, auth, and body.";
+      scheduleAutoSave();
+    } catch (err) {
+      curlDetectedFeedback = "";
+      errorMessage = describeError(err);
+    }
+  }
+
   // Only sends fields that actually differ from the hydrated request —
   // the backend preserves anything omitted, but there's no reason to send it either.
   async function saveRequest() {
     if (!selectedRequest) return;
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
     const original = selectedRequest;
+    autoSaveStatus = "saving";
     try {
       const auth = buildAuthFromEditFields();
       const currentSettings: RequestSettings = {
@@ -1206,12 +1745,18 @@
         ...(editName !== original.name ? { name: editName } : {}),
         ...(editMethod !== original.method ? { method: editMethod } : {}),
         ...(editUrl !== original.url ? { url: editUrl } : {}),
-        ...(JSON.stringify(editQueryParams) !== JSON.stringify(original.query_params)
-          ? { query_params: editQueryParams }
-          : {}),
-        ...(JSON.stringify(editHeaders) !== JSON.stringify(original.headers)
-          ? { headers: editHeaders }
-          : {}),
+        ...(() => {
+          const cleanQueryParams = withoutEmptyKeyRows(editQueryParams);
+          return JSON.stringify(cleanQueryParams) !== JSON.stringify(original.query_params)
+            ? { query_params: cleanQueryParams }
+            : {};
+        })(),
+        ...(() => {
+          const cleanHeaders = withoutEmptyKeyRows(editHeaders);
+          return JSON.stringify(cleanHeaders) !== JSON.stringify(original.headers)
+            ? { headers: cleanHeaders }
+            : {};
+        })(),
         ...(JSON.stringify(auth) !== JSON.stringify(original.auth) ? { auth } : {}),
         ...(() => {
           const serialized = serializeBodyForStorage();
@@ -1261,7 +1806,9 @@
           ? { id: updated.id, project_id: updated.project_id, name: updated.name, method: updated.method, url: updated.url, updated_at: updated.updated_at }
           : r,
       );
+      autoSaveStatus = "saved";
     } catch (err) {
+      autoSaveStatus = "error";
       errorMessage = describeError(err);
     }
   }
@@ -1420,20 +1967,20 @@
     URL.revokeObjectURL(url);
   }
 
-  function addHeader() {
-    editHeaders = [...editHeaders, { key: "", value: "", enabled: true, description: "" }];
+  function growHeaders() {
+    editHeaders = withTrailingEmptyRow(editHeaders, () => ({ key: "", value: "", enabled: true, description: "" }));
   }
 
   function removeHeader(index: number) {
-    editHeaders = editHeaders.filter((_, i) => i !== index);
+    editHeaders = withTrailingEmptyRow(editHeaders.filter((_, i) => i !== index), () => ({ key: "", value: "", enabled: true, description: "" }));
   }
 
-  function addQueryParam() {
-    editQueryParams = [...editQueryParams, { key: "", value: "", enabled: true }];
+  function growQueryParams() {
+    editQueryParams = withTrailingEmptyRow(editQueryParams, () => ({ key: "", value: "", enabled: true }));
   }
 
   function removeQueryParam(index: number) {
-    editQueryParams = editQueryParams.filter((_, i) => i !== index);
+    editQueryParams = withTrailingEmptyRow(editQueryParams.filter((_, i) => i !== index), () => ({ key: "", value: "", enabled: true }));
   }
 
   async function loadVariables() {
@@ -1454,35 +2001,41 @@
     }
   }
 
-  async function createVariable(event: Event) {
-    event.preventDefault();
-    if (!selectedProjectId || !newVarKey.trim()) return;
+  async function commitNewGlobalVar() {
+    const key = newGlobalVarDraft.key.trim();
+    if (!selectedProjectId || !key) return;
     try {
-      if (newVarScope === "global") {
-        await api.createVariable({
-          scope: "global",
-          project_id: selectedProjectId,
-          key: newVarKey.trim(),
-          value: newVarValue,
-          is_secret: newVarIsSecret,
-          is_local: newVarIsLocal,
-          enabled: true,
-        });
-      } else if (newVarScope === "environment" && selectedEnvironmentId) {
-        await api.createVariable({
-          scope: "environment",
-          environment_id: selectedEnvironmentId,
-          key: newVarKey.trim(),
-          value: newVarValue,
-          is_secret: newVarIsSecret,
-          is_local: newVarIsLocal,
-          enabled: true,
-        });
-      }
-      newVarKey = "";
-      newVarValue = "";
-      newVarIsSecret = false;
-      newVarIsLocal = false;
+      await api.createVariable({
+        scope: "global",
+        project_id: selectedProjectId,
+        key,
+        value: newGlobalVarDraft.value,
+        is_secret: newGlobalVarDraft.isSecret,
+        is_local: newGlobalVarDraft.isLocal,
+        enabled: true,
+      });
+      newGlobalVarDraft = emptyVarDraft();
+      await loadVariables();
+      await refreshDiagnostics();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function commitNewEnvVar() {
+    const key = newEnvVarDraft.key.trim();
+    if (!selectedEnvironmentId || !key) return;
+    try {
+      await api.createVariable({
+        scope: "environment",
+        environment_id: selectedEnvironmentId,
+        key,
+        value: newEnvVarDraft.value,
+        is_secret: newEnvVarDraft.isSecret,
+        is_local: newEnvVarDraft.isLocal,
+        enabled: true,
+      });
+      newEnvVarDraft = emptyVarDraft();
       await loadVariables();
       await refreshDiagnostics();
     } catch (err) {
@@ -1527,6 +2080,80 @@
       requestDiagnostics = await api.diagnoseRequest(selectedRequest.id, selectedEnvironmentId);
     } catch {
       requestDiagnostics = null;
+    }
+  }
+
+  // Fills in an unresolved {{variable}} straight from the "Unresolved variables" warning —
+  // no trip to the Environments screen needed. Lands in the active environment if one is
+  // selected (matching what actually resolved it), otherwise the project's global scope.
+  // Every diagnostic that depends on variables (the warning banner, tab badges, URL preview)
+  // is re-fetched right after, so the fix is reflected everywhere immediately.
+  async function addMissingVariable(name: string) {
+    if (!selectedProjectId) return;
+    const value = (missingVarDrafts[name] ?? "").trim();
+    if (!value) return;
+    try {
+      if (selectedEnvironmentId) {
+        await api.createVariable({
+          scope: "environment",
+          environment_id: selectedEnvironmentId,
+          key: name,
+          value,
+          is_secret: false,
+          is_local: false,
+          enabled: true,
+        });
+      } else {
+        await api.createVariable({
+          scope: "global",
+          project_id: selectedProjectId,
+          key: name,
+          value,
+          is_secret: false,
+          is_local: false,
+          enabled: true,
+        });
+      }
+      delete missingVarDrafts[name];
+      if (missingVarHover?.name === name) missingVarHover = null;
+      await loadVariables();
+      await refreshDiagnostics();
+      await refreshUrlPreview();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Shared hover-to-add-value popover for missing variables, used both by the "Unresolved
+  // variables" warning banner and by {{tokens}} highlighted inline in the URL bar. Positioned
+  // via JS (not CSS :hover) and rendered as a top-level portal — a plain CSS :hover popover
+  // nested inside the URL bar gets clipped, since the bar also needs overflow-x clipping for
+  // long URLs and CSS doesn't allow "clip X, don't clip Y" (a non-"visible" axis paired with
+  // "visible" silently becomes "auto", which still clips).
+  let missingVarHover = $state<{ name: string; top: number; left: number } | null>(null);
+  let missingVarHoverHideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function showMissingVarPopover(name: string, target: HTMLElement) {
+    if (missingVarHoverHideTimer) {
+      clearTimeout(missingVarHoverHideTimer);
+      missingVarHoverHideTimer = null;
+    }
+    const rect = target.getBoundingClientRect();
+    missingVarHover = { name, top: rect.bottom, left: rect.left };
+  }
+
+  function scheduleHideMissingVarPopover() {
+    if (missingVarHoverHideTimer) clearTimeout(missingVarHoverHideTimer);
+    missingVarHoverHideTimer = setTimeout(() => {
+      missingVarHover = null;
+      missingVarHoverHideTimer = null;
+    }, 150);
+  }
+
+  function cancelHideMissingVarPopover() {
+    if (missingVarHoverHideTimer) {
+      clearTimeout(missingVarHoverHideTimer);
+      missingVarHoverHideTimer = null;
     }
   }
 
@@ -1911,7 +2538,7 @@
         } catch {
           // ignore auto-sync errors
         }
-      }, 60000);
+      }, autoSyncIntervalMs);
     }
     return () => {
       if (autoSyncTimer) {
@@ -1923,7 +2550,198 @@
 </script>
 
 
-<div class="app">
+<div class="app-shell" data-theme={themeMode === "dark" ? "dark" : "light"}>
+  {#if screensRailVisible}
+  <nav class="screens-rail">
+    <div class="rail-brand">
+      <span>Lightpost</span>
+      <button type="button" class="icon-btn" title="Hide screens menu" onclick={() => (screensRailVisible = false)}>«</button>
+    </div>
+    <div class="rail-screens">
+      {#each SCREENS as s (s.id)}
+        <button
+          type="button"
+          class="rail-screen"
+          class:active={activeScreen === s.id}
+          onclick={() => (activeScreen = s.id)}
+        >
+          <span>{s.label}</span>
+        </button>
+      {/each}
+    </div>
+    <div class="rail-budget">
+      <span class="rail-budget-label">Resource budget</span>
+      {#if systemDiagnostics}
+        <span class="rail-budget-value">{formatByteSize(systemDiagnostics.process_rss_bytes)}</span>
+        <span class="rail-budget-meta">{openTabs.length} tabs open · DB {formatByteSize(systemDiagnostics.db_size_bytes + systemDiagnostics.db_wal_size_bytes)}</span>
+      {:else}
+        <span class="rail-budget-meta">Loading…</span>
+      {/if}
+    </div>
+  </nav>
+  {:else}
+  <button type="button" class="sidebar-expand-btn" title="Show screens menu" onclick={() => (screensRailVisible = true)}>»</button>
+  {/if}
+
+  {#snippet noProjectPicker(screenName: string)}
+    <section class="screen-page">
+      <div class="screen-page-header">
+        <span class="screen-kicker">{screenName}</span>
+        <h1 class="screen-title">Pick a project</h1>
+      </div>
+      {#if projects.length}
+        <div class="screen-page-body">
+          <select
+            class="project-picker-select"
+            value=""
+            onchange={(e) => {
+              const id = (e.target as HTMLSelectElement).value;
+              if (id) selectProject(id);
+            }}
+          >
+            <option value="" disabled>Choose a project…</option>
+            {#each projects as p (p.id)}
+              <option value={p.id}>{p.name}</option>
+            {/each}
+          </select>
+        </div>
+      {:else}
+        <p class="screen-empty">No projects yet — create one from the Workspace screen.</p>
+      {/if}
+    </section>
+  {/snippet}
+
+  {#snippet projectSwitcher()}
+    <select
+      class="project-picker-select project-picker-select-sm"
+      value={selectedProjectId ?? ""}
+      onchange={(e) => {
+        const id = (e.target as HTMLSelectElement).value;
+        if (id) selectProject(id);
+      }}
+    >
+      {#each projects as p (p.id)}
+        <option value={p.id}>{p.name}</option>
+      {/each}
+    </select>
+  {/snippet}
+
+  {#snippet expandedResponseView()}
+    <section class="screen-page">
+      <div class="screen-page-header">
+        <span class="screen-kicker">Response</span>
+        <div class="screen-title-row">
+          {#if selectedRequest}
+            <h1 class="screen-title">{selectedRequest.method} {selectedRequest.name}</h1>
+          {:else}
+            <h1 class="screen-title">No request open</h1>
+          {/if}
+          <button type="button" class="btn-ghost btn-xs" title="Back to Workspace" onclick={() => (responseExpanded = false)}>← Back to Workspace</button>
+        </div>
+      </div>
+
+      {#if !selectedRequest}
+        <p class="screen-empty">Open a request in the Workspace, then send it to see its response here.</p>
+      {:else if !activeResponse}
+        <p class="screen-empty">Send this request to see the response here.</p>
+      {:else}
+        <div class="response-screen-body">
+          <aside class="response-screen-side">
+            <div class="response-screen-stat-block">
+              <span class="screen-kicker">Status</span>
+              <div class="response-screen-status" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>
+                {activeResponse.status} {activeResponse.status_text}
+              </div>
+              <div class="response-screen-path">{selectedRequest.method} {selectedRequest.url}</div>
+            </div>
+            <div class="response-screen-metrics">
+              <div class="response-screen-metric">
+                <span class="screen-kicker">Time</span>
+                <div class="response-screen-metric-value">{activeResponse.duration_ms} ms</div>
+              </div>
+              <div class="response-screen-metric">
+                <span class="screen-kicker">Size</span>
+                <div class="response-screen-metric-value">{formatByteSize(activeResponse.body_size)}</div>
+              </div>
+              <div class="response-screen-metric">
+                <span class="screen-kicker">Held in RAM</span>
+                <div class="response-screen-metric-value">{formatByteSize(Math.min(activeResponse.body_size, 256 * 1024))}</div>
+              </div>
+              <div class="response-screen-metric">
+                <span class="screen-kicker">Storage</span>
+                <div class="response-screen-metric-value">{activeResponse.body_size > 256 * 1024 ? "Disk" : "Inline"}</div>
+              </div>
+            </div>
+            <div class="response-screen-tests">
+              <span class="screen-kicker">Tests</span>
+              {#if activeResponseTests.length}
+                {#each activeResponseTests as t, i (i)}
+                  <div class="response-screen-test-row">
+                    <span class:status-ok={t.passed} class:status-err={!t.passed}>{t.passed ? "PASS" : "FAIL"}</span>
+                    <span>{t.name}</span>
+                  </div>
+                {/each}
+              {:else}
+                <p class="screen-empty-inline">No tests ran for this request.</p>
+              {/if}
+            </div>
+          </aside>
+
+          <div class="response-screen-main">
+            <div class="response-subtabs">
+              <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>Body</button>
+              <button type="button" class="response-subtab" class:active={responseSubTab === "headers"} onclick={() => (responseSubTab = "headers")}>
+                Headers {#if activeResponse.headers?.length}<span class="tab-badge">{activeResponse.headers.length}</span>{/if}
+              </button>
+              <button type="button" class="response-subtab" class:active={responseSubTab === "cookies"} onclick={() => (responseSubTab = "cookies")}>
+                Cookies {#if activeResponse.cookies?.length}<span class="tab-badge">{activeResponse.cookies.length}</span>{/if}
+              </button>
+              <div class="response-stat-spacer"></div>
+              {#if responseSubTab === "body"}
+                <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>Pretty</button>
+                <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>Raw</button>
+              {/if}
+              <button type="button" class="btn-ghost btn-xs" onclick={copyResponseBody}>Copy</button>
+              <button type="button" class="btn-ghost btn-xs" onclick={downloadResponseBody}>Save to file</button>
+            </div>
+            <div class="response-screen-content">
+              {#if responseSubTab === "body"}
+                <pre class="body-view screen-body-view">{prettyResponseBody}</pre>
+                {#if activeResponseTruncated}<p class="hint">(truncated — body is larger than the preview cap)</p>{/if}
+              {:else if responseSubTab === "headers"}
+                {#if activeResponse.headers?.length}
+                  <div class="headers-list">
+                    {#each activeResponse.headers as h}
+                      <div class="header-line"><strong>{h.key}:</strong> {h.value}</div>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="empty">This response had no headers.</p>
+                {/if}
+              {:else if responseSubTab === "cookies"}
+                {#if activeResponse.cookies?.length}
+                  <div class="headers-list">
+                    {#each activeResponse.cookies as c}
+                      <div class="header-line"><strong>{c.name}:</strong> {c.value}</div>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="empty">No cookies were set by this response.</p>
+                {/if}
+              {/if}
+            </div>
+          </div>
+        </div>
+      {/if}
+    </section>
+  {/snippet}
+
+  <div class="screen-area">
+  {#if activeScreen === "workspace"}
+  {#if responseExpanded}
+    {@render expandedResponseView()}
+  {:else}
+  <div class="app">
   <header class="topbar">
     <div class="topbar-left">
       <span class="brand">⚡ Light Postman</span>
@@ -1931,20 +2749,51 @@
     <div class="topbar-center">
       {#if selectedProjectId}
         <div class="env-bar">
-          <select bind:value={selectedEnvironmentId} onchange={loadVariables} class="env-select">
-            <option value={null}>No Environment</option>
+          <select
+            value={selectedEnvironmentId ?? "__none__"}
+            class="env-select"
+            onchange={(e) => {
+              const target = e.target as HTMLSelectElement;
+              const val = target.value;
+              if (val === "__new__") {
+                target.value = selectedEnvironmentId ?? "__none__";
+                quickCreateEnvironment();
+                return;
+              }
+              selectedEnvironmentId = val === "__none__" ? null : val;
+              loadVariables();
+            }}
+          >
+            <option value="__new__">+ Add new environment…</option>
+            <option value="__none__">No Environment</option>
             {#each environments as env (env.id)}
               <option value={env.id}>{env.name}</option>
             {/each}
           </select>
-          <form class="env-new-form" onsubmit={createEnvironment}>
-            <input placeholder="+ new environment" bind:value={newEnvironmentName} class="env-new-input" />
-          </form>
+          {#if selectedProjectId}
+            {@const isDefault = projects.find((p) => p.id === selectedProjectId)?.default_environment_id === selectedEnvironmentId}
+            <button
+              type="button"
+              class="icon-btn"
+              class:active={isDefault}
+              title={isDefault ? "Default environment for this project — click to unset" : "Set as this project's default environment"}
+              onclick={toggleDefaultEnvironment}
+            >
+              {isDefault ? "★" : "☆"}
+            </button>
+          {/if}
+          {#if renamingEnvironmentId}
+            <form class="inline-form" onsubmit={submitRenameEnvironment}>
+              <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
+              <button type="submit" title="Save">✓</button>
+              <button type="button" title="Cancel" onclick={() => (renamingEnvironmentId = null)}>✕</button>
+            </form>
+          {/if}
           <button
             type="button"
             class="icon-btn"
             title="Manage Variables"
-            onclick={() => { showVariables = true; loadVariables(); }}
+            onclick={() => { loadVariables(); activeScreen = "environments"; }}
           >
             👁
           </button>
@@ -1962,6 +2811,10 @@
       {/if}
     </div>
     <div class="topbar-right">
+      <button type="button" class="palette-trigger" title="Search or run a command" onclick={openPalette}>
+        <span>Search or run a command</span>
+        <span class="palette-kbd">⌘K</span>
+      </button>
       <button
         type="button"
         class="btn-ghost"
@@ -1970,10 +2823,9 @@
       >
         ✨ {aiConfigured ? "Ask AI" : "Set up AI"}
       </button>
-      <button type="button" class="btn-ghost" title="Import a Postman collection (.json)" onclick={() => { showCollectionImport = true; collectionImportReport = null; collectionImportError = ""; }}>
-        📥 Import Collection
+      <button type="button" class="btn-ghost" title="Import a Postman collection, environment, or cURL command" onclick={() => { importActiveTab = "collection"; collectionImportReport = null; collectionImportError = ""; activeScreen = "import"; }}>
+        📥 Import
       </button>
-      <button type="button" class="btn-ghost" title="Import a request from a cURL command" onclick={() => (showCurlImport = true)}>🔗 Import cURL</button>
     </div>
   </header>
 
@@ -1988,32 +2840,66 @@
   {/if}
 
   <div class="workspace">
+    {#if sidebarVisible}
     <aside class="sidebar" style="width: {sidebarWidth}px">
       <div class="sidebar-header">
         <span class="sidebar-title">Projects</span>
+        <div class="sidebar-header-actions">
+          <button type="button" class="icon-btn" title="New project" onclick={quickCreateProject}>+</button>
+          <button type="button" class="icon-btn" title="Hide sidebar" onclick={() => (sidebarVisible = false)}>«</button>
+        </div>
       </div>
-      <form class="new-project-form" onsubmit={createProject}>
-        <input placeholder="New project name" bind:value={newProjectName} />
-        <button type="submit" class="btn-icon-add" title="Create project">+</button>
-      </form>
+
+      <div class="project-search-box">
+        <input
+          type="search"
+          placeholder="Search projects…"
+          bind:value={projectSearchQuery}
+          class="project-search-input"
+        />
+        {#if projectSearchQuery}
+          <span class="request-count-badge">{filteredProjects.length}/{projects.length}</span>
+        {/if}
+      </div>
 
       <div class="project-list">
-        {#each projects as project (project.id)}
+        {#each filteredProjects as project (project.id)}
           <div class="project-node">
             <div class="project-row" class:active={project.id === selectedProjectId}>
               {#if renamingProjectId === project.id}
                 <form class="inline-form" onsubmit={submitRenameProject}>
-                  <input bind:value={renameProjectValue} />
+                  <input bind:value={renameProjectValue} use:focusOnMount onblur={submitRenameProject} />
                   <button type="submit" title="Save">✓</button>
                   <button type="button" title="Cancel" onclick={() => (renamingProjectId = null)}>✕</button>
                 </form>
               {:else}
-                <button type="button" class="project-link" onclick={() => selectProject(project.id)}>
+                <button type="button" class="project-link" onclick={() => selectProject(project.id)} ondblclick={() => startRenameProject(project)}>
                   <span class="folder-icon">{project.id === selectedProjectId ? "📂" : "📁"}</span>
                   <span class="project-name">{project.name}</span>
                 </button>
                 <div class="project-row-actions">
-                  <button class="icon-btn" title="Export Postman Collection v2.1" onclick={() => exportPostmanCollectionAction(project.id)}>⤓</button>
+                  <button class="icon-btn" title="Add request" onclick={() => quickCreateRequest(project.id)}>+</button>
+                  <button
+                    class="icon-btn"
+                    title="Import a Postman collection, cURL command, or project file into this project"
+                    onclick={async () => {
+                      await selectProject(project.id);
+                      collectionImportTarget = "current";
+                      importActiveTab = "collection";
+                      collectionImportReport = null;
+                      collectionImportError = "";
+                      activeScreen = "import";
+                    }}
+                  >📥</button>
+                  <button class="icon-btn" title="Export as Postman Collection v2.1" onclick={() => exportPostmanCollectionAction(project.id)}>⤓</button>
+                  <button
+                    class="icon-btn"
+                    title="Export as this app's own project file (.json) — used for git sync"
+                    onclick={async () => {
+                      await selectProject(project.id);
+                      await exportProjectFileAction();
+                    }}
+                  >💾</button>
                   <button class="icon-btn" title="Rename" onclick={() => startRenameProject(project)}>✎</button>
                   <button class="icon-btn" title="Delete" onclick={() => deleteProject(project.id)}>🗑</button>
                 </div>
@@ -2034,36 +2920,28 @@
                   {/if}
                 </div>
 
-                <form class="new-request-form" onsubmit={createRequest}>
-                  <select bind:value={newRequestMethod} class="method-select-sm">
-                    <option>GET</option>
-                    <option>POST</option>
-                    <option>PUT</option>
-                    <option>PATCH</option>
-                    <option>DELETE</option>
-                    <option>HEAD</option>
-                    <option>OPTIONS</option>
-                    <option>TRACE</option>
-                  </select>
-                  <input placeholder="Name" bind:value={newRequestName} />
-                  <input placeholder="URL" bind:value={newRequestUrl} />
-                  <button type="submit" class="btn-icon-add" title="Add request">+</button>
-                </form>
-
                 {#if loadingRequests}
                   <p class="hint">Loading…</p>
                 {:else}
                   <ul class="request-list">
                     {#each visibleRequests as req (req.id)}
                       <li class="request-item" class:active={req.id === selectedRequest?.id}>
-                        <button type="button" class="request-link" onclick={() => openRequest(req.id)}>
-                          <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
-                          <span class="request-name">{req.name}</span>
-                        </button>
-                        <button class="icon-btn icon-btn-ghost" title="Delete" onclick={() => deleteRequest(req.id)}>🗑</button>
+                        {#if renamingRequestId === req.id && req.id !== selectedRequest?.id}
+                          <form class="inline-form" onsubmit={submitRenameRequest}>
+                            <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
+                            <button type="submit" title="Save">✓</button>
+                            <button type="button" title="Cancel" onclick={() => (renamingRequestId = null)}>✕</button>
+                          </form>
+                        {:else}
+                          <button type="button" class="request-link" onclick={() => openRequest(req.id)} ondblclick={() => startRenameRequest(req.id, req.name)}>
+                            <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
+                            <span class="request-name">{req.name}</span>
+                          </button>
+                          <button class="icon-btn icon-btn-ghost" title="Delete" onclick={() => deleteRequest(req.id)}>🗑</button>
+                        {/if}
                       </li>
                     {:else}
-                      <li class="empty">{requestSearchQuery ? "No matching requests." : "No requests yet — add one above, or import a Postman collection / cURL command."}</li>
+                      <li class="empty">{requestSearchQuery ? "No matching requests." : "No requests yet — use the + next to the project name above, or import a Postman collection / cURL command."}</li>
                     {/each}
                   </ul>
 
@@ -2079,7 +2957,7 @@
             {/if}
           </div>
         {:else}
-          <p class="empty">No projects yet — create one above to get started.</p>
+          <p class="empty">{projectSearchQuery ? "No matching projects." : "No projects yet — create one above to get started."}</p>
         {/each}
       </div>
     </aside>
@@ -2089,17 +2967,21 @@
       class:resizing={sidebarResizing}
       onmousedown={startSidebarResize}
       onkeydown={(e) => {
+        sidebarManuallyResized = true;
         if (e.key === "ArrowLeft") sidebarWidth = Math.max(200, sidebarWidth - 16);
-        else if (e.key === "ArrowRight") sidebarWidth = Math.min(480, sidebarWidth + 16);
+        else if (e.key === "ArrowRight") sidebarWidth = Math.min(600, sidebarWidth + 16);
       }}
       role="slider"
       aria-orientation="vertical"
       aria-label="Resize sidebar"
       aria-valuenow={sidebarWidth}
       aria-valuemin={200}
-      aria-valuemax={480}
+      aria-valuemax={600}
       tabindex="0"
     ></div>
+    {:else}
+    <button type="button" class="sidebar-expand-btn" title="Show sidebar" onclick={() => (sidebarVisible = true)}>»</button>
+    {/if}
 
     <main class="main">
       {#if !selectedProjectId}
@@ -2149,13 +3031,28 @@
             <span class="breadcrumb-icon">🧭</span>
             <span class="breadcrumb-path">{projects.find((p) => p.id === selectedProjectId)?.name ?? ""}</span>
             <span class="breadcrumb-sep">›</span>
-            <span class="breadcrumb-current">{selectedRequest.name}</span>
+            {#if renamingRequestId === selectedRequest.id}
+              <form class="inline-form" onsubmit={submitRenameRequest}>
+                <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
+                <button type="submit" title="Save">✓</button>
+                <button type="button" title="Cancel" onclick={() => (renamingRequestId = null)}>✕</button>
+              </form>
+            {:else}
+              <button
+                type="button"
+                class="breadcrumb-current breadcrumb-current-btn"
+                title="Click to rename"
+                onclick={() => startRenameRequest(selectedRequest!.id, selectedRequest!.name)}
+              >
+                {selectedRequest.name} <span class="breadcrumb-edit-hint">✎</span>
+              </button>
+            {/if}
           </div>
 
           <form class="request-bar" onsubmit={(e) => { e.preventDefault(); saveRequest(); }}>
             <div class="request-bar-row">
               <div class="url-pill">
-                <select bind:value={editMethod} class="method-select method-{editMethod.toLowerCase()}">
+                <select bind:value={editMethod} class="method-select method-{editMethod.toLowerCase()}" onchange={scheduleAutoSave}>
                   <option>GET</option>
                   <option>POST</option>
                   <option>PUT</option>
@@ -2166,7 +3063,34 @@
                   <option>TRACE</option>
                 </select>
                 <span class="url-pill-divider"></span>
-                <input placeholder="Enter request URL" bind:value={editUrl} class="url-input" />
+                <div class="url-input-shell">
+                  <div class="url-token-overlay" aria-hidden="true">
+                    {#each urlTokens as tok, i (i)}
+                      {#if tok.type === "text"}
+                        <span class="url-token-text">{tok.text}</span>
+                      {:else}
+                        {@const missing = requestDiagnostics?.all_missing?.includes(tok.name) ?? false}
+                        <span
+                          class="url-token-var"
+                          class:missing
+                          role="presentation"
+                          onmouseenter={(e) => missing && showMissingVarPopover(tok.name, e.currentTarget as HTMLElement)}
+                          onmouseleave={() => missing && scheduleHideMissingVarPopover()}
+                        >
+                          {tok.raw}
+                        </span>
+                      {/if}
+                    {/each}
+                  </div>
+                  <input
+                    placeholder="https://api.example.com/... or paste a curl command"
+                    bind:value={editUrl}
+                    class="url-input url-input-ghost"
+                    oninput={scheduleAutoSave}
+                    onpaste={handleUrlPaste}
+                    onscroll={syncUrlOverlayScroll}
+                  />
+                </div>
               </div>
               <div class="send-action">
                 {#if sending}
@@ -2177,11 +3101,42 @@
               </div>
             </div>
             <div class="request-bar-row secondary">
-              <input placeholder="Request name" bind:value={editName} class="name-input" />
-              <button type="submit" class="btn-save" title="Save changes">💾 Save</button>
+              <span class="save-status" class:is-error={autoSaveStatus === "error"}>
+                {#if autoSaveStatus === "saving"}Saving…
+                {:else if autoSaveStatus === "unsaved"}Unsaved changes…
+                {:else if autoSaveStatus === "error"}⚠ Save failed
+                {:else}✓ Saved{/if}
+              </span>
+              {#if curlDetectedFeedback}
+                <span class="hint">{curlDetectedFeedback}</span>
+              {/if}
               <button type="button" class="icon-btn" title="Delete request" onclick={() => deleteRequest(selectedRequest!.id)}>🗑</button>
             </div>
           </form>
+
+          {#if missingVarHover}
+            <div
+              class="missing-var-popover-portal"
+              role="group"
+              aria-label="Add value for {missingVarHover.name}"
+              style="top: {missingVarHover.top}px; left: {missingVarHover.left}px;"
+              onmouseenter={cancelHideMissingVarPopover}
+              onmouseleave={scheduleHideMissingVarPopover}
+            >
+              <input
+                placeholder="Value for {missingVarHover.name}"
+                value={missingVarDrafts[missingVarHover.name] ?? ""}
+                oninput={(e) => (missingVarDrafts[missingVarHover!.name] = (e.target as HTMLInputElement).value)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addMissingVariable(missingVarHover!.name);
+                  }
+                }}
+              />
+              <button type="button" onclick={() => addMissingVariable(missingVarHover!.name)}>Add</button>
+            </div>
+          {/if}
 
           {#if urlPreview}
             <div class="url-preview-bar">
@@ -2193,8 +3148,19 @@
           {/if}
 
           {#if requestDiagnostics?.all_missing?.length}
-            <div class="warn-banner">
-              ⚠️ Unresolved variables: <strong>{requestDiagnostics.all_missing.join(", ")}</strong>
+            <div class="warn-banner missing-vars-banner">
+              ⚠️ Unresolved variables:
+              {#each requestDiagnostics.all_missing as varName (varName)}
+                <span
+                  class="missing-var-chip"
+                  role="presentation"
+                  onmouseenter={(e) => showMissingVarPopover(varName, e.currentTarget as HTMLElement)}
+                  onmouseleave={scheduleHideMissingVarPopover}
+                >
+                  <strong>{varName}</strong>
+                </span>
+              {/each}
+              <span class="hint">(hover a name to fill it in — saved to {selectedEnvironmentId ? "the active environment" : "this project's global variables"})</span>
             </div>
           {/if}
 
@@ -2203,16 +3169,16 @@
               Params
               {#if requestDiagnostics?.query_params_missing?.length}
                 <span class="tab-badge-warn" title="Missing in Params: {requestDiagnostics.query_params_missing.join(', ')}">⚠ {requestDiagnostics.query_params_missing.length}</span>
-              {:else if editQueryParams.length}
-                <span class="tab-badge">{editQueryParams.length}</span>
+              {:else if withoutEmptyKeyRows(editQueryParams).length}
+                <span class="tab-badge">{withoutEmptyKeyRows(editQueryParams).length}</span>
               {/if}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "headers"} onclick={() => (activeEditorTab = "headers")}>
               Headers
               {#if requestDiagnostics?.headers_missing?.length}
                 <span class="tab-badge-warn" title="Missing in Headers: {requestDiagnostics.headers_missing.join(', ')}">⚠ {requestDiagnostics.headers_missing.length}</span>
-              {:else if editHeaders.length}
-                <span class="tab-badge">{editHeaders.length}</span>
+              {:else if withoutEmptyKeyRows(editHeaders).length}
+                <span class="tab-badge">{withoutEmptyKeyRows(editHeaders).length}</span>
               {/if}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "auth"} onclick={() => (activeEditorTab = "auth")}>
@@ -2249,42 +3215,34 @@
               <div class="params-table">
                 {#each editQueryParams as param, i (i)}
                   <div class="params-row">
-                    <input type="checkbox" bind:checked={param.enabled} title="Enabled" />
-                    <input placeholder="Key" bind:value={param.key} />
-                    <input placeholder="Value" bind:value={param.value} />
-                    <button type="button" class="icon-btn" title="Remove" onclick={() => removeQueryParam(i)}>🗑</button>
+                    <input type="checkbox" bind:checked={param.enabled} title="Enabled" onchange={scheduleAutoSave} />
+                    <input placeholder="Key" bind:value={param.key} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
+                    <input placeholder="Value" bind:value={param.value} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
+                    {#if i < editQueryParams.length - 1 || param.key.trim()}
+                      <button type="button" class="icon-btn" title="Remove" onclick={() => { removeQueryParam(i); scheduleAutoSave(); }}>🗑</button>
+                    {/if}
                   </div>
-                {:else}
-                  <p class="hint">No query parameters.</p>
                 {/each}
-                <div class="params-row">
-                  <button type="button" onclick={addQueryParam}>Add param</button>
-                  <button type="button" class="btn-primary" onclick={saveRequest}>Save params</button>
-                </div>
               </div>
 
             {:else if activeEditorTab === "headers"}
               <div class="params-table">
                 {#each editHeaders as header, i (i)}
                   <div class="params-row">
-                    <input type="checkbox" bind:checked={header.enabled} title="Enabled" />
-                    <input placeholder="Key" bind:value={header.key} />
-                    <input placeholder="Value" bind:value={header.value} />
-                    <input placeholder="Description (optional)" bind:value={header.description} />
-                    <button type="button" class="icon-btn" title="Remove" onclick={() => removeHeader(i)}>🗑</button>
+                    <input type="checkbox" bind:checked={header.enabled} title="Enabled" onchange={scheduleAutoSave} />
+                    <input placeholder="Key" bind:value={header.key} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
+                    <input placeholder="Value" bind:value={header.value} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
+                    <input placeholder="Description (optional)" bind:value={header.description} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
+                    {#if i < editHeaders.length - 1 || header.key.trim()}
+                      <button type="button" class="icon-btn" title="Remove" onclick={() => { removeHeader(i); scheduleAutoSave(); }}>🗑</button>
+                    {/if}
                   </div>
-                {:else}
-                  <p class="hint">No headers.</p>
                 {/each}
-                <div class="params-row">
-                  <button type="button" onclick={addHeader}>Add header</button>
-                  <button type="button" class="btn-primary" onclick={saveRequest}>Save headers</button>
-                </div>
               </div>
 
             {:else if activeEditorTab === "auth"}
               <div class="params-table">
-                <select bind:value={editAuthType}>
+                <select bind:value={editAuthType} onchange={scheduleAutoSave}>
                   <option value="none">No Auth</option>
                   <option value="bearer">Bearer Token</option>
                   <option value="basic">Basic Auth</option>
@@ -2292,49 +3250,46 @@
                 </select>
                 {#if editAuthType === "bearer"}
                   <div class="params-row">
-                    <input placeholder="Token" bind:value={editAuthBearerToken} />
+                    <input placeholder="Token" bind:value={editAuthBearerToken} oninput={scheduleAutoSave} />
                   </div>
                 {:else if editAuthType === "basic"}
                   <div class="params-row">
-                    <input placeholder="Username" bind:value={editAuthBasicUsername} />
-                    <input placeholder="Password" type="password" bind:value={editAuthBasicPassword} />
+                    <input placeholder="Username" bind:value={editAuthBasicUsername} oninput={scheduleAutoSave} />
+                    <input placeholder="Password" type="password" bind:value={editAuthBasicPassword} oninput={scheduleAutoSave} />
                   </div>
                 {:else if editAuthType === "api_key"}
                   <div class="params-row">
-                    <input placeholder="Key" bind:value={editAuthApiKeyKey} />
-                    <input placeholder="Value" bind:value={editAuthApiKeyValue} />
-                    <select bind:value={editAuthApiKeyLocation}>
+                    <input placeholder="Key" bind:value={editAuthApiKeyKey} oninput={scheduleAutoSave} />
+                    <input placeholder="Value" bind:value={editAuthApiKeyValue} oninput={scheduleAutoSave} />
+                    <select bind:value={editAuthApiKeyLocation} onchange={scheduleAutoSave}>
                       <option value="header">Header</option>
                       <option value="query">Query Param</option>
                     </select>
                   </div>
                 {/if}
-                <div class="params-row">
-                  <button type="button" class="btn-primary" onclick={saveRequest}>Save auth</button>
-                </div>
               </div>
 
             {:else if activeEditorTab === "body"}
               <div class="params-table">
                 <div class="body-mode-bar">
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="raw" /> Raw
+                    <input type="radio" bind:group={editBodyType} value="raw" onchange={scheduleAutoSave} /> Raw
                   </label>
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="form-data" /> Form Data
+                    <input type="radio" bind:group={editBodyType} value="form-data" onchange={scheduleAutoSave} /> Form Data
                   </label>
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="x-www-form-urlencoded" /> URL Encoded
+                    <input type="radio" bind:group={editBodyType} value="x-www-form-urlencoded" onchange={scheduleAutoSave} /> URL Encoded
                   </label>
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="binary" /> Binary
+                    <input type="radio" bind:group={editBodyType} value="binary" onchange={scheduleAutoSave} /> Binary
                   </label>
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="graphql" /> GraphQL
+                    <input type="radio" bind:group={editBodyType} value="graphql" onchange={scheduleAutoSave} /> GraphQL
                   </label>
                   {#if editBodyType === "raw"}
-                    <button type="button" onclick={() => { if (!editBody) editBody = "{\n  \n}"; }}>JSON template</button>
-                    <button type="button" onclick={() => { editBody = ""; }}>Clear body</button>
+                    <button type="button" onclick={() => { if (!editBody) editBody = "{\n  \n}"; scheduleAutoSave(); }}>JSON template</button>
+                    <button type="button" onclick={() => { editBody = ""; scheduleAutoSave(); }}>Clear body</button>
                   {/if}
                 </div>
 
@@ -2344,50 +3299,45 @@
                     bind:value={editBody}
                     class="body-input"
                     rows="8"
+                    oninput={scheduleAutoSave}
                   ></textarea>
                 {:else if editBodyType === "form-data"}
                   <div class="params-table">
                     {#each editFormDataItems as item, i (i)}
                       <div class="params-row">
-                        <input type="checkbox" bind:checked={item.enabled} title="Enabled" />
-                        <input placeholder="Key" bind:value={item.key} />
+                        <input type="checkbox" bind:checked={item.enabled} title="Enabled" onchange={scheduleAutoSave} />
+                        <input placeholder="Key" bind:value={item.key} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
                         {#if item.is_file}
-                          <input placeholder="File path" bind:value={item.file_path} />
+                          <input placeholder="File path" bind:value={item.file_path} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
                         {:else}
-                          <input placeholder="Value" bind:value={item.value} />
+                          <input placeholder="Value" bind:value={item.value} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
                         {/if}
                         <label class="checkbox-label" title="Send this field as a file (path on disk) instead of text">
-                          <input type="checkbox" bind:checked={item.is_file} /> File
+                          <input type="checkbox" bind:checked={item.is_file} onchange={scheduleAutoSave} /> File
                         </label>
-                        <button type="button" class="icon-btn" title="Remove" onclick={() => removeFormDataItem(i)}>🗑</button>
+                        {#if i < editFormDataItems.length - 1 || item.key.trim()}
+                          <button type="button" class="icon-btn" title="Remove" onclick={() => { removeFormDataItem(i); scheduleAutoSave(); }}>🗑</button>
+                        {/if}
                       </div>
-                    {:else}
-                      <p class="hint">No form fields.</p>
                     {/each}
-                    <div class="params-row">
-                      <button type="button" onclick={addFormDataItem}>Add field</button>
-                    </div>
                   </div>
                 {:else if editBodyType === "x-www-form-urlencoded"}
                   <div class="params-table">
                     {#each editUrlEncodedItems as item, i (i)}
                       <div class="params-row">
-                        <input type="checkbox" bind:checked={item.enabled} title="Enabled" />
-                        <input placeholder="Key" bind:value={item.key} />
-                        <input placeholder="Value" bind:value={item.value} />
-                        <button type="button" class="icon-btn" title="Remove" onclick={() => removeUrlEncodedItem(i)}>🗑</button>
+                        <input type="checkbox" bind:checked={item.enabled} title="Enabled" onchange={scheduleAutoSave} />
+                        <input placeholder="Key" bind:value={item.key} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
+                        <input placeholder="Value" bind:value={item.value} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
+                        {#if i < editUrlEncodedItems.length - 1 || item.key.trim()}
+                          <button type="button" class="icon-btn" title="Remove" onclick={() => { removeUrlEncodedItem(i); scheduleAutoSave(); }}>🗑</button>
+                        {/if}
                       </div>
-                    {:else}
-                      <p class="hint">No fields.</p>
                     {/each}
-                    <div class="params-row">
-                      <button type="button" onclick={addUrlEncodedItem}>Add field</button>
-                    </div>
                   </div>
                 {:else if editBodyType === "binary"}
                   <div class="params-table">
                     <div class="params-row">
-                      <input placeholder="Absolute file path (e.g. C:\files\photo.png)" bind:value={editBinaryFilePath} />
+                      <input placeholder="Absolute file path (e.g. C:\files\photo.png)" bind:value={editBinaryFilePath} oninput={scheduleAutoSave} />
                     </div>
                     <p class="hint">The file is streamed from disk at send time — it's never loaded into the app's memory ahead of time.</p>
                   </div>
@@ -2406,6 +3356,7 @@
                         } catch {
                           editBody = JSON.stringify({ query: editGraphqlQuery }, null, 2);
                         }
+                        scheduleAutoSave();
                       }}
                     ></textarea>
                     <h4>Variables (JSON)</h4>
@@ -2421,50 +3372,55 @@
                         } catch {
                           editBody = JSON.stringify({ query: editGraphqlQuery }, null, 2);
                         }
+                        scheduleAutoSave();
                       }}
                     ></textarea>
                   </div>
                 {/if}
-
-                <div class="params-row">
-                  <button type="button" class="btn-primary" onclick={saveRequest}>Save body</button>
-                </div>
               </div>
 
             {:else if activeEditorTab === "scripts"}
-              <div class="params-table">
-                <h4>Pre-request Script (executed before sending)</h4>
-                <textarea
-                  placeholder="// e.g. pm.environment.set('timestamp', Date.now());"
-                  bind:value={editPreScript}
-                  class="body-input"
-                  rows="5"
-                ></textarea>
-
-                <div class="field-header-row">
-                  <h4>Post-request / Tests Script (executed after receiving response)</h4>
-                  <button
-                    type="button"
-                    class="btn-ghost btn-xs"
-                    disabled={generatingTestsDocs}
-                    onclick={() => generateTestsAndDocsWithAiAction("tests")}
-                    title="Generate pm.test assertions using Claude AI"
-                  >
-                    {generatingTestsDocs ? "Generating…" : "✨ Generate Tests with AI"}
+              <div class="scripts-layout">
+                <div class="scripts-side">
+                  <button type="button" class="scripts-side-item" class:active={activeScriptTab === "pre"} onclick={() => (activeScriptTab = "pre")}>
+                    Pre {#if editPreScript}<span class="tab-dot">•</span>{/if}
+                  </button>
+                  <button type="button" class="scripts-side-item" class:active={activeScriptTab === "post"} onclick={() => (activeScriptTab = "post")}>
+                    Post {#if editPostScript}<span class="tab-dot">•</span>{/if}
                   </button>
                 </div>
-                {#if testsDocsFeedback}
-                  <p class="action-feedback-inline">{testsDocsFeedback}</p>
-                {/if}
-                <textarea
-                  placeholder="// e.g. pm.test('Status is 200', () => pm.response.to.have.status(200));"
-                  bind:value={editPostScript}
-                  class="body-input"
-                  rows="5"
-                ></textarea>
-
-                <div class="params-row">
-                  <button type="button" class="btn-primary" onclick={saveRequest}>Save scripts</button>
+                <div class="scripts-main">
+                  {#if activeScriptTab === "pre"}
+                    <p class="hint">Runs before this request is sent.</p>
+                    <textarea
+                      placeholder="// e.g. pm.environment.set('timestamp', Date.now());"
+                      bind:value={editPreScript}
+                      class="body-input scripts-textarea"
+                      oninput={scheduleAutoSave}
+                    ></textarea>
+                  {:else}
+                    <div class="field-header-row">
+                      <p class="hint">Runs after the response comes back — write pm.test() assertions here.</p>
+                      <button
+                        type="button"
+                        class="btn-ghost btn-xs"
+                        disabled={generatingTestsDocs}
+                        onclick={() => generateTestsAndDocsWithAiAction("tests")}
+                        title="Generate pm.test assertions using Claude AI"
+                      >
+                        {generatingTestsDocs ? "Generating…" : "✨ Generate Tests with AI"}
+                      </button>
+                    </div>
+                    {#if testsDocsFeedback}
+                      <p class="action-feedback-inline">{testsDocsFeedback}</p>
+                    {/if}
+                    <textarea
+                      placeholder="// e.g. pm.test('Status is 200', () => pm.response.to.have.status(200));"
+                      bind:value={editPostScript}
+                      class="body-input scripts-textarea"
+                      oninput={scheduleAutoSave}
+                    ></textarea>
+                  {/if}
                 </div>
               </div>
 
@@ -2479,36 +3435,34 @@
                     oninput={(e) => {
                       const val = (e.target as HTMLInputElement).value;
                       editTimeoutMs = val ? parseInt(val, 10) : null;
+                      scheduleAutoSave();
                     }}
                   />
                 </label>
                 <label class="checkbox-label">
-                  <input type="checkbox" bind:checked={editFollowRedirects} />
+                  <input type="checkbox" bind:checked={editFollowRedirects} onchange={scheduleAutoSave} />
                   Follow HTTP Redirects
                 </label>
                 <label class="settings-row">
                   <span>Max Redirects:</span>
-                  <input type="number" bind:value={editMaxRedirects} min="0" max="50" />
+                  <input type="number" bind:value={editMaxRedirects} min="0" max="50" oninput={scheduleAutoSave} />
                 </label>
                 <label class="checkbox-label">
-                  <input type="checkbox" bind:checked={editVerifySsl} />
+                  <input type="checkbox" bind:checked={editVerifySsl} onchange={scheduleAutoSave} />
                   Verify SSL / TLS Certificates
                 </label>
                 <label class="settings-row">
                   <span>Proxy URL:</span>
-                  <input placeholder="http://127.0.0.1:8080" bind:value={editProxyUrl} />
+                  <input placeholder="http://127.0.0.1:8080" bind:value={editProxyUrl} oninput={scheduleAutoSave} />
                 </label>
                 <label class="settings-row">
                   <span>HTTP Version:</span>
-                  <select bind:value={editHttpVersion}>
+                  <select bind:value={editHttpVersion} onchange={scheduleAutoSave}>
                     <option value="">Default (HTTP/1.1 or HTTP/2)</option>
                     <option value="HTTP/1.1">HTTP/1.1</option>
                     <option value="HTTP/2">HTTP/2</option>
                   </select>
                 </label>
-                <div class="params-row">
-                  <button type="button" class="btn-primary" onclick={saveRequest}>Save settings</button>
-                </div>
               </div>
 
             {:else if activeEditorTab === "docs"}
@@ -2533,10 +3487,8 @@
                   bind:value={editDescription}
                   class="body-input"
                   rows="8"
+                  oninput={scheduleAutoSave}
                 ></textarea>
-                <div class="params-row">
-                  <button type="button" class="btn-primary" onclick={saveRequest}>Save docs</button>
-                </div>
               </div>
 
             {/if}
@@ -2561,6 +3513,7 @@
                 {/if}
                 <button type="button" class="icon-btn" title="Copy response body" onclick={copyResponseBody}>⧉</button>
                 <button type="button" class="icon-btn" title="Download response body" onclick={downloadResponseBody}>⭳</button>
+                <button type="button" class="icon-btn" title="Expand to full-detail view" onclick={() => (responseExpanded = true)}>⤢</button>
               </div>
 
               <div class="response-subtabs">
@@ -2689,55 +3642,39 @@
             {/if}
           </div>
           </div>
-
-          <div class="right-rail">
-            <button
-              type="button"
-              class="rail-icon"
-              class:active={rightPanel === "code"}
-              title="Code Snippet"
-              onclick={() => (rightPanel = rightPanel === "code" ? null : "code")}
-            >&lt;/&gt;</button>
-            <button
-              type="button"
-              class="rail-icon"
-              class:active={rightPanel === "info"}
-              title="Info"
-              onclick={() => (rightPanel = rightPanel === "info" ? null : "info")}
-            >ⓘ</button>
           </div>
 
           {#if rightPanel === "code"}
-            <div class="right-panel">
+            <div class="bottom-panel">
               <h3 class="right-panel-title">Code Snippet</h3>
               <div class="params-row">
                 <select bind:value={snippetTarget}>
-                  <option value="bash">cURL (Bash / POSIX)</option>
-                  <option value="powershell">cURL (PowerShell)</option>
                   <option value="windows_cmd">cURL (Windows CMD)</option>
+                  <option value="powershell">cURL (PowerShell)</option>
+                  <option value="bash">cURL (Bash / POSIX)</option>
                   <option value="python">Python (requests)</option>
                   <option value="javascript">JavaScript (fetch)</option>
                 </select>
-              </div>
-              <div class="params-row">
                 <select bind:value={snippetMode}>
                   <option value="placeholder">Placeholder (safe)</option>
                   <option value="resolved">Resolved (real values)</option>
                 </select>
+                <button type="button" class="btn-primary" onclick={copyAsCurl}>Generate Snippet</button>
+                {#if snippet}
+                  <button type="button" onclick={copySnippetToClipboard}>Copy to clipboard</button>
+                {/if}
               </div>
-              <button type="button" class="btn-primary" onclick={copyAsCurl}>Generate Snippet</button>
               {#if snippetError}
                 <p class="error">{snippetError}</p>
               {/if}
               {#if snippet}
-                <pre class="body-view">{snippet}</pre>
-                <button type="button" onclick={copySnippetToClipboard}>Copy to clipboard</button>
+                <pre class="body-view bottom-panel-code">{snippet}</pre>
               {/if}
             </div>
           {:else if rightPanel === "info" && selectedRequest}
-            <div class="right-panel">
+            <div class="bottom-panel">
               <h3 class="right-panel-title">Request Info</h3>
-              <dl class="info-list">
+              <dl class="info-list info-list-grid">
                 <dt>ID</dt>
                 <dd>{selectedRequest.id}</dd>
                 <dt>Project ID</dt>
@@ -2753,6 +3690,20 @@
               </dl>
             </div>
           {/if}
+
+          <div class="bottom-bar">
+            <button
+              type="button"
+              class="bottom-bar-tab"
+              class:active={rightPanel === "code"}
+              onclick={() => (rightPanel = rightPanel === "code" ? null : "code")}
+            >&lt;/&gt; Code Snippet</button>
+            <button
+              type="button"
+              class="bottom-bar-tab"
+              class:active={rightPanel === "info"}
+              onclick={() => (rightPanel = rightPanel === "info" ? null : "info")}
+            >ⓘ Info</button>
           </div>
 
           <h2>History</h2>
@@ -2879,7 +3830,7 @@
           class:git-has-conflict={gitStatus?.has_conflicts}
           title="Git & Remote Sync (Click to open)"
           onclick={() => {
-            showGitModal = true;
+            activeScreen = "git";
             if (gitRepoPathInput) refreshGitStatus();
           }}
         >
@@ -3350,34 +4301,130 @@
     </div>
   {/if}
 
-  {#if showVariables}
-    <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) showVariables = false; }} onkeydown={(e) => { if (e.key === "Escape") showVariables = false; }} role="dialog" aria-modal="true" tabindex="0">
-      <div class="modal-container modal-wide">
+  {#if showDiffModal}
+    <div
+      class="modal-backdrop"
+      onclick={(e) => { if (e.target === e.currentTarget) showDiffModal = false; }}
+      onkeydown={(e) => { if (e.key === "Escape") showDiffModal = false; }}
+      role="dialog"
+      aria-modal="true"
+      tabindex="0"
+    >
+      <div class="modal-container">
         <div class="modal-header">
-          <h3>Environment & Variables</h3>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showVariables = false)}>✕</button>
+          <h3>Git Diff Preview</h3>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showDiffModal = false)}>✕</button>
+        </div>
+        <div class="modal-body">
+          {#if !gitDiffContent.trim()}
+            <p class="hint">No uncommitted diff detected.</p>
+          {:else}
+            <pre class="diff-viewer">{gitDiffContent}</pre>
+          {/if}
+        </div>
+        <div class="modal-footer">
+          <button type="button" onclick={() => (showDiffModal = false)}>Close</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showHistoryModal}
+    <div
+      class="modal-backdrop"
+      onclick={(e) => { if (e.target === e.currentTarget) showHistoryModal = false; }}
+      onkeydown={(e) => { if (e.key === "Escape") showHistoryModal = false; }}
+      role="dialog"
+      aria-modal="true"
+      tabindex="0"
+    >
+      <div class="modal-container">
+        <div class="modal-header">
+          <h3>Git Commit History</h3>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showHistoryModal = false)}>✕</button>
+        </div>
+        <div class="modal-body">
+          {#if gitHistory.length === 0}
+            <p class="hint">No commit history found.</p>
+          {:else}
+            <div class="history-list">
+              {#each gitHistory as c}
+                <div class="history-item">
+                  <div class="commit-header">
+                    <code class="commit-hash">{c.hash.slice(0, 8)}</code>
+                    <span class="commit-author">{c.author}</span>
+                    <span class="commit-date">{c.date}</span>
+                  </div>
+                  <p class="commit-msg">{c.message}</p>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        <div class="modal-footer">
+          <button type="button" onclick={() => (showHistoryModal = false)}>Close</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+</div>
+{/if}
+{:else if activeScreen === "environments"}
+  {#if !selectedProjectId}
+    {@render noProjectPicker("Environments")}
+  {:else}
+    <div class="env-screen">
+      <aside class="env-screen-side">
+        <div class="env-screen-side-header">
+          <span class="screen-kicker">Environments</span>
+          <button type="button" class="icon-btn" title="New environment" onclick={quickCreateEnvironment}>+</button>
+        </div>
+        <div class="env-screen-project-row">
+          <span class="env-screen-project-label">Project</span>
+          {@render projectSwitcher()}
+        </div>
+        <div class="env-screen-list">
+          <button
+            type="button"
+            class="env-screen-item"
+            class:active={!selectedEnvironmentId}
+            onclick={() => { selectedEnvironmentId = null; loadVariables(); }}
+          >
+            No Environment
+          </button>
+          {#each environments as env (env.id)}
+            {#if renamingEnvironmentId === env.id}
+              <form class="inline-form env-screen-rename-form" onsubmit={submitRenameEnvironment}>
+                <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
+                <button type="submit" title="Save">✓</button>
+                <button type="button" title="Cancel" onclick={() => (renamingEnvironmentId = null)}>✕</button>
+              </form>
+            {:else}
+              <div class="env-screen-item-row" class:active={selectedEnvironmentId === env.id}>
+                <button
+                  type="button"
+                  class="env-screen-item"
+                  onclick={() => { selectedEnvironmentId = env.id; loadVariables(); }}
+                  ondblclick={() => startRenameEnvironment(env)}
+                >
+                  {env.name}
+                </button>
+                <button type="button" class="icon-btn icon-btn-ghost" title="Rename" onclick={() => startRenameEnvironment(env)}>✎</button>
+                <button type="button" class="icon-btn icon-btn-ghost" title="Delete" onclick={() => deleteEnvironmentAction(env.id)}>🗑</button>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      </aside>
+
+      <section class="screen-page">
+        <div class="screen-page-header">
+          <span class="screen-kicker">Editing</span>
+          <h1 class="screen-title">{selectedEnvironmentId ? (environments.find((e) => e.id === selectedEnvironmentId)?.name ?? "Environment") : "Global (all environments)"}</h1>
         </div>
 
-        <div class="variables-panel">
-          <h4>Add Variable</h4>
-          <form class="request-form" onsubmit={createVariable}>
-            <select bind:value={newVarScope}>
-              <option value="global">Global (Project)</option>
-              {#if selectedEnvironmentId}
-                <option value="environment">Environment</option>
-              {/if}
-            </select>
-            <input placeholder="Key" bind:value={newVarKey} />
-            <input placeholder="Value" bind:value={newVarValue} />
-            <label class="checkbox-label">
-              <input type="checkbox" bind:checked={newVarIsSecret} /> Secret
-            </label>
-            <label class="checkbox-label" title="Keep local on this device; excluded from git & exports">
-              <input type="checkbox" bind:checked={newVarIsLocal} /> Local
-            </label>
-            <button type="submit" class="btn-primary">Add</button>
-          </form>
-
+        <div class="screen-page-body">
           <h4>Global Variables ({projectVariables.length})</h4>
           <div class="params-table">
             {#each projectVariables as v (v.id)}
@@ -3398,9 +4445,32 @@
                 <button type="button" class="icon-btn" title="Toggle Secret" onclick={() => toggleVariableSecret(v)}>🔒</button>
                 <button type="button" class="icon-btn" title="Delete" onclick={() => deleteVariable(v.id)}>🗑</button>
               </div>
-            {:else}
-              <p class="hint">No global variables defined.</p>
             {/each}
+            <div
+              class="params-row"
+              onfocusout={(e) => {
+                const row = e.currentTarget as HTMLElement;
+                if (!e.relatedTarget || !row.contains(e.relatedTarget as Node)) commitNewGlobalVar();
+              }}
+            >
+              <span class="params-row-spacer"></span>
+              <input
+                placeholder="Key"
+                bind:value={newGlobalVarDraft.key}
+                onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewGlobalVar(); } }}
+              />
+              <input
+                placeholder="Value"
+                bind:value={newGlobalVarDraft.value}
+                onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewGlobalVar(); } }}
+              />
+              <label class="checkbox-label">
+                <input type="checkbox" bind:checked={newGlobalVarDraft.isSecret} /> Secret
+              </label>
+              <label class="checkbox-label" title="Keep local on this device; excluded from git & exports">
+                <input type="checkbox" bind:checked={newGlobalVarDraft.isLocal} /> Local
+              </label>
+            </div>
           </div>
 
           {#if selectedEnvironmentId}
@@ -3424,37 +4494,52 @@
                   <button type="button" class="icon-btn" title="Toggle Secret" onclick={() => toggleVariableSecret(v)}>🔒</button>
                   <button type="button" class="icon-btn" title="Delete" onclick={() => deleteVariable(v.id)}>🗑</button>
                 </div>
-              {:else}
-                <p class="hint">No variables defined in this environment.</p>
               {/each}
+              <div
+                class="params-row"
+                onfocusout={(e) => {
+                  const row = e.currentTarget as HTMLElement;
+                  if (!e.relatedTarget || !row.contains(e.relatedTarget as Node)) commitNewEnvVar();
+                }}
+              >
+                <span class="params-row-spacer"></span>
+                <input
+                  placeholder="Key"
+                  bind:value={newEnvVarDraft.key}
+                  onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewEnvVar(); } }}
+                />
+                <input
+                  placeholder="Value"
+                  bind:value={newEnvVarDraft.value}
+                  onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewEnvVar(); } }}
+                />
+                <label class="checkbox-label">
+                  <input type="checkbox" bind:checked={newEnvVarDraft.isSecret} /> Secret
+                </label>
+                <label class="checkbox-label" title="Keep local on this device; excluded from git & exports">
+                  <input type="checkbox" bind:checked={newEnvVarDraft.isLocal} /> Local
+                </label>
+              </div>
             </div>
           {/if}
         </div>
-      </div>
+      </section>
     </div>
   {/if}
-
-  {#if showGitModal}
-    <div
-      class="modal-backdrop"
-      onclick={(e) => { if (e.target === e.currentTarget) showGitModal = false; }}
-      onkeydown={(e) => { if (e.key === "Escape") showGitModal = false; }}
-      role="dialog"
-      aria-modal="true"
-      tabindex="0"
-    >
-      <div class="modal-container">
-        <div class="modal-header">
-          <div class="modal-title-wrap">
-            <h3>⎇ Git & Collaboration Sync</h3>
-            {#if selectedProjectId}
-              <span class="modal-sub">Project: {projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId}</span>
-            {/if}
-          </div>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showGitModal = false)}>✕</button>
+{:else if activeScreen === "git"}
+  {#if !selectedProjectId}
+    {@render noProjectPicker("Git & Collaboration")}
+  {:else}
+    <section class="screen-page">
+      <div class="screen-page-header">
+        <span class="screen-kicker">Git & Collaboration</span>
+        <div class="screen-title-row">
+          <h1 class="screen-title">{projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId}</h1>
+          {@render projectSwitcher()}
         </div>
+      </div>
 
-        <div class="modal-tabs">
+      <div class="modal-tabs" style="flex:none; padding: 0 var(--space-6);">
           <button
             type="button"
             class="modal-tab-btn"
@@ -3492,7 +4577,7 @@
           </button>
         </div>
 
-        <div class="modal-body">
+        <div class="screen-page-body">
           {#if gitActionFeedback}
             <div class="action-alert success">{gitActionFeedback}</div>
           {/if}
@@ -3634,9 +4719,17 @@
                         <div class="conflict-choices">
                           <button
                             type="button"
+                            class="btn-choice"
+                            title="View the real base/local/remote content for this file"
+                            onclick={() => loadConflictVersions(file)}
+                          >
+                            {selectedConflictFile === file && conflictVersions ? "Viewing 3-way diff" : "View 3-way diff"}
+                          </button>
+                          <button
+                            type="button"
                             class="btn-choice local"
                             title="Keep your local changes (--ours)"
-                            onclick={() => resolveConflictAction(file, "ours")}
+                            onclick={() => { resolveConflictAction(file, "ours"); if (selectedConflictFile === file) { selectedConflictFile = null; conflictVersions = null; } }}
                             disabled={gitLoading}
                           >
                             Keep Local (Ours)
@@ -3645,7 +4738,7 @@
                             type="button"
                             class="btn-choice remote"
                             title="Accept incoming remote changes (--theirs)"
-                            onclick={() => resolveConflictAction(file, "theirs")}
+                            onclick={() => { resolveConflictAction(file, "theirs"); if (selectedConflictFile === file) { selectedConflictFile = null; conflictVersions = null; } }}
                             disabled={gitLoading}
                           >
                             Keep Remote (Theirs)
@@ -3653,6 +4746,27 @@
                         </div>
                       </div>
                       <p class="hint">Decide whether to preserve your local modifications or replace them with remote version.</p>
+
+                      {#if selectedConflictFile === file}
+                        <div class="conflict-3way">
+                          {#if conflictVersionsLoading}
+                            <p class="hint">Loading base/local/remote content…</p>
+                          {:else if conflictVersions}
+                            <div class="conflict-3way-col">
+                              <span class="screen-kicker">Base (common ancestor)</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.base ?? "(no common ancestor — added independently on both sides)"}</pre>
+                            </div>
+                            <div class="conflict-3way-col">
+                              <span class="screen-kicker">Local (ours)</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.local ?? "(absent locally)"}</pre>
+                            </div>
+                            <div class="conflict-3way-col">
+                              <span class="screen-kicker">Remote (theirs)</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.remote ?? "(absent on remote)"}</pre>
+                            </div>
+                          {/if}
+                        </div>
+                      {/if}
                     </div>
                   {/each}
                 </div>
@@ -3776,136 +4890,585 @@
             </div>
           {/if}
         </div>
-
-        <div class="modal-footer">
-          <button type="button" onclick={() => (showGitModal = false)}>Close</button>
-        </div>
-      </div>
-    </div>
+    </section>
   {/if}
-
-  {#if showDiffModal}
-    <div
-      class="modal-backdrop"
-      onclick={(e) => { if (e.target === e.currentTarget) showDiffModal = false; }}
-      onkeydown={(e) => { if (e.key === "Escape") showDiffModal = false; }}
-      role="dialog"
-      aria-modal="true"
-      tabindex="0"
-    >
-      <div class="modal-container">
-        <div class="modal-header">
-          <h3>Git Diff Preview</h3>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showDiffModal = false)}>✕</button>
-        </div>
-        <div class="modal-body">
-          {#if !gitDiffContent.trim()}
-            <p class="hint">No uncommitted diff detected.</p>
-          {:else}
-            <pre class="diff-viewer">{gitDiffContent}</pre>
-          {/if}
-        </div>
-        <div class="modal-footer">
-          <button type="button" onclick={() => (showDiffModal = false)}>Close</button>
-        </div>
-      </div>
+{:else if activeScreen === "import"}
+  <section class="screen-page">
+    <div class="screen-page-header">
+      <span class="screen-kicker">Import</span>
+      <h1 class="screen-title">Bring in a collection, environment, or single request</h1>
     </div>
-  {/if}
 
-  {#if showHistoryModal}
-    <div
-      class="modal-backdrop"
-      onclick={(e) => { if (e.target === e.currentTarget) showHistoryModal = false; }}
-      onkeydown={(e) => { if (e.key === "Escape") showHistoryModal = false; }}
-      role="dialog"
-      aria-modal="true"
-      tabindex="0"
-    >
-      <div class="modal-container">
-        <div class="modal-header">
-          <h3>Git Commit History</h3>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showHistoryModal = false)}>✕</button>
+    <div class="modal-tabs" style="flex:none; padding: 0 var(--space-6);">
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "collection"} onclick={() => (importActiveTab = "collection")}>Postman Collection</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "environment"} onclick={() => (importActiveTab = "environment")}>Postman Environment</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "curl"} onclick={() => (importActiveTab = "curl")}>cURL Command</button>
+    </div>
+
+    <div class="screen-page-body">
+      {#if importActiveTab === "collection"}
+        <p class="hint">Upload or paste Postman Collection v2.0 or v2.1 JSON.</p>
+        <div class="file-dropzone">
+          <label class="file-label">
+            <span>Choose JSON file</span>
+            <input type="file" accept=".json,application/json" onchange={handleCollectionFileUpload} />
+          </label>
         </div>
-        <div class="modal-body">
-          {#if gitHistory.length === 0}
-            <p class="hint">No commit history found.</p>
-          {:else}
-            <div class="history-list">
-              {#each gitHistory as c}
-                <div class="history-item">
-                  <div class="commit-header">
-                    <code class="commit-hash">{c.hash.slice(0, 8)}</code>
-                    <span class="commit-author">{c.author}</span>
-                    <span class="commit-date">{c.date}</span>
-                  </div>
-                  <p class="commit-msg">{c.message}</p>
-                </div>
-              {/each}
+        <textarea placeholder="Or paste Postman Collection JSON here..." bind:value={collectionImportText} rows="6" class="body-input"></textarea>
+
+        {#if selectedProjectId}
+          <div class="radio-row">
+            <label class="radio-label">
+              <input type="radio" name="collectionTargetScreen" value="new" bind:group={collectionImportTarget} />
+              New Project
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="collectionTargetScreen" value="current" bind:group={collectionImportTarget} />
+              Current Project
+            </label>
+          </div>
+        {/if}
+
+        {#if collectionImportError}<p class="error">{collectionImportError}</p>{/if}
+
+        {#if collectionImportReport}
+          <div class="import-report-card">
+            <h4>Import Complete</h4>
+            <p><strong>Project:</strong> {collectionImportReport.project_name}</p>
+            <p><strong>Requests:</strong> {collectionImportReport.requests_count}</p>
+            <p><strong>Variables:</strong> {collectionImportReport.variables_count}</p>
+            <p><strong>Sample responses:</strong> {collectionImportReport.sample_responses_count}</p>
+            {#if collectionImportReport.warnings.length > 0}
+              <div class="warnings-box">
+                <h5>Compatibility Notes:</h5>
+                <ul>
+                  {#each collectionImportReport.warnings as warn}<li>{warn}</li>{/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="params-row">
+          <button type="button" class="btn-primary" disabled={!collectionImportText.trim() || collectionImportLoading} onclick={importPostmanCollectionAction}>
+            {collectionImportLoading ? "Importing…" : "Import Collection"}
+          </button>
+        </div>
+      {:else if importActiveTab === "environment"}
+        <p class="hint">Upload or paste a Postman Environment JSON file.</p>
+        <div class="file-dropzone">
+          <label class="file-label">
+            <span>Choose JSON file</span>
+            <input type="file" accept=".json,application/json" onchange={handleEnvironmentFileUpload} />
+          </label>
+        </div>
+        <textarea placeholder="Or paste Postman Environment JSON here..." bind:value={environmentImportText} rows="4" class="body-input"></textarea>
+
+        {#if environmentImportError}<p class="error">{environmentImportError}</p>{/if}
+
+        {#if environmentImportReport}
+          <div class="import-report-card">
+            <h4>Environment Imported</h4>
+            <p><strong>Environment:</strong> {environmentImportReport.environment_name}</p>
+            <p><strong>Variables:</strong> {environmentImportReport.variables_count}</p>
+            {#if environmentImportReport.warnings.length > 0}
+              <div class="warnings-box">
+                <h5>Compatibility Notes:</h5>
+                <ul>
+                  {#each environmentImportReport.warnings as warn}<li>{warn}</li>{/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="params-row">
+          <button type="button" class="btn-primary" disabled={!environmentImportText.trim() || environmentImportLoading} onclick={importPostmanEnvironmentAction}>
+            {environmentImportLoading ? "Importing…" : "Import Environment"}
+          </button>
+        </div>
+      {:else if importActiveTab === "curl"}
+        <p class="hint">Paste a single cURL command to add it as one request to the current project.</p>
+        {#if !selectedProjectId}
+          <p class="screen-empty-inline">Select a project on the Workspace screen first — a cURL import needs somewhere to add the request.</p>
+        {:else}
+          <form onsubmit={importCurlCommand}>
+            <input placeholder="Request Name (optional)" bind:value={curlImportName} />
+            <textarea
+              placeholder="Paste cURL command here (e.g. curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -d 'data')"
+              bind:value={curlImportText}
+              rows="6"
+              class="body-input"
+            ></textarea>
+            {#if curlImportError}<p class="error">{curlImportError}</p>{/if}
+            <div class="params-row">
+              <button type="submit" class="btn-primary">Import Request</button>
             </div>
-          {/if}
+          </form>
+        {/if}
+      {/if}
+    </div>
+  </section>
+{:else if activeScreen === "launcher"}
+  <section class="screen-page">
+    <div class="screen-page-header">
+      <span class="screen-kicker">Workspace</span>
+      <h1 class="screen-title">Open a project</h1>
+      <p class="screen-subtitle">{projects.length} project{projects.length === 1 ? "" : "s"} in this workspace.</p>
+    </div>
+
+    {#if projects.length === 0}
+      <p class="screen-empty">No projects yet. Create one from the Workspace screen, or import a Postman collection from the Import screen.</p>
+    {:else}
+      <div class="launcher-grid">
+        {#each projects as p (p.id)}
+          <button
+            type="button"
+            class="launcher-card"
+            class:active={p.id === selectedProjectId}
+            onclick={() => { selectProject(p.id); activeScreen = "workspace"; }}
+          >
+            <span class="screen-kicker" class:current={p.id === selectedProjectId}>{p.id === selectedProjectId ? "Open now" : "Updated " + new Date(p.updated_at).toLocaleDateString()}</span>
+            <div class="launcher-card-name">{p.name}</div>
+            <div class="hr"></div>
+            <div class="launcher-card-meta">
+              <span>{projectRequestCounts[p.id] ?? 0} request{(projectRequestCounts[p.id] ?? 0) === 1 ? "" : "s"}</span>
+            </div>
+          </button>
+        {/each}
+      </div>
+    {/if}
+
+    <div class="screen-page-body" style="flex:none; display:flex; gap: var(--space-3);">
+      <button type="button" class="btn-primary" onclick={() => (activeScreen = "import")}>Import Postman collection</button>
+    </div>
+  </section>
+{:else if activeScreen === "history"}
+  {#if !selectedProjectId}
+    {@render noProjectPicker("History")}
+  {:else}
+    <section class="screen-page">
+      <div class="history-toolbar">
+        <span class="history-toolbar-project-label">Project</span>
+        {@render projectSwitcher()}
+        <div class="hr-v"></div>
+        <input class="history-search" placeholder="Filter by request name, method, URL, or status…" bind:value={historySearchQuery} />
+        <div class="hr-v"></div>
+        <span class="screen-empty-inline">{filteredProjectHistory.length} of {projectHistory.length} results</span>
+        <div class="response-stat-spacer"></div>
+        <button type="button" class="history-filter-chip" class:active={historyShowFailuresOnly} onclick={() => (historyShowFailuresOnly = !historyShowFailuresOnly)}>
+          Failures only
+        </button>
+        <button type="button" class="btn-ghost btn-xs" onclick={refreshProjectHistory}>↻ Refresh</button>
+      </div>
+
+      <div class="history-header-row">
+        <span>Method</span>
+        <span>Request</span>
+        <span>Status</span>
+        <span>Time</span>
+        <span>When</span>
+      </div>
+
+      <div class="history-rows">
+        {#if historyLoading}
+          <p class="screen-empty-inline" style="padding: var(--space-4);">Loading…</p>
+        {:else if filteredProjectHistory.length === 0}
+          <p class="screen-empty-inline" style="padding: var(--space-4);">
+            {projectHistory.length === 0 ? "No requests have been sent in this project yet." : "No results match this filter."}
+          </p>
+        {:else}
+          {#each filteredProjectHistory as h (h.id)}
+            <button
+              type="button"
+              class="history-row"
+              onclick={async () => { await openRequest(h.request_id); await openHistoryResponse(h.id); activeScreen = "workspace"; responseExpanded = true; }}
+            >
+              <span class="history-method">{h.method}</span>
+              <span class="history-path">{h.request_name} · {h.url}</span>
+              <span class:status-ok={h.status < 400} class:status-err={h.status >= 400}>{h.status}</span>
+              <span>{h.duration_ms} ms</span>
+              <span>{new Date(h.created_at).toLocaleString()}</span>
+            </button>
+          {/each}
+        {/if}
+      </div>
+    </section>
+  {/if}
+{:else if activeScreen === "settings"}
+  <section class="screen-page">
+    <div class="screen-page-header">
+      <span class="screen-kicker">Settings</span>
+      <h1 class="screen-title">Resources & behavior</h1>
+      <p class="screen-subtitle">What's actually adjustable is adjustable here; what isn't (yet) is shown honestly as read-only, not faked as a slider that would do nothing.</p>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">Auto-sync interval</div>
+        <div class="screen-empty-inline">How often the background Git sync (when enabled) checks the remote. Real and adjustable — this used to be a hardcoded 60s.</div>
+      </div>
+      <div class="seg">
+        {#each [[30000, "30s"], [60000, "60s"], [120000, "2m"], [300000, "5m"]] as [ms, label]}
+          <button type="button" class="seg-opt" class:active={autoSyncIntervalMs === ms} onclick={() => setAutoSyncIntervalMs(ms as number)}>{label}</button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">Appearance</div>
+        <div class="screen-empty-inline">Light is this design system's default; dark is a real alternate palette.</div>
+      </div>
+      <div class="seg">
+        <button type="button" class="seg-opt" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>Light</button>
+        <button type="button" class="seg-opt" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>Dark</button>
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">Icon & text size</div>
+        <div class="screen-empty-inline">Scales every icon and label app-wide (the root font-size everything else is sized relative to) — not just this screen's preview.</div>
+      </div>
+      <div class="seg">
+        {#each [[85, "Small"], [100, "Default"], [115, "Large"], [130, "Extra large"]] as [pct, label]}
+          <button type="button" class="seg-opt" class:active={uiScale === pct} onclick={() => setUiScale(pct as number)}>{label}</button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">Keyboard shortcuts</div>
+        <div class="screen-empty-inline">Each one calls the same function the matching button does — nothing shortcut-only. Turn off any that collide with something else on your system.</div>
+      </div>
+      <div class="shortcuts-list">
+        {#each SHORTCUT_DEFS as def (def.id)}
+          <label class="shortcut-toggle-row">
+            <input
+              type="checkbox"
+              checked={shortcutsEnabled[def.id]}
+              onchange={(e) => setShortcutEnabled(def.id, (e.target as HTMLInputElement).checked)}
+            />
+            <span class="shortcut-label">{def.label}</span>
+            <kbd class="shortcut-keys">{def.keys}</kbd>
+          </label>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">Response held in memory</div>
+        <div class="screen-empty-inline">Bodies larger than this cap stream straight to disk instead of growing the in-memory buffer further (<code>MAX_INLINE_BODY_BYTES</code>, execution.rs). Fixed at build time, not adjustable here.</div>
+      </div>
+      <div class="settings-screen-row-value">256 KB</div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">Script timeout</div>
+        <div class="screen-empty-inline">Hard ceiling on sandboxed pre-request / post-request scripts. Fixed at build time (1,500 ms / 2,000 ms), not adjustable here.</div>
+      </div>
+      <div class="settings-screen-row-value">1.5s / 2s</div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">Response cache</div>
+        <div class="screen-empty-inline">There isn't one — every response is written straight to SQLite (and disk, past the inline cap above). Nothing to configure.</div>
+      </div>
+      <div class="settings-screen-row-value">None</div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">History retention</div>
+        <div class="screen-empty-inline">Response history rows accumulate until you delete them — there's no automatic expiry yet.</div>
+      </div>
+      <div class="settings-screen-row-value">Unbounded</div>
+    </div>
+
+    {#if systemDiagnostics}
+      <div class="settings-screen-row">
+        <div>
+          <div class="settings-screen-row-label">Current process</div>
+          <div class="screen-empty-inline">Real measurements — memory via <code>sysinfo</code>, everything else a direct SQLite count/file size.</div>
         </div>
-        <div class="modal-footer">
-          <button type="button" onclick={() => (showHistoryModal = false)}>Close</button>
+        <div class="settings-screen-diagnostics-grid">
+          <span>Memory (RSS)</span><strong>{formatByteSize(systemDiagnostics.process_rss_bytes)}</strong>
+          <span>Database</span><strong>{formatByteSize(systemDiagnostics.db_size_bytes)}</strong>
+          <span>WAL file</span><strong>{formatByteSize(systemDiagnostics.db_wal_size_bytes)}</strong>
+          <span>Projects</span><strong>{systemDiagnostics.total_projects}</strong>
+          <span>Requests</span><strong>{systemDiagnostics.total_requests}</strong>
+          <span>Responses stored</span><strong>{systemDiagnostics.total_responses}</strong>
+          <span>Console events</span><strong>{systemDiagnostics.console_events_count}</strong>
+          <span>Uptime</span><strong>{Math.floor(systemDiagnostics.uptime_seconds / 60)} min</strong>
+        </div>
+      </div>
+    {/if}
+  </section>
+{:else if activeScreen === "theme"}
+  <section class="screen-page">
+    <div class="screen-page-header">
+      <span class="screen-kicker">Appearance</span>
+      <h1 class="screen-title">Light and dark, side by side</h1>
+      <p class="screen-subtitle">Same structure, same 2px rules, same single accent. Dark inverts the ground and lifts the accent one ramp step so it stays legible on ink. You're currently on <strong>{themeMode === "dark" ? "Dark" : "Light"}</strong>.</p>
+    </div>
+    <div class="theme-compare">
+      <button type="button" class="theme-compare-col" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>
+        <div class="theme-compare-header">
+          <span class="screen-kicker">Light — default</span>
+          {#if themeMode === "light"}<span class="theme-active-badge">Active</span>{/if}
+        </div>
+        <div class="theme-swatch" data-theme="light">
+          <div class="theme-swatch-topbar">
+            <span>Lightpost</span>
+            <span class="theme-swatch-sync">SYNC</span>
+          </div>
+          <div class="theme-swatch-body">
+            <div class="theme-swatch-side">
+              <div class="screen-kicker">Explorer</div>
+              <div>List charges</div>
+              <div>Create charge</div>
+              <div class="theme-swatch-active">Refund charge</div>
+            </div>
+            <div class="theme-swatch-main">
+              <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
+              <div class="hr"></div>
+              <div class="theme-swatch-status">200 OK</div>
+              <div class="screen-empty-inline">214 ms · 1.2 KB</div>
+            </div>
+          </div>
+        </div>
+      </button>
+      <button type="button" class="theme-compare-col" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>
+        <div class="theme-compare-header">
+          <span class="screen-kicker">Dark</span>
+          {#if themeMode === "dark"}<span class="theme-active-badge">Active</span>{/if}
+        </div>
+        <div class="theme-swatch" data-theme="dark">
+          <div class="theme-swatch-topbar">
+            <span>Lightpost</span>
+            <span class="theme-swatch-sync">SYNC</span>
+          </div>
+          <div class="theme-swatch-body">
+            <div class="theme-swatch-side">
+              <div class="screen-kicker">Explorer</div>
+              <div>List charges</div>
+              <div>Create charge</div>
+              <div class="theme-swatch-active">Refund charge</div>
+            </div>
+            <div class="theme-swatch-main">
+              <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
+              <div class="hr"></div>
+              <div class="theme-swatch-status">200 OK</div>
+              <div class="screen-empty-inline">214 ms · 1.2 KB</div>
+            </div>
+          </div>
+        </div>
+      </button>
+    </div>
+  </section>
+{/if}
+  </div>
+
+  {#if paletteOpen}
+    <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closePalette(); }} onkeydown={(e) => { if (e.key === "Escape") closePalette(); }} role="dialog" aria-modal="true" tabindex="0">
+      <div class="palette">
+        <div class="palette-header">
+          <span class="screen-kicker">Go to</span>
+          <input class="palette-input" placeholder="Search projects and requests…" bind:value={paletteQuery} bind:this={paletteInputEl} />
+        </div>
+        <div class="palette-results">
+          {#each paletteItems as p, i (i)}
+            <button type="button" class="palette-item" onclick={p.onSelect}>
+              <span class="palette-item-method">{p.method ?? ""}</span>
+              <span class="palette-item-label">{p.label}</span>
+              <div class="response-stat-spacer"></div>
+              <span class="palette-item-hint">{p.hint}</span>
+            </button>
+          {:else}
+            <p class="screen-empty-inline">No matches.</p>
+          {/each}
+        </div>
+        <div class="palette-footer">
+          <span>↵ open</span>
+          <span>esc dismiss</span>
         </div>
       </div>
     </div>
   {/if}
-
 </div>
 
 <style>
-  /* Dark is the app's own identity, not an OS-follow — same as real Postman, which
-     defaults to a dark theme regardless of the host OS setting. A light override could be
-     added later behind an explicit in-app toggle, but there is no such toggle today, so
-     shipping a "light-unless-dark-OS" default would just be wrong most of the time. */
+  /* "Modernist" design system: flat, architectural, near-mono red-on-off-white, a visible
+     modular grid, zero corner radius, strong 2px rules, Archivo throughout. Adopted wholesale
+     (see the design-system export this was derived from) rather than layered on top of the
+     app's previous dark Postman-style palette — every existing rule below still reads through
+     these same custom-property names, so the remap alone repaints the whole app. Light is the
+     system's own default (not an OS-follow); dark is a real, deliberate alternate palette
+     toggled via `data-theme`, built from the same tonal ramps per the system's own guidance
+     ("dark inverts the ground and lifts the accent one ramp step"). */
+  @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap');
+
   :root {
-    --color-bg: #1a1a1d;
-    --color-bg-secondary: #232326;
-    --color-bg-tertiary: #29292d;
-    --color-bg-hover: #2f2f34;
-    --color-sidebar-bg: #202023;
-    --color-panel-bg: #1e1e21;
-    --color-border: #2e2e33;
-    --color-border-strong: #3a3a41;
-    --color-text: #e8e8ea;
-    --color-text-secondary: #9a9aa3;
-    --color-text-tertiary: #6b6b72;
-    --color-primary: #ff6c37;
-    --color-primary-hover: #ff8257;
-    --color-primary-contrast: #ffffff;
-    --color-accent: #4c8ef9;
-    --color-accent-hover: #6ba1fa;
-    --color-accent-contrast: #ffffff;
-    --color-success: #3fd68a;
-    --color-success-bg: rgba(63, 214, 138, 0.14);
-    --color-danger: #ff5c5c;
-    --color-danger-bg: rgba(255, 92, 92, 0.14);
-    --color-warn: #f2a93c;
-    --color-warn-bg: rgba(242, 169, 60, 0.14);
-    --color-focus: #4c8ef9;
+    --color-bg: #f3f2f2;
+    --color-bg-secondary: #eae9e9;
+    --color-bg-tertiary: #eae7e7;
+    --color-bg-hover: color-mix(in srgb, #201e1d 7%, transparent);
+    --color-sidebar-bg: #f3f2f2;
+    --color-panel-bg: #eae9e9;
+    --color-border: #d7d3d3;
+    --color-border-strong: color-mix(in srgb, #201e1d 40%, transparent);
+    --color-text: #201e1d;
+    --color-text-secondary: #605d5d;
+    --color-text-tertiary: #7d7979;
+    --color-primary: #ec3013;
+    --color-primary-hover: #dd2b0f;
+    --color-primary-contrast: #f3f2f2;
+    --color-accent: #ec3013;
+    --color-accent-hover: #dd2b0f;
+    --color-accent-contrast: #f3f2f2;
+    --color-success: var(--color-text);
+    --color-success-bg: transparent;
+    --color-danger: #ec3013;
+    --color-danger-bg: #fff2ef;
+    --color-warn: #ae1800;
+    --color-warn-bg: #fff2ef;
+    --color-focus: #ec3013;
 
-    --method-get: #3fd68a;
-    --method-post: #f0a020;
-    --method-put: #4c8ef9;
-    --method-patch: #b57bf6;
-    --method-delete: #ff5c5c;
-    --method-head: #3fc7d6;
-    --method-options: #9a9aa3;
-    --method-trace: #d68a3f;
+    /* The system deliberately does not color-code HTTP verbs (no rainbow GET/POST/etc.) —
+       method text is plain ink, and turns the accent only when its row/tab is active. */
+    --method-get: var(--color-text-secondary);
+    --method-post: var(--color-text-secondary);
+    --method-put: var(--color-text-secondary);
+    --method-patch: var(--color-text-secondary);
+    --method-delete: var(--color-text-secondary);
+    --method-head: var(--color-text-secondary);
+    --method-options: var(--color-text-secondary);
+    --method-trace: var(--color-text-secondary);
 
-    --radius-sm: 4px;
-    --radius-md: 6px;
-    --radius-lg: 10px;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.5);
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    --font-mono: "SF Mono", Monaco, Menlo, Consolas, "Liberation Mono", monospace;
+    /* Tonal ramps (OKLCH-derived in the source system) — light steps (100-300) for tinted
+       fills/hovers, 500 as a role's base, dark steps (700-900) for text on tinted fills. */
+    --color-neutral-100: #f8f4f4;
+    --color-neutral-200: #eae7e7;
+    --color-neutral-300: #d7d3d3;
+    --color-neutral-400: #bab6b6;
+    --color-neutral-500: #9b9797;
+    --color-neutral-600: #7d7979;
+    --color-neutral-700: #605d5d;
+    --color-neutral-800: #444141;
+    --color-neutral-900: #2d2b2b;
+    --color-accent-100: #fff2ef;
+    --color-accent-200: #ffe0d9;
+    --color-accent-300: #ffc4b8;
+    --color-accent-400: #ff9783;
+    --color-accent-500: #ff563c;
+    --color-accent-600: #dd2b0f;
+    --color-accent-700: #ae1800;
+    --color-accent-800: #7c1405;
+    --color-accent-900: #4d170e;
 
-    color-scheme: dark;
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-6: 24px;
+    --space-8: 32px;
+
+    --radius-sm: 0px;
+    --radius-md: 0px;
+    --radius-lg: 0px;
+    --shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
+    --shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
+    --shadow-lg: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent);
+    --font-sans: "Archivo", system-ui, sans-serif;
+    --font-heading: "Archivo", system-ui, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+    color-scheme: light;
     color: var(--color-text);
     background: var(--color-bg);
     font-family: var(--font-sans);
     font-size: 12.5px;
+  }
+
+  /* Not scoped to :root — also applies to nested [data-theme="dark"] elements (the Theme
+     screen's side-by-side comparison swatches), since custom properties inherit normally. */
+  [data-theme="dark"] {
+    --color-bg: #201e1d;
+    --color-bg-secondary: #2d2b2b;
+    --color-bg-tertiary: #363433;
+    --color-bg-hover: color-mix(in srgb, #f8f4f4 8%, transparent);
+    --color-sidebar-bg: #201e1d;
+    --color-panel-bg: #2d2b2b;
+    --color-border: #444141;
+    --color-border-strong: color-mix(in srgb, #f8f4f4 25%, transparent);
+    --color-text: #f8f4f4;
+    --color-text-secondary: #bab6b6;
+    --color-text-tertiary: #9b9797;
+    --color-primary: #ff563c;
+    --color-primary-hover: #ff9783;
+    --color-primary-contrast: #201e1d;
+    --color-accent: #ff563c;
+    --color-accent-hover: #ff9783;
+    --color-accent-contrast: #201e1d;
+    --color-danger: #ff563c;
+    --color-danger-bg: color-mix(in srgb, #ff563c 16%, transparent);
+    --color-warn: #ff9783;
+    --color-warn-bg: color-mix(in srgb, #ff563c 16%, transparent);
+    --color-focus: #ff563c;
+
+    --method-get: var(--color-text-secondary);
+    --method-post: var(--color-text-secondary);
+    --method-put: var(--color-text-secondary);
+    --method-patch: var(--color-text-secondary);
+    --method-delete: var(--color-text-secondary);
+    --method-head: var(--color-text-secondary);
+    --method-options: var(--color-text-secondary);
+    --method-trace: var(--color-text-secondary);
+
+    color-scheme: dark;
+  }
+
+  /* Mirrors the :root light values, scoped so a nested [data-theme="light"] element (the Theme
+     screen's comparison swatch) resets back to light even while the app itself is on dark. */
+  [data-theme="light"] {
+    --color-bg: #f3f2f2;
+    --color-bg-secondary: #eae9e9;
+    --color-bg-tertiary: #eae7e7;
+    --color-bg-hover: color-mix(in srgb, #201e1d 7%, transparent);
+    --color-sidebar-bg: #f3f2f2;
+    --color-panel-bg: #eae9e9;
+    --color-border: #d7d3d3;
+    --color-border-strong: color-mix(in srgb, #201e1d 40%, transparent);
+    --color-text: #201e1d;
+    --color-text-secondary: #605d5d;
+    --color-text-tertiary: #7d7979;
+    --color-primary: #ec3013;
+    --color-primary-hover: #dd2b0f;
+    --color-primary-contrast: #f3f2f2;
+    --color-accent: #ec3013;
+    --color-accent-hover: #dd2b0f;
+    --color-accent-contrast: #f3f2f2;
+    --color-danger: #ec3013;
+    --color-danger-bg: #fff2ef;
+    --color-warn: #ae1800;
+    --color-warn-bg: #fff2ef;
+    --color-focus: #ec3013;
+
+    --method-get: var(--color-text-secondary);
+    --method-post: var(--color-text-secondary);
+    --method-put: var(--color-text-secondary);
+    --method-patch: var(--color-text-secondary);
+    --method-delete: var(--color-text-secondary);
+    --method-head: var(--color-text-secondary);
+    --method-options: var(--color-text-secondary);
+    --method-trace: var(--color-text-secondary);
+
+    color-scheme: light;
   }
 
   :global(body) {
@@ -3917,14 +5480,875 @@
     box-sizing: border-box;
   }
 
+  .app-shell {
+    display: flex;
+    height: 100vh;
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+  }
+
+  .screens-rail {
+    width: 220px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    border-right: 2px solid var(--color-border-strong);
+    background: var(--color-bg);
+    overflow: hidden;
+  }
+
+  .rail-brand {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-3) var(--space-3) var(--space-4);
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .rail-screens {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .rail-screen {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-left: 4px solid transparent;
+    padding: 0.65rem var(--space-4);
+    font-family: var(--font-sans);
+    font-size: 0.8rem;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .rail-screen:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .rail-screen.active {
+    background: var(--color-bg-secondary);
+    border-left-color: var(--color-accent);
+    font-weight: 800;
+  }
+
+  .rail-budget {
+    flex: none;
+    border-top: 2px solid var(--color-border-strong);
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .rail-budget-label {
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
+  }
+
+  .rail-budget-value {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 1.15rem;
+  }
+
+  .rail-budget-meta {
+    font-size: 0.68rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .screen-area {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
   .app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    height: 100%;
     font-family: var(--font-sans);
     color: var(--color-text);
     background: var(--color-bg);
     overflow: hidden;
+  }
+
+  /* — Generic full-page screens (Response/Environments/Git/Import/Launcher/History/
+     Settings/Theme) — one consistent kicker+title header pattern, reused everywhere. — */
+  .screen-page {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .screen-page-header {
+    flex: none;
+    padding: var(--space-8) var(--space-6) var(--space-4);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .screen-kicker {
+    display: block;
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
+    margin-bottom: 4px;
+  }
+
+  .screen-title-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+
+  .project-picker-select {
+    font-family: var(--font-sans);
+    font-size: 0.8rem;
+  }
+
+  .project-picker-select-sm {
+    font-size: 0.75rem;
+    padding: 0.25rem 0.4rem;
+  }
+
+  .screen-title {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 1.8rem;
+    line-height: 1.1;
+    margin: 0;
+  }
+
+  .screen-subtitle {
+    font-size: 0.85rem;
+    color: var(--color-text-secondary);
+    max-width: 640px;
+    margin-top: 4px;
+  }
+
+  .screen-empty {
+    padding: var(--space-8) var(--space-6);
+    color: var(--color-text-tertiary);
+    font-size: 0.85rem;
+  }
+
+  .screen-empty-inline {
+    color: var(--color-text-tertiary);
+    font-size: 0.78rem;
+  }
+
+  .screen-page-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--space-6);
+  }
+
+  /* — Environments screen — */
+  .env-screen {
+    height: 100%;
+    display: flex;
+  }
+
+  .env-screen-side {
+    width: 260px;
+    flex: none;
+    border-right: 2px solid var(--color-border-strong);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .env-screen-side-header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-4) var(--space-4) var(--space-3);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .env-screen-project-row {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .env-screen-project-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-tertiary);
+  }
+
+  .env-screen-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .env-screen-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-left: 4px solid transparent;
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--space-3) var(--space-4);
+    font: inherit;
+    font-size: 0.8rem;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .env-screen-item:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .env-screen-item.active {
+    background: var(--color-bg-secondary);
+    border-left-color: var(--color-accent);
+    font-weight: 800;
+  }
+
+  .env-screen-item-row {
+    display: flex;
+    align-items: center;
+    border-left: 4px solid transparent;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .env-screen-item-row:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .env-screen-item-row:hover .icon-btn-ghost {
+    opacity: 1;
+  }
+
+  .env-screen-item-row.active {
+    background: var(--color-bg-secondary);
+    border-left-color: var(--color-accent);
+  }
+
+  .env-screen-item-row.active .env-screen-item {
+    font-weight: 800;
+  }
+
+  .env-screen-item-row .env-screen-item {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    padding: var(--space-3) var(--space-2) var(--space-3) calc(var(--space-4) - 4px);
+  }
+
+  .env-screen-item-row .icon-btn-ghost {
+    flex: none;
+    margin-right: var(--space-2);
+  }
+
+  .env-screen-rename-form {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .hr {
+    height: 2px;
+    border: 0;
+    margin: var(--space-3) 0;
+    background: var(--color-border-strong);
+  }
+
+  /* — Launcher screen — */
+  .launcher-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .launcher-card {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--space-4);
+    cursor: pointer;
+    font: inherit;
+    color: var(--color-text);
+  }
+
+  .launcher-card:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .launcher-card.active {
+    background: var(--color-bg-secondary);
+  }
+
+  .screen-kicker.current {
+    color: var(--color-accent-700);
+  }
+
+  .launcher-card-name {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 1.1rem;
+    margin: 2px 0 4px;
+  }
+
+  .launcher-card-meta {
+    display: flex;
+    gap: var(--space-3);
+    font-size: 0.72rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .history-toolbar-project-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-tertiary);
+  }
+
+  /* — History screen — */
+  .history-toolbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .history-search {
+    flex: none;
+    width: 360px;
+    border: 1px solid var(--color-border);
+    background: var(--color-bg-secondary);
+    padding: 0.4rem 0.6rem;
+    font: inherit;
+    font-size: 0.8rem;
+    color: var(--color-text);
+  }
+
+  .hr-v {
+    width: 2px;
+    height: 22px;
+    background: var(--color-border-strong);
+  }
+
+  .history-filter-chip {
+    font-size: 0.7rem;
+    font-weight: 800;
+    padding: 5px 10px;
+    border: 1px solid var(--color-border);
+    background: transparent;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .history-filter-chip.active {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    color: var(--color-accent-contrast);
+  }
+
+  .history-header-row,
+  .history-row {
+    display: grid;
+    grid-template-columns: 70px 2fr 80px 90px 160px;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-6);
+  }
+
+  .history-header-row {
+    flex: none;
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .history-rows {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .history-row {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    font: inherit;
+    font-size: 0.78rem;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .history-row:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .history-method {
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+  }
+
+  .history-path {
+    font-family: var(--font-mono);
+    font-size: 0.74rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* — Settings screen — */
+  .settings-screen-row {
+    display: grid;
+    grid-template-columns: 1.3fr 1.6fr;
+    align-items: center;
+    gap: var(--space-6);
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .settings-screen-row-label {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 0.95rem;
+    margin-bottom: 2px;
+  }
+
+  .settings-screen-row-value {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 0.9rem;
+    color: var(--color-text-secondary);
+  }
+
+  .settings-screen-diagnostics-grid {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    row-gap: 4px;
+    column-gap: var(--space-3);
+    font-size: 0.78rem;
+  }
+
+  .settings-screen-diagnostics-grid span {
+    color: var(--color-text-tertiary);
+  }
+
+  .seg {
+    display: inline-flex;
+    overflow: hidden;
+    border: 1px solid var(--color-border-strong);
+  }
+
+  .seg-opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    border-left: 1px solid var(--color-border-strong);
+    color: var(--color-text);
+    font-family: inherit;
+  }
+
+  .seg-opt:first-child {
+    border-left: none;
+  }
+
+  .seg-opt.active {
+    background: var(--color-accent);
+    color: var(--color-accent-contrast);
+  }
+
+  .seg-opt:not(.active):hover {
+    background: var(--color-bg-hover);
+  }
+
+  .shortcuts-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .shortcut-toggle-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+
+  .shortcut-label {
+    flex: 1;
+  }
+
+  .shortcut-keys {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border: 1px solid var(--color-border-strong);
+    background: var(--color-bg-secondary);
+    color: var(--color-text-secondary);
+  }
+
+  /* — Theme screen — */
+  .theme-compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    padding: var(--space-6);
+    gap: var(--space-6);
+  }
+
+  .theme-compare-col {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 2px solid transparent;
+    padding: var(--space-3);
+    margin: calc(var(--space-3) * -1);
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .theme-compare-col:hover {
+    border-color: var(--color-border);
+  }
+
+  .theme-compare-col.active {
+    border-color: var(--color-accent);
+  }
+
+  .theme-active-badge {
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-accent-700);
+    border: 1px solid var(--color-accent);
+    padding: 2px 8px;
+  }
+
+  .theme-compare-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-3);
+  }
+
+  .theme-swatch {
+    border: 2px solid var(--color-border-strong);
+    background: var(--color-bg);
+    color: var(--color-text);
+  }
+
+  .theme-swatch-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.7rem 0.9rem;
+    border-bottom: 2px solid var(--color-border-strong);
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+
+  .theme-swatch-sync {
+    background: var(--color-accent);
+    color: var(--color-accent-contrast);
+    font-size: 0.62rem;
+    padding: 3px 8px;
+  }
+
+  .theme-swatch-body {
+    display: flex;
+  }
+
+  .theme-swatch-side {
+    width: 38%;
+    flex: none;
+    border-right: 1px solid var(--color-border);
+    padding: 0.9rem;
+    font-size: 0.78rem;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .theme-swatch-active {
+    color: var(--color-accent);
+    font-weight: 800;
+  }
+
+  .theme-swatch-main {
+    flex: 1;
+    padding: 0.9rem;
+  }
+
+  .theme-swatch-path {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+  }
+
+  .theme-swatch-status {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 1.3rem;
+  }
+
+  /* — Git screen: real 3-way conflict view — */
+  .conflict-3way {
+    display: flex;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+  }
+
+  .conflict-3way-col {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .conflict-3way-pre {
+    max-height: 220px;
+    font-size: 0.7rem;
+  }
+
+  /* — Response screen — */
+  .response-screen-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
+  .response-screen-side {
+    width: 300px;
+    flex: none;
+    border-right: 2px solid var(--color-border-strong);
+    overflow-y: auto;
+  }
+
+  .response-screen-stat-block {
+    padding: var(--space-4) var(--space-4);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .response-screen-status {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 2rem;
+  }
+
+  .response-screen-path {
+    font-size: 0.78rem;
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+
+  .response-screen-metrics {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .response-screen-metric {
+    padding: var(--space-3) var(--space-4);
+    border-right: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .response-screen-metric-value {
+    font-family: var(--font-heading);
+    font-weight: 800;
+    font-size: 1.1rem;
+  }
+
+  .response-screen-tests {
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .response-screen-test-row {
+    display: flex;
+    gap: var(--space-3);
+    font-size: 0.78rem;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .response-screen-test-row span:first-child {
+    font-weight: 800;
+    width: 36px;
+    flex: none;
+  }
+
+  .response-screen-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .response-screen-content {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: var(--space-4);
+  }
+
+  .screen-body-view {
+    max-height: none;
+  }
+
+  /* — Command palette — */
+  .palette {
+    width: 620px;
+    max-width: 92vw;
+    background: var(--color-bg);
+    border: 2px solid var(--color-border-strong);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .palette-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .palette-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    font: inherit;
+    font-size: 1rem;
+    color: var(--color-text);
+    outline: none;
+  }
+
+  .palette-results {
+    max-height: 50vh;
+    overflow-y: auto;
+  }
+
+  .palette-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    padding: var(--space-3) var(--space-4);
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+
+  .palette-item:hover {
+    background: var(--color-bg-secondary);
+  }
+
+  .palette-item-method {
+    width: 48px;
+    flex: none;
+    font-size: 0.65rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    color: var(--color-accent);
+  }
+
+  .palette-item-hint {
+    font-size: 0.72rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .palette-footer {
+    display: flex;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-4);
+    font-size: 0.68rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .palette-trigger {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 260px;
+    background: var(--color-bg-secondary);
+    border: 1px solid var(--color-border);
+    padding: 0.4rem 0.7rem;
+    font: inherit;
+    font-size: 0.78rem;
+    color: var(--color-text-secondary);
+    cursor: text;
+    text-align: left;
+  }
+
+  .palette-trigger:hover {
+    border-color: var(--color-border-strong);
+  }
+
+  .palette-trigger span:first-child {
+    flex: 1;
+  }
+
+  .palette-kbd {
+    font-size: 0.62rem;
+    font-weight: 800;
+    border: 1px solid var(--color-border);
+    padding: 1px 5px;
   }
 
   /* ---------- Topbar ---------- */
@@ -3968,15 +6392,6 @@
 
   .env-select {
     max-width: 180px;
-  }
-
-  .env-new-form {
-    display: flex;
-  }
-
-  .env-new-input {
-    width: 140px;
-    font-size: 0.78rem;
   }
 
   /* ---------- Buttons & inputs ---------- */
@@ -4033,21 +6448,53 @@
     color: var(--color-text);
   }
 
+  .btn-secondary {
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    color: var(--color-text);
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--color-bg-hover);
+  }
+
+  .btn-secondary:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+
+  .btn-xs {
+    padding: 0.2rem 0.5rem;
+    font-size: 0.68rem;
+  }
+
+  .btn-xs.active {
+    background: var(--color-accent);
+    color: var(--color-accent-contrast);
+  }
+
   /* Orange is the brand mark only (logo, "+"/add affordances) — the actual primary action
      color in real Postman is blue (Send, and anything analogous to it). Conflating the two
      was the biggest color mismatch against the reference. */
-  .btn-primary,
-  .btn-save {
+  .btn-primary {
     background: var(--color-primary);
     border-color: var(--color-primary);
     color: var(--color-primary-contrast);
     font-weight: 600;
   }
 
-  .btn-primary:hover,
-  .btn-save:hover {
+  .btn-primary:hover {
     background: var(--color-primary-hover);
     border-color: var(--color-primary-hover);
+  }
+
+  .save-status {
+    font-size: 0.75rem;
+    color: var(--color-text-tertiary);
+  }
+
+  .save-status.is-error {
+    color: var(--color-danger);
   }
 
   .btn-send {
@@ -4091,6 +6538,10 @@
     color: var(--color-text);
   }
 
+  .icon-btn.active {
+    color: var(--color-accent);
+  }
+
   .icon-btn-ghost {
     opacity: 0;
   }
@@ -4123,6 +6574,90 @@
     color: var(--color-warn);
     border-radius: var(--radius-sm);
     margin: 0.5rem 0.9rem 0;
+  }
+
+  .missing-vars-banner {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .missing-var-chip {
+    display: inline-block;
+    cursor: default;
+    border-bottom: 1px dotted var(--color-warn);
+  }
+
+  /* A plain CSS :hover popover nested inside either the banner or the (overflow-clipped) URL
+     bar would get clipped by an ancestor eventually — the URL bar's overlay in particular
+     needs real overflow-x clipping for long URLs, and CSS has no "clip X, don't clip Y" (a
+     non-"visible" axis paired with "visible" silently becomes "auto", which still clips). So
+     this is a single shared, JS-positioned, fixed-position portal instead — see
+     showMissingVarPopover/scheduleHideMissingVarPopover — rendered once at the bottom of the
+     request editor and reused by both the banner chips and the URL bar tokens.  */
+  .missing-var-popover-portal {
+    display: flex;
+    position: fixed;
+    background: var(--color-bg);
+    border: 2px solid var(--color-border-strong);
+    padding: var(--space-2);
+    gap: 4px;
+    z-index: 1000;
+    color: var(--color-text);
+  }
+
+  .missing-var-popover-portal input {
+    font-size: 0.8rem;
+  }
+
+  /* Highlights {{variables}} directly inside the URL bar, in place, instead of only in the
+     warning banner below — an invisible-text "ghost" input sits on top of a styled overlay
+     that renders the same string with each {{var}} as its own token; the overlay is
+     pointer-events:none everywhere except on a missing token, so typing/clicking still goes
+     to the real input underneath except when hovering a token that needs a value. */
+  .url-input-shell {
+    position: relative;
+    flex: 1;
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+  }
+
+  .url-token-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    white-space: pre;
+    overflow: hidden;
+    pointer-events: none;
+    padding: 0.35rem 0.55rem;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--color-text);
+  }
+
+  .url-token-text {
+    white-space: pre;
+  }
+
+  .url-token-var {
+    white-space: pre;
+    color: var(--color-accent);
+  }
+
+  .url-token-var.missing {
+    pointer-events: auto;
+    color: var(--color-warn);
+    border-bottom: 1px dotted var(--color-warn);
+    cursor: default;
+  }
+
+  .url-input-ghost {
+    position: relative;
+    z-index: 1;
+    color: transparent;
+    caret-color: var(--color-text);
   }
 
   .dismiss-btn {
@@ -4182,6 +6717,27 @@
 
   .sidebar-header {
     padding: 0.7rem 0.9rem 0.3rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .sidebar-expand-btn {
+    flex: none;
+    width: 18px;
+    align-self: flex-start;
+    margin-top: 6px;
+    background: transparent;
+    border: none;
+    border-right: 1px solid var(--color-border);
+    color: var(--color-text-tertiary);
+    cursor: pointer;
+    font-size: 0.7rem;
+  }
+
+  .sidebar-expand-btn:hover {
+    background: var(--color-bg-hover);
+    color: var(--color-text);
   }
 
   .sidebar-title {
@@ -4192,14 +6748,10 @@
     color: var(--color-text-tertiary);
   }
 
-  .new-project-form {
+  .sidebar-header-actions {
     display: flex;
-    gap: 0.35rem;
-    padding: 0.4rem 0.9rem 0.6rem;
-  }
-
-  .new-project-form input {
-    flex: 1;
+    align-items: center;
+    gap: 4px;
   }
 
   .project-list {
@@ -4274,6 +6826,20 @@
     margin: 0 0.9rem 0.4rem 1.1rem;
   }
 
+  .project-search-box {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: none;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .project-search-input {
+    flex: 1;
+    width: 100%;
+  }
+
   .request-search-box {
     display: flex;
     align-items: center;
@@ -4290,24 +6856,6 @@
     font-size: 0.7rem;
     color: var(--color-text-tertiary);
     white-space: nowrap;
-  }
-
-  .new-request-form {
-    display: flex;
-    gap: 0.3rem;
-    margin-bottom: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .new-request-form input {
-    flex: 1;
-    min-width: 60px;
-  }
-
-  .method-select-sm {
-    font-size: 0.7rem;
-    padding: 0.35rem 0.3rem;
-    width: 5.2rem;
   }
 
   .request-list {
@@ -4553,6 +7101,27 @@
     font-weight: 600;
   }
 
+  .breadcrumb-current-btn {
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .breadcrumb-current-btn:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .breadcrumb-edit-hint {
+    opacity: 0;
+    font-size: 0.68rem;
+  }
+
+  .breadcrumb-current-btn:hover .breadcrumb-edit-hint {
+    opacity: 0.6;
+  }
+
   .request-bar {
     padding: 0.5rem 0.9rem 0.4rem;
     border-bottom: 1px solid var(--color-border);
@@ -4577,7 +7146,8 @@
     background: var(--color-panel-bg);
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius-md);
-    overflow: hidden;
+    /* No overflow:hidden — the design's radius is 0 here anyway (nothing to corner-clip), and
+       hiding overflow would clip the missing-variable popover that hangs below the URL bar. */
   }
 
   .url-pill:focus-within {
@@ -4611,11 +7181,6 @@
     flex: 1;
     font-family: var(--font-mono);
     font-size: 0.82rem;
-  }
-
-  .name-input {
-    flex: 1;
-    color: var(--color-text-secondary);
   }
 
   .send-action {
@@ -4715,49 +7280,59 @@
     overflow-y: auto;
   }
 
-  .right-rail {
+  .bottom-bar {
     display: flex;
-    flex-direction: column;
     align-items: center;
     gap: 0.25rem;
-    width: 40px;
-    flex-shrink: 0;
-    padding-top: 0.5rem;
-    border-left: 1px solid var(--color-border);
+    flex: none;
+    padding: 0.3rem 0.6rem;
+    border-top: 1px solid var(--color-border);
     background: var(--color-bg-secondary);
   }
 
-  .rail-icon {
+  .bottom-bar-tab {
     display: flex;
     align-items: center;
-    justify-content: center;
-    width: 30px;
-    height: 30px;
+    gap: 0.3rem;
+    padding: 0.3rem 0.6rem;
     border: none;
     background: transparent;
     color: var(--color-text-secondary);
-    font-size: 0.85rem;
+    font-size: 0.78rem;
     border-radius: 4px;
     cursor: pointer;
   }
 
-  .rail-icon:hover {
+  .bottom-bar-tab:hover {
     background: var(--color-bg-hover);
     color: var(--color-text);
   }
 
-  .rail-icon.active {
+  .bottom-bar-tab.active {
     background: var(--color-bg-hover);
     color: var(--color-accent);
   }
 
-  .right-panel {
-    width: 280px;
-    flex-shrink: 0;
+  /* Its own scroll area, generously tall (not the old 280px-wide sidebar sliver) — a code
+     snippet or the info list gets real room to breathe when opened. */
+  .bottom-panel {
+    flex: none;
+    height: 45vh;
+    min-height: 260px;
     overflow-y: auto;
-    padding: 0.8rem 0.9rem;
-    border-left: 1px solid var(--color-border);
+    padding: var(--space-4) var(--space-6);
+    border-top: 2px solid var(--color-border-strong);
     background: var(--color-panel-bg);
+  }
+
+  .bottom-panel-code {
+    max-height: none;
+  }
+
+  .info-list-grid {
+    grid-template-columns: max-content 1fr;
+    column-gap: var(--space-4);
+    max-width: 480px;
   }
 
   .right-panel-title {
@@ -4817,6 +7392,12 @@
     align-items: center;
     gap: 0.4rem;
     flex-wrap: wrap;
+  }
+
+  .params-row-spacer {
+    display: inline-block;
+    width: 14px;
+    flex: none;
   }
 
   .params-row input:not([type="checkbox"]) {
@@ -5418,21 +7999,6 @@
     margin: 0.2rem 0;
   }
 
-  .variables-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .variables-panel h4 {
-    margin: 0.4rem 0 0.1rem;
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    color: var(--color-text-tertiary);
-  }
-
-
   .request-form {
     display: flex;
     gap: 0.4rem;
@@ -6006,6 +8572,65 @@
   .field-header-row h4,
   .field-header-row h3 {
     margin: 0;
+  }
+
+  .field-header-row .hint {
+    margin: 0;
+  }
+
+  /* — Scripts tab: Pre/Post side selector instead of two long-labeled stacked textareas. — */
+  .scripts-layout {
+    display: flex;
+    gap: var(--space-4);
+    min-height: 0;
+  }
+
+  .scripts-side {
+    flex: none;
+    width: 100px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-right: 1px solid var(--color-border-strong);
+    padding-right: var(--space-3);
+  }
+
+  .scripts-side-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: transparent;
+    border: none;
+    border-left: 3px solid transparent;
+    padding: var(--space-2) var(--space-2);
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .scripts-side-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .scripts-side-item.active {
+    color: var(--color-text);
+    border-left-color: var(--color-accent);
+    background: var(--color-bg-hover);
+  }
+
+  .scripts-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .scripts-textarea {
+    flex: 1;
+    min-height: 280px;
   }
 
   .action-feedback-inline {

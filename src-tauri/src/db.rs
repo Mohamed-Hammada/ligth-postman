@@ -168,6 +168,13 @@ const MIGRATIONS: &[(i64, &str)] = &[
             detected_at TEXT NOT NULL
         );",
     ),
+    (
+        12,
+        // No DB-level FK action here (ALTER-added foreign keys have inconsistent ON DELETE
+        // support across SQLite versions) — delete_environment clears this in application code
+        // instead (see environment_store::delete_environment).
+        "ALTER TABLE projects ADD COLUMN default_environment_id TEXT;",
+    ),
 ];
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {

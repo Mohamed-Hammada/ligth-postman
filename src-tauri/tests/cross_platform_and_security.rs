@@ -24,6 +24,7 @@ fn security_secret_redaction_and_placeholder_protection() {
     let req = RequestFull {
         id: "req-sec-1".into(),
         project_id: "p1".into(),
+        folder_id: None,
         name: "Secure Request".into(),
         method: "POST".into(),
         url: "https://{{PUBLIC_HOST}}/v1/auth?token={{API_SECRET}}".into(),

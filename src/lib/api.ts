@@ -68,10 +68,29 @@ export type Auth =
 export interface RequestSummary {
   id: string;
   project_id: string;
+  folder_id: string | null;
   name: string;
   method: string;
   url: string;
   updated_at: string;
+}
+
+export interface Folder {
+  id: string;
+  project_id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewFolderInput {
+  project_id: string;
+  name: string;
+}
+
+export interface UpdateFolderInput {
+  id: string;
+  name?: string;
 }
 
 export interface RequestSettings {
@@ -98,6 +117,7 @@ export interface RequestFull extends RequestSummary {
 
 export interface NewRequestInput {
   project_id: string;
+  folder_id?: string | null;
   name: string;
   method: string;
   url: string;
@@ -137,6 +157,8 @@ export interface UpdateRequestInput {
   clear_pre_request_script?: boolean;
   post_request_script?: string;
   clear_post_request_script?: boolean;
+  folder_id?: string;
+  clear_folder_id?: boolean;
 }
 
 export type VariableScope = "global" | "environment" | "request";
@@ -404,6 +426,11 @@ export const api = {
   updateRequest: (input: UpdateRequestInput) =>
     invoke<RequestFull>("update_request", { input }),
   deleteRequest: (id: string) => invoke<void>("delete_request", { id }),
+
+  createFolder: (input: NewFolderInput) => invoke<Folder>("create_folder", { input }),
+  listFolders: (projectId: string) => invoke<Folder[]>("list_folders", { projectId }),
+  updateFolder: (input: UpdateFolderInput) => invoke<Folder>("update_folder", { input }),
+  deleteFolder: (id: string) => invoke<void>("delete_folder", { id }),
 
   createEnvironment: (projectId: string, name: string) =>
     invoke<Environment>("create_environment", { input: { project_id: projectId, name } }),

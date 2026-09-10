@@ -10,13 +10,15 @@ use crate::canonical_request;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionInput};
 use crate::models::{
-    Auth, Environment, HeaderEntry, NewEnvironmentInput, NewProjectInput, NewRequestInput,
-    NewVariableInput, Project, RequestFull, RequestSummary, ResponseBodyPayload,
-    ResponseMeta, ResponseSummary, UpdateEnvironmentInput, UpdateProjectInput,
+    Auth, Environment, Folder, HeaderEntry, NewEnvironmentInput, NewFolderInput, NewProjectInput,
+    NewRequestInput, NewVariableInput, Project, RequestFull, RequestSummary, ResponseBodyPayload,
+    ResponseMeta, ResponseSummary, UpdateEnvironmentInput, UpdateFolderInput, UpdateProjectInput,
     UpdateRequestInput, UpdateVariableInput, VariableScope, VariableView,
 };
 use crate::resolver::{self, ScopeChain};
-use crate::store::{environment_store, project_store, request_store, response_store, variable_store};
+use crate::store::{
+    environment_store, folder_store, project_store, request_store, response_store, variable_store,
+};
 
 pub struct AppState {
     pub db: Mutex<Connection>,
@@ -121,6 +123,36 @@ pub fn delete_request(state: State<AppState>, id: String) -> Result<(), AppError
     let conn = state.db.lock().expect("db mutex poisoned");
     request_store::delete_request(&conn, &id)?;
     log::info!("deleted request {id}");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn create_folder(state: State<AppState>, input: NewFolderInput) -> Result<Folder, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let folder = folder_store::create_folder(&conn, input)?;
+    log::info!("created folder {} in project {}", folder.id, folder.project_id);
+    Ok(folder)
+}
+
+#[tauri::command]
+pub fn list_folders(state: State<AppState>, project_id: String) -> Result<Vec<Folder>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    folder_store::list_folders(&conn, &project_id)
+}
+
+#[tauri::command]
+pub fn update_folder(state: State<AppState>, input: UpdateFolderInput) -> Result<Folder, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let folder = folder_store::update_folder(&conn, input)?;
+    log::info!("updated folder {}", folder.id);
+    Ok(folder)
+}
+
+#[tauri::command]
+pub fn delete_folder(state: State<AppState>, id: String) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    folder_store::delete_folder(&conn, &id)?;
+    log::info!("deleted folder {id}");
     Ok(())
 }
 
@@ -558,6 +590,7 @@ pub fn import_discovered_endpoint(
 
     let input = NewRequestInput {
         project_id,
+        folder_id: None,
         name: endpoint.name,
         method: endpoint.method,
         url,
@@ -575,6 +608,7 @@ pub fn import_discovered_endpoint(
     Ok(RequestSummary {
         id: created.id,
         project_id: created.project_id,
+        folder_id: created.folder_id,
         name: created.name,
         method: created.method,
         url: created.url,

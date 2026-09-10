@@ -227,6 +227,7 @@ fn exports_collection_and_roundtrips() {
         &conn,
         NewRequestInput {
             project_id: project.id.clone(),
+            folder_id: None,
             name: "Search Users".into(),
             method: "GET".into(),
             url: "https://{{host}}/search".into(),

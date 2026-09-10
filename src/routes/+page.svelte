@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { translate, RTL_LOCALES, type Locale } from "$lib/i18n";
   import {
     api,
     describeError,
@@ -7,6 +8,7 @@
     type CollectionImportReport,
     type Environment,
     type EnvironmentImportReport,
+    type Folder,
     type GeneratedApiDefinition,
     type FormDataPart,
     type HeaderEntry,
@@ -58,6 +60,13 @@
 
   let requests = $state<RequestSummary[]>([]);
   let selectedRequest = $state<RequestFull | null>(null);
+
+  // Flat (non-nested) folders — a request either sits directly under its project or under one
+  // folder in that project (see models::Folder on the backend).
+  let folders = $state<Folder[]>([]);
+  let expandedFolderIds = $state<Set<string>>(new Set());
+  let renamingFolderId = $state<string | null>(null);
+  let renameFolderValue = $state("");
 
   let environments = $state<Environment[]>([]);
   let selectedEnvironmentId = $state<string | null>(null);
@@ -243,7 +252,6 @@
   }
 
   // cURL importer (LP-0608, LP-0609)
-  let showCurlImport = $state(false);
   let curlImportText = $state("");
   let curlImportName = $state("");
   let curlImportError = $state("");
@@ -252,14 +260,12 @@
   let importActiveTab = $state<"collection" | "environment" | "curl">("collection");
 
   // Postman compatibility import/export (LP-0501 - LP-0507, LP-0212)
-  let showCollectionImport = $state(false);
   let collectionImportText = $state("");
   let collectionImportTarget = $state<"new" | "current">("new");
   let collectionImportLoading = $state(false);
   let collectionImportError = $state("");
   let collectionImportReport = $state<CollectionImportReport | null>(null);
 
-  let showEnvironmentImport = $state(false);
   let environmentImportText = $state("");
   let environmentImportLoading = $state(false);
   let environmentImportError = $state("");
@@ -357,15 +363,16 @@
   // introduces a second source of truth for projects/requests/environments/git/etc.
   type ScreenId = "workspace" | "environments" | "git" | "import" | "launcher" | "history" | "settings" | "theme";
   let activeScreen = $state<ScreenId>("workspace");
-  const SCREENS: { id: ScreenId; label: string }[] = [
-    { id: "workspace", label: "Workspace" },
-    { id: "environments", label: "Environments" },
-    { id: "git", label: "Git & conflicts" },
-    { id: "import", label: "Import" },
-    { id: "launcher", label: "Launcher" },
-    { id: "history", label: "History" },
-    { id: "settings", label: "Settings" },
-    { id: "theme", label: "Light / dark" },
+  // `label` stores an i18n key (see SHORTCUT_DEFS above for why) — resolve via t(s.label).
+  const SCREENS: { id: ScreenId; label: string; icon: string }[] = [
+    { id: "workspace", label: "rail.workspace", icon: "🗂️" },
+    { id: "environments", label: "rail.environments", icon: "🌐" },
+    { id: "git", label: "rail.git", icon: "⎇" },
+    { id: "import", label: "rail.import", icon: "📥" },
+    { id: "launcher", label: "rail.launcher", icon: "🚀" },
+    { id: "history", label: "rail.history", icon: "🕘" },
+    { id: "settings", label: "rail.settings", icon: "⚙️" },
+    { id: "theme", label: "rail.theme", icon: "🌓" },
   ];
 
   // Sidebar show/hide, for the Workspace screen's project/request explorer.
@@ -397,6 +404,31 @@
       localStorage.setItem("lp-theme", mode);
     } catch {
       // localStorage can throw in a locked-down webview profile — theme just won't persist.
+    }
+  }
+
+  // i18n: locale drives both the string dictionary (t()) and the document's real text
+  // direction — Arabic runs right-to-left, and dir="rtl" on <html> is what makes flexbox's
+  // "row" axis (used throughout this stylesheet) actually mirror instead of just the text.
+  let locale = $state<Locale>("en");
+  function t(key: string, params?: Record<string, string | number>): string {
+    return translate(locale, key, params);
+  }
+  function applyLocale(l: Locale) {
+    try {
+      document.documentElement.lang = l;
+      document.documentElement.dir = RTL_LOCALES.includes(l) ? "rtl" : "ltr";
+    } catch {
+      // SSR-safe no-op; onMount always runs in the browser so this only matters for symmetry.
+    }
+  }
+  function setLocale(l: Locale) {
+    locale = l;
+    applyLocale(l);
+    try {
+      localStorage.setItem("lp-locale", l);
+    } catch {
+      // won't persist across restarts — not fatal.
     }
   }
 
@@ -485,11 +517,14 @@
   // for the sake of having a shortcuts list). Individually toggleable from Settings, persisted
   // to localStorage the same way theme/auto-sync-interval already are.
   type ShortcutId = "commandPalette" | "sendRequest" | "saveRequest" | "newRequest";
+  // `label` stores an i18n key, not literal text — SHORTCUT_DEFS is a plain const (evaluated
+  // once), so resolving the string at definition time would freeze it in whatever locale was
+  // active then. Resolve it at render time instead: t(def.label).
   const SHORTCUT_DEFS: { id: ShortcutId; label: string; keys: string }[] = [
-    { id: "commandPalette", label: "Open the command palette", keys: "Ctrl/⌘ K" },
-    { id: "sendRequest", label: "Send the current request", keys: "Ctrl/⌘ Enter" },
-    { id: "saveRequest", label: "Save the current request immediately", keys: "Ctrl/⌘ S" },
-    { id: "newRequest", label: "New request in the current project", keys: "Ctrl/⌘ N" },
+    { id: "commandPalette", label: "shortcut.commandPalette", keys: "Ctrl/⌘ K" },
+    { id: "sendRequest", label: "shortcut.sendRequest", keys: "Ctrl/⌘ Enter" },
+    { id: "saveRequest", label: "shortcut.saveRequest", keys: "Ctrl/⌘ S" },
+    { id: "newRequest", label: "shortcut.newRequest", keys: "Ctrl/⌘ N" },
   ];
   let shortcutsEnabled = $state<Record<ShortcutId, boolean>>({
     commandPalette: true,
@@ -667,6 +702,21 @@
     return filteredRequests.slice(start, start + requestPageSize);
   });
   let totalRequestPages = $derived(Math.ceil(filteredRequests.length / requestPageSize));
+
+  // Folder-grouped tree (used when not actively searching — a search flattens across folders,
+  // same as it already flattens everything else).
+  let rootRequests = $derived(requests.filter((r) => !r.folder_id));
+  let requestsByFolderId = $derived.by(() => {
+    const map = new Map<string, RequestSummary[]>();
+    for (const r of requests) {
+      if (r.folder_id) {
+        const list = map.get(r.folder_id) ?? [];
+        list.push(r);
+        map.set(r.folder_id, list);
+      }
+    }
+    return map;
+  });
 
   // Developer Console state (LP-0412 - LP-0421)
   let showConsole = $state(false);
@@ -920,6 +970,11 @@
         uiScale = Number(savedScale);
         document.documentElement.style.fontSize = `${uiScale}%`;
       }
+      const savedLocale = localStorage.getItem("lp-locale");
+      if (savedLocale === "en" || savedLocale === "ar") {
+        locale = savedLocale;
+      }
+      applyLocale(locale);
     } catch {
       // ignore — settings just stay at their defaults
     }
@@ -1376,7 +1431,7 @@
         body: aiPreview.body,
       });
       requests = [
-        { id: request.id, project_id: request.project_id, name: request.name, method: request.method, url: request.url, updated_at: request.updated_at },
+        { id: request.id, project_id: request.project_id, folder_id: request.folder_id, name: request.name, method: request.method, url: request.url, updated_at: request.updated_at },
         ...requests,
       ];
       openTabs = [
@@ -1419,6 +1474,7 @@
     loadingRequests = true;
     try {
       requests = await api.listRequests(id);
+      folders = await api.listFolders(id);
       environments = await api.listEnvironments(id);
       // Auto-select the project's preferred environment, if it set one and that environment
       // still exists (it may have been deleted since — the backend already clears the
@@ -1506,13 +1562,14 @@
   // any project row, not just the currently-selected one — the sidebar only renders a project's
   // request tree while it's selected, so a non-selected project must be selected first or the
   // new request would be created correctly on the backend but never appear anywhere in the UI.
-  async function quickCreateRequest(projectId: string) {
+  async function quickCreateRequest(projectId: string, folderId: string | null = null) {
     try {
       if (selectedProjectId !== projectId) {
         await selectProject(projectId);
       }
       const request = await api.createRequest({
         project_id: projectId,
+        folder_id: folderId,
         name: "New Request",
         method: "GET",
         url: "",
@@ -1525,6 +1582,7 @@
         {
           id: request.id,
           project_id: request.project_id,
+          folder_id: request.folder_id,
           name: request.name,
           method: request.method,
           url: request.url,
@@ -1532,6 +1590,7 @@
         },
         ...requests,
       ];
+      if (folderId) expandedFolderIds = new Set([...expandedFolderIds, folderId]);
       openTabs = [...openTabs, { id: request.id, name: request.name, method: request.method }];
       selectedRequest = request;
       activeResponse = null;
@@ -1541,6 +1600,59 @@
     } catch (err) {
       errorMessage = describeError(err);
     }
+  }
+
+  // "+" for folder next to a project — creates the folder, then drops straight into
+  // inline-rename, same pattern as quickCreateRequest/quickCreateProject.
+  async function quickCreateFolder(projectId: string) {
+    try {
+      if (selectedProjectId !== projectId) {
+        await selectProject(projectId);
+      }
+      const folder = await api.createFolder({ project_id: projectId, name: "New Folder" });
+      folders = [...folders, folder];
+      expandedFolderIds = new Set([...expandedFolderIds, folder.id]);
+      startRenameFolder(folder);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function startRenameFolder(folder: Folder) {
+    renamingFolderId = folder.id;
+    renameFolderValue = folder.name;
+  }
+
+  async function submitRenameFolder() {
+    const id = renamingFolderId;
+    const value = renameFolderValue.trim();
+    renamingFolderId = null;
+    if (!id || !value) return;
+    try {
+      const updated = await api.updateFolder({ id, name: value });
+      folders = folders.map((f) => (f.id === updated.id ? updated : f));
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // Ungroups the folder's requests back to the project root instead of deleting them —
+  // matches the backend's own delete_folder semantics (see folder_store.rs).
+  async function deleteFolderAction(id: string) {
+    try {
+      await api.deleteFolder(id);
+      folders = folders.filter((f) => f.id !== id);
+      requests = requests.map((r) => (r.folder_id === id ? { ...r, folder_id: null } : r));
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function toggleFolderExpanded(id: string) {
+    const next = new Set(expandedFolderIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    expandedFolderIds = next;
   }
 
   // Hydrate the full request only when the user actually opens it.
@@ -1802,7 +1914,7 @@
       tabDrafts.delete(updated.id);
       requests = requests.map((r) =>
         r.id === updated.id
-          ? { id: updated.id, project_id: updated.project_id, name: updated.name, method: updated.method, url: updated.url, updated_at: updated.updated_at }
+          ? { id: updated.id, project_id: updated.project_id, folder_id: updated.folder_id, name: updated.name, method: updated.method, url: updated.url, updated_at: updated.updated_at }
           : r,
       );
       autoSaveStatus = "saved";
@@ -1841,6 +1953,7 @@
         {
           id: request.id,
           project_id: request.project_id,
+          folder_id: request.folder_id,
           name: request.name,
           method: request.method,
           url: request.url,
@@ -1853,7 +1966,6 @@
         { id: request.id, name: request.name, method: request.method },
       ];
       selectedRequest = request;
-      showCurlImport = false;
       curlImportText = "";
       curlImportName = "";
     } catch (err) {
@@ -2549,11 +2661,15 @@
 
 
 <div class="app-shell" data-theme={themeMode === "dark" ? "dark" : "light"}>
-  {#if screensRailVisible}
-  <nav class="screens-rail">
+  <nav class="screens-rail" class:collapsed={!screensRailVisible}>
     <div class="rail-brand">
-      <span>Lightpost</span>
-      <button type="button" class="icon-btn" title="Hide screens menu" onclick={() => (screensRailVisible = false)}>«</button>
+      {#if screensRailVisible}<span>{t("rail.brand")}</span>{/if}
+      <button
+        type="button"
+        class="icon-btn"
+        title={screensRailVisible ? t("rail.hide") : t("rail.show")}
+        onclick={() => (screensRailVisible = !screensRailVisible)}
+      >☰</button>
     </div>
     <div class="rail-screens">
       {#each SCREENS as s (s.id)}
@@ -2561,31 +2677,32 @@
           type="button"
           class="rail-screen"
           class:active={activeScreen === s.id}
+          title={t(s.label)}
           onclick={() => (activeScreen = s.id)}
         >
-          <span>{s.label}</span>
+          <span class="rail-screen-icon">{s.icon}</span>
+          {#if screensRailVisible}<span class="rail-screen-label">{t(s.label)}</span>{/if}
         </button>
       {/each}
     </div>
-    <div class="rail-budget">
-      <span class="rail-budget-label">Resource budget</span>
-      {#if systemDiagnostics}
-        <span class="rail-budget-value">{formatByteSize(systemDiagnostics.process_rss_bytes)}</span>
-        <span class="rail-budget-meta">{openTabs.length} tabs open · DB {formatByteSize(systemDiagnostics.db_size_bytes + systemDiagnostics.db_wal_size_bytes)}</span>
-      {:else}
-        <span class="rail-budget-meta">Loading…</span>
-      {/if}
-    </div>
+    {#if screensRailVisible}
+      <div class="rail-budget">
+        <span class="rail-budget-label">{t("rail.budget")}</span>
+        {#if systemDiagnostics}
+          <span class="rail-budget-value">{formatByteSize(systemDiagnostics.process_rss_bytes)}</span>
+          <span class="rail-budget-meta">{t("rail.tabsOpen", { count: openTabs.length })} · DB {formatByteSize(systemDiagnostics.db_size_bytes + systemDiagnostics.db_wal_size_bytes)}</span>
+        {:else}
+          <span class="rail-budget-meta">{t("rail.loading")}</span>
+        {/if}
+      </div>
+    {/if}
   </nav>
-  {:else}
-  <button type="button" class="sidebar-expand-btn" title="Show screens menu" onclick={() => (screensRailVisible = true)}>»</button>
-  {/if}
 
   {#snippet noProjectPicker(screenName: string)}
     <section class="screen-page">
       <div class="screen-page-header">
         <span class="screen-kicker">{screenName}</span>
-        <h1 class="screen-title">Pick a project</h1>
+        <h1 class="screen-title">{t("env.pickProject")}</h1>
       </div>
       {#if projects.length}
         <div class="screen-page-body">
@@ -2597,14 +2714,14 @@
               if (id) selectProject(id);
             }}
           >
-            <option value="" disabled>Choose a project…</option>
+            <option value="" disabled>{t("env.chooseProject")}</option>
             {#each projects as p (p.id)}
               <option value={p.id}>{p.name}</option>
             {/each}
           </select>
         </div>
       {:else}
-        <p class="screen-empty">No projects yet — create one from the Workspace screen.</p>
+        <p class="screen-empty">{t("env.noProjectsYet")}</p>
       {/if}
     </section>
   {/snippet}
@@ -2624,29 +2741,47 @@
     </select>
   {/snippet}
 
+  {#snippet requestRow(req: RequestSummary)}
+    <li class="request-item" class:active={req.id === selectedRequest?.id}>
+      {#if renamingRequestId === req.id && req.id !== selectedRequest?.id}
+        <form class="inline-form" onsubmit={submitRenameRequest}>
+          <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
+          <button type="submit" title={t("sidebar.save")}>✓</button>
+          <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>✕</button>
+        </form>
+      {:else}
+        <button type="button" class="request-link" onclick={() => openRequest(req.id)} ondblclick={() => startRenameRequest(req.id, req.name)}>
+          <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
+          <span class="request-name">{req.name}</span>
+        </button>
+        <button class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteRequest(req.id)}>🗑</button>
+      {/if}
+    </li>
+  {/snippet}
+
   {#snippet expandedResponseView()}
     <section class="screen-page">
       <div class="screen-page-header">
-        <span class="screen-kicker">Response</span>
+        <span class="screen-kicker">{t("response.title")}</span>
         <div class="screen-title-row">
           {#if selectedRequest}
             <h1 class="screen-title">{selectedRequest.method} {selectedRequest.name}</h1>
           {:else}
-            <h1 class="screen-title">No request open</h1>
+            <h1 class="screen-title">{t("response.noRequestOpen")}</h1>
           {/if}
-          <button type="button" class="btn-ghost btn-xs" title="Back to Workspace" onclick={() => (responseExpanded = false)}>← Back to Workspace</button>
+          <button type="button" class="btn-ghost btn-xs" title={t("response.backToWorkspace")} onclick={() => (responseExpanded = false)}>{t("response.backToWorkspace")}</button>
         </div>
       </div>
 
       {#if !selectedRequest}
-        <p class="screen-empty">Open a request in the Workspace, then send it to see its response here.</p>
+        <p class="screen-empty">{t("response.openFromWorkspace")}</p>
       {:else if !activeResponse}
-        <p class="screen-empty">Send this request to see the response here.</p>
+        <p class="screen-empty">{t("response.sendToSee")}</p>
       {:else}
         <div class="response-screen-body">
           <aside class="response-screen-side">
             <div class="response-screen-stat-block">
-              <span class="screen-kicker">Status</span>
+              <span class="screen-kicker">{t("response.status")}</span>
               <div class="response-screen-status" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>
                 {activeResponse.status} {activeResponse.status_text}
               </div>
@@ -2654,58 +2789,58 @@
             </div>
             <div class="response-screen-metrics">
               <div class="response-screen-metric">
-                <span class="screen-kicker">Time</span>
+                <span class="screen-kicker">{t("response.time")}</span>
                 <div class="response-screen-metric-value">{activeResponse.duration_ms} ms</div>
               </div>
               <div class="response-screen-metric">
-                <span class="screen-kicker">Size</span>
+                <span class="screen-kicker">{t("response.size")}</span>
                 <div class="response-screen-metric-value">{formatByteSize(activeResponse.body_size)}</div>
               </div>
               <div class="response-screen-metric">
-                <span class="screen-kicker">Held in RAM</span>
+                <span class="screen-kicker">{t("response.heldInRam")}</span>
                 <div class="response-screen-metric-value">{formatByteSize(Math.min(activeResponse.body_size, 256 * 1024))}</div>
               </div>
               <div class="response-screen-metric">
-                <span class="screen-kicker">Storage</span>
-                <div class="response-screen-metric-value">{activeResponse.body_size > 256 * 1024 ? "Disk" : "Inline"}</div>
+                <span class="screen-kicker">{t("response.storage")}</span>
+                <div class="response-screen-metric-value">{activeResponse.body_size > 256 * 1024 ? t("response.disk") : t("response.inline")}</div>
               </div>
             </div>
             <div class="response-screen-tests">
-              <span class="screen-kicker">Tests</span>
+              <span class="screen-kicker">{t("response.tests")}</span>
               {#if activeResponseTests.length}
-                {#each activeResponseTests as t, i (i)}
+                {#each activeResponseTests as test, i (i)}
                   <div class="response-screen-test-row">
-                    <span class:status-ok={t.passed} class:status-err={!t.passed}>{t.passed ? "PASS" : "FAIL"}</span>
-                    <span>{t.name}</span>
+                    <span class:status-ok={test.passed} class:status-err={!test.passed}>{test.passed ? t("response.pass") : t("response.fail")}</span>
+                    <span>{test.name}</span>
                   </div>
                 {/each}
               {:else}
-                <p class="screen-empty-inline">No tests ran for this request.</p>
+                <p class="screen-empty-inline">{t("response.noTestsRan")}</p>
               {/if}
             </div>
           </aside>
 
           <div class="response-screen-main">
             <div class="response-subtabs">
-              <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>Body</button>
+              <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>{t("response.body")}</button>
               <button type="button" class="response-subtab" class:active={responseSubTab === "headers"} onclick={() => (responseSubTab = "headers")}>
-                Headers {#if activeResponse.headers?.length}<span class="tab-badge">{activeResponse.headers.length}</span>{/if}
+                {t("response.headers")} {#if activeResponse.headers?.length}<span class="tab-badge">{activeResponse.headers.length}</span>{/if}
               </button>
               <button type="button" class="response-subtab" class:active={responseSubTab === "cookies"} onclick={() => (responseSubTab = "cookies")}>
-                Cookies {#if activeResponse.cookies?.length}<span class="tab-badge">{activeResponse.cookies.length}</span>{/if}
+                {t("response.cookies")} {#if activeResponse.cookies?.length}<span class="tab-badge">{activeResponse.cookies.length}</span>{/if}
               </button>
               <div class="response-stat-spacer"></div>
               {#if responseSubTab === "body"}
-                <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>Pretty</button>
-                <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>Raw</button>
+                <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>{t("response.pretty")}</button>
+                <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>{t("response.raw")}</button>
               {/if}
-              <button type="button" class="btn-ghost btn-xs" onclick={copyResponseBody}>Copy</button>
-              <button type="button" class="btn-ghost btn-xs" onclick={downloadResponseBody}>Save to file</button>
+              <button type="button" class="btn-ghost btn-xs" onclick={copyResponseBody}>{t("response.copyAction")}</button>
+              <button type="button" class="btn-ghost btn-xs" onclick={downloadResponseBody}>{t("response.saveToFile")}</button>
             </div>
             <div class="response-screen-content">
               {#if responseSubTab === "body"}
                 <pre class="body-view screen-body-view">{prettyResponseBody}</pre>
-                {#if activeResponseTruncated}<p class="hint">(truncated — body is larger than the preview cap)</p>{/if}
+                {#if activeResponseTruncated}<p class="hint">{t("response.truncated")}</p>{/if}
               {:else if responseSubTab === "headers"}
                 {#if activeResponse.headers?.length}
                   <div class="headers-list">
@@ -2714,7 +2849,7 @@
                     {/each}
                   </div>
                 {:else}
-                  <p class="empty">This response had no headers.</p>
+                  <p class="empty">{t("response.noHeaders")}</p>
                 {/if}
               {:else if responseSubTab === "cookies"}
                 {#if activeResponse.cookies?.length}
@@ -2724,7 +2859,7 @@
                     {/each}
                   </div>
                 {:else}
-                  <p class="empty">No cookies were set by this response.</p>
+                  <p class="empty">{t("response.noCookies")}</p>
                 {/if}
               {/if}
             </div>
@@ -2742,7 +2877,7 @@
   <div class="app">
   <header class="topbar">
     <div class="topbar-left">
-      <span class="brand">⚡ Light Postman</span>
+      <span class="brand">⚡ {t("topbar.brand")}</span>
     </div>
     <div class="topbar-center">
       {#if selectedProjectId}
@@ -2762,8 +2897,8 @@
               loadVariables();
             }}
           >
-            <option value="__new__">+ Add new environment…</option>
-            <option value="__none__">No Environment</option>
+            <option value="__new__">{t("topbar.newEnvironment")}</option>
+            <option value="__none__">{t("topbar.noEnvironment")}</option>
             {#each environments as env (env.id)}
               <option value={env.id}>{env.name}</option>
             {/each}
@@ -2774,7 +2909,7 @@
               type="button"
               class="icon-btn"
               class:active={isDefault}
-              title={isDefault ? "Default environment for this project — click to unset" : "Set as this project's default environment"}
+              title={isDefault ? t("topbar.unsetDefaultEnv") : t("topbar.setDefaultEnv")}
               onclick={toggleDefaultEnvironment}
             >
               {isDefault ? "★" : "☆"}
@@ -2783,14 +2918,14 @@
           {#if renamingEnvironmentId}
             <form class="inline-form" onsubmit={submitRenameEnvironment}>
               <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
-              <button type="submit" title="Save">✓</button>
-              <button type="button" title="Cancel" onclick={() => (renamingEnvironmentId = null)}>✕</button>
+              <button type="submit" title={t("sidebar.save")}>✓</button>
+              <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>✕</button>
             </form>
           {/if}
           <button
             type="button"
             class="icon-btn"
-            title="Manage Variables"
+            title={t("topbar.manageVariables")}
             onclick={() => { loadVariables(); activeScreen = "environments"; }}
           >
             👁
@@ -2799,7 +2934,7 @@
             <button
               type="button"
               class="icon-btn"
-              title="Export selected environment as Postman Environment JSON"
+              title={t("topbar.exportEnvironment")}
               onclick={exportPostmanEnvironmentAction}
             >
               ⤓
@@ -2809,20 +2944,20 @@
       {/if}
     </div>
     <div class="topbar-right">
-      <button type="button" class="palette-trigger" title="Search or run a command" onclick={openPalette}>
-        <span>Search or run a command</span>
+      <button type="button" class="palette-trigger" title={t("topbar.searchPlaceholder")} onclick={openPalette}>
+        <span>{t("topbar.searchPlaceholder")}</span>
         <span class="palette-kbd">⌘K</span>
       </button>
       <button
         type="button"
         class="btn-ghost"
-        title={aiConfigured ? "Ask Claude AI about this project, or generate requests/tests/docs" : "Set up AI features (Claude API key)"}
+        title={aiConfigured ? t("topbar.askAiTitle") : t("topbar.setupAiTitle")}
         onclick={() => (showAiPanel = true)}
       >
-        ✨ {aiConfigured ? "Ask AI" : "Set up AI"}
+        ✨ {aiConfigured ? t("topbar.askAi") : t("topbar.setupAi")}
       </button>
-      <button type="button" class="btn-ghost" title="Import a Postman collection, environment, or cURL command" onclick={() => { importActiveTab = "collection"; collectionImportReport = null; collectionImportError = ""; activeScreen = "import"; }}>
-        📥 Import
+      <button type="button" class="btn-ghost" title={t("topbar.importTitle")} onclick={() => { importActiveTab = "collection"; collectionImportReport = null; collectionImportError = ""; activeScreen = "import"; }}>
+        📥 {t("topbar.import")}
       </button>
     </div>
   </header>
@@ -2833,7 +2968,7 @@
   {#if errorMessage}
     <div class="error-banner">
       {errorMessage}
-      <button type="button" class="dismiss-btn" title="Dismiss" onclick={() => (errorMessage = "")}>✕</button>
+      <button type="button" class="dismiss-btn" title={t("error.dismiss")} onclick={() => (errorMessage = "")}>✕</button>
     </div>
   {/if}
 
@@ -2841,17 +2976,29 @@
     {#if sidebarVisible}
     <aside class="sidebar" style="width: {sidebarWidth}px">
       <div class="sidebar-header">
-        <span class="sidebar-title">Projects</span>
+        <span class="sidebar-title">{t("sidebar.projects")}</span>
         <div class="sidebar-header-actions">
-          <button type="button" class="icon-btn" title="New project" onclick={quickCreateProject}>+</button>
-          <button type="button" class="icon-btn" title="Hide sidebar" onclick={() => (sidebarVisible = false)}>«</button>
+          <button
+            type="button"
+            class="icon-btn"
+            title={t("sidebar.importCollection")}
+            onclick={() => {
+              collectionImportTarget = "new";
+              importActiveTab = "collection";
+              collectionImportReport = null;
+              collectionImportError = "";
+              activeScreen = "import";
+            }}
+          >📥</button>
+          <button type="button" class="icon-btn" title={t("sidebar.newProject")} onclick={quickCreateProject}>+</button>
+          <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => (sidebarVisible = false)}>«</button>
         </div>
       </div>
 
       <div class="project-search-box">
         <input
           type="search"
-          placeholder="Search projects…"
+          placeholder={t("sidebar.searchProjects")}
           bind:value={projectSearchQuery}
           class="project-search-input"
         />
@@ -2867,8 +3014,8 @@
               {#if renamingProjectId === project.id}
                 <form class="inline-form" onsubmit={submitRenameProject}>
                   <input bind:value={renameProjectValue} use:focusOnMount onblur={submitRenameProject} />
-                  <button type="submit" title="Save">✓</button>
-                  <button type="button" title="Cancel" onclick={() => (renamingProjectId = null)}>✕</button>
+                  <button type="submit" title={t("sidebar.save")}>✓</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingProjectId = null)}>✕</button>
                 </form>
               {:else}
                 <button type="button" class="project-link" onclick={() => selectProject(project.id)} ondblclick={() => startRenameProject(project)}>
@@ -2876,10 +3023,11 @@
                   <span class="project-name">{project.name}</span>
                 </button>
                 <div class="project-row-actions">
-                  <button class="icon-btn" title="Add request" onclick={() => quickCreateRequest(project.id)}>+</button>
+                  <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id)}>+</button>
+                  <button class="icon-btn" title={t("sidebar.addFolder")} onclick={() => quickCreateFolder(project.id)}>📁+</button>
                   <button
                     class="icon-btn"
-                    title="Import a Postman collection, cURL command, or project file into this project"
+                    title={t("sidebar.importInto")}
                     onclick={async () => {
                       await selectProject(project.id);
                       collectionImportTarget = "current";
@@ -2889,10 +3037,10 @@
                       activeScreen = "import";
                     }}
                   >📥</button>
-                  <button class="icon-btn" title="Export as Postman Collection v2.1" onclick={() => exportPostmanCollectionAction(project.id)}>⤓</button>
+                  <button class="icon-btn" title={t("sidebar.exportCollection")} onclick={() => exportPostmanCollectionAction(project.id)}>⤓</button>
                   <button
                     class="icon-btn"
-                    title="Export as this app's own project file (.json) — used for git sync"
+                    title={t("sidebar.exportProjectFile")}
                     onclick={async () => {
                       await selectProject(project.id);
                       await exportProjectFileAction();
@@ -2900,8 +3048,8 @@
                       activeScreen = "git";
                     }}
                   >💾</button>
-                  <button class="icon-btn" title="Rename" onclick={() => startRenameProject(project)}>✎</button>
-                  <button class="icon-btn" title="Delete" onclick={() => deleteProject(project.id)}>🗑</button>
+                  <button class="icon-btn" title={t("sidebar.rename")} onclick={() => startRenameProject(project)}>✎</button>
+                  <button class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteProject(project.id)}>🗑</button>
                 </div>
               {/if}
             </div>
@@ -2911,7 +3059,7 @@
                 <div class="request-search-box">
                   <input
                     type="search"
-                    placeholder="Search requests..."
+                    placeholder={t("sidebar.searchRequests")}
                     bind:value={requestSearchQuery}
                     class="request-search-input"
                   />
@@ -2921,43 +3069,72 @@
                 </div>
 
                 {#if loadingRequests}
-                  <p class="hint">Loading…</p>
-                {:else}
+                  <p class="hint">{t("rail.loading")}</p>
+                {:else if requestSearchQuery}
                   <ul class="request-list">
                     {#each visibleRequests as req (req.id)}
-                      <li class="request-item" class:active={req.id === selectedRequest?.id}>
-                        {#if renamingRequestId === req.id && req.id !== selectedRequest?.id}
-                          <form class="inline-form" onsubmit={submitRenameRequest}>
-                            <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
-                            <button type="submit" title="Save">✓</button>
-                            <button type="button" title="Cancel" onclick={() => (renamingRequestId = null)}>✕</button>
-                          </form>
-                        {:else}
-                          <button type="button" class="request-link" onclick={() => openRequest(req.id)} ondblclick={() => startRenameRequest(req.id, req.name)}>
-                            <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
-                            <span class="request-name">{req.name}</span>
-                          </button>
-                          <button class="icon-btn icon-btn-ghost" title="Delete" onclick={() => deleteRequest(req.id)}>🗑</button>
-                        {/if}
-                      </li>
+                      {@render requestRow(req)}
                     {:else}
-                      <li class="empty">{requestSearchQuery ? "No matching requests." : "No requests yet — use the + next to the project name above, or import a Postman collection / cURL command."}</li>
+                      <li class="empty">{t("sidebar.noMatchingRequests")}</li>
                     {/each}
                   </ul>
 
                   {#if totalRequestPages > 1}
                     <div class="request-pagination">
-                      <button type="button" title="Previous page" disabled={requestPage === 0} onclick={() => (requestPage = Math.max(0, requestPage - 1))}>◀</button>
+                      <button type="button" title={t("sidebar.prevPage")} disabled={requestPage === 0} onclick={() => (requestPage = Math.max(0, requestPage - 1))}>◀</button>
                       <span>{requestPage + 1} / {totalRequestPages}</span>
-                      <button type="button" title="Next page" disabled={requestPage >= totalRequestPages - 1} onclick={() => (requestPage = Math.min(totalRequestPages - 1, requestPage + 1))}>▶</button>
+                      <button type="button" title={t("sidebar.nextPage")} disabled={requestPage >= totalRequestPages - 1} onclick={() => (requestPage = Math.min(totalRequestPages - 1, requestPage + 1))}>▶</button>
                     </div>
                   {/if}
+                {:else}
+                  {#each folders as folder (folder.id)}
+                    <div class="folder-node">
+                      <div class="folder-row">
+                        {#if renamingFolderId === folder.id}
+                          <form class="inline-form" onsubmit={submitRenameFolder}>
+                            <input bind:value={renameFolderValue} use:focusOnMount onblur={submitRenameFolder} />
+                            <button type="submit" title={t("sidebar.save")}>✓</button>
+                            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingFolderId = null)}>✕</button>
+                          </form>
+                        {:else}
+                          <button type="button" class="folder-link" onclick={() => toggleFolderExpanded(folder.id)} ondblclick={() => startRenameFolder(folder)}>
+                            <span class="folder-icon">{expandedFolderIds.has(folder.id) ? "📂" : "📁"}</span>
+                            <span class="project-name">{folder.name}</span>
+                          </button>
+                          <div class="project-row-actions">
+                            <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id, folder.id)}>+</button>
+                            <button class="icon-btn" title={t("sidebar.rename")} onclick={() => startRenameFolder(folder)}>✎</button>
+                            <button class="icon-btn" title={t("sidebar.deleteFolder")} onclick={() => deleteFolderAction(folder.id)}>🗑</button>
+                          </div>
+                        {/if}
+                      </div>
+                      {#if expandedFolderIds.has(folder.id)}
+                        <ul class="request-list folder-request-list">
+                          {#each requestsByFolderId.get(folder.id) ?? [] as req (req.id)}
+                            {@render requestRow(req)}
+                          {:else}
+                            <li class="empty">{t("sidebar.noRequestsInFolder")}</li>
+                          {/each}
+                        </ul>
+                      {/if}
+                    </div>
+                  {/each}
+
+                  <ul class="request-list">
+                    {#each rootRequests as req (req.id)}
+                      {@render requestRow(req)}
+                    {:else}
+                      {#if !folders.length}
+                        <li class="empty">{t("sidebar.noRequestsYet")}</li>
+                      {/if}
+                    {/each}
+                  </ul>
                 {/if}
               </div>
             {/if}
           </div>
         {:else}
-          <p class="empty">{projectSearchQuery ? "No matching projects." : "No projects yet — create one above to get started."}</p>
+          <p class="empty">{projectSearchQuery ? t("sidebar.noMatchingProjects") : t("sidebar.noProjectsYet")}</p>
         {/each}
       </div>
     </aside>
@@ -2980,19 +3157,19 @@
       tabindex="0"
     ></div>
     {:else}
-    <button type="button" class="sidebar-expand-btn" title="Show sidebar" onclick={() => (sidebarVisible = true)}>»</button>
+    <button type="button" class="sidebar-expand-btn" title={t("sidebar.show")} onclick={() => (sidebarVisible = true)}>»</button>
     {/if}
 
     <main class="main">
       {#if !selectedProjectId}
         <div class="empty-state">
           <div class="empty-icon">📁</div>
-          <p>Select a project on the left, or create one to get started.</p>
+          <p>{t("workspace.selectProject")}</p>
         </div>
       {:else if !selectedRequest}
         <div class="empty-state">
           <div class="empty-icon">📨</div>
-          <p>Select a request on the left, or add a new one to begin.</p>
+          <p>{t("request.selectPrompt")}</p>
         </div>
       {:else}
         <section class="detail">
@@ -3008,13 +3185,13 @@
                     <span class="tab-method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
                     <span class="tab-title">{tab.name}</span>
                     {#if isTabDirty(tab.id)}
-                      <span class="dirty-dot" title="Unsaved changes">•</span>
+                      <span class="dirty-dot" title={t("tab.unsavedChanges")}>•</span>
                     {/if}
                   </button>
                   <button
                     type="button"
                     class="tab-close-btn"
-                    title="Close tab"
+                    title={t("tab.closeTab")}
                     onclick={(e) => {
                       e.stopPropagation();
                       closeTab(tab.id);
@@ -3034,14 +3211,14 @@
             {#if renamingRequestId === selectedRequest.id}
               <form class="inline-form" onsubmit={submitRenameRequest}>
                 <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
-                <button type="submit" title="Save">✓</button>
-                <button type="button" title="Cancel" onclick={() => (renamingRequestId = null)}>✕</button>
+                <button type="submit" title={t("sidebar.save")}>✓</button>
+                <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>✕</button>
               </form>
             {:else}
               <button
                 type="button"
                 class="breadcrumb-current breadcrumb-current-btn"
-                title="Click to rename"
+                title={t("breadcrumb.renameHint")}
                 onclick={() => startRenameRequest(selectedRequest!.id, selectedRequest!.name)}
               >
                 {selectedRequest.name} <span class="breadcrumb-edit-hint">✎</span>
@@ -3083,7 +3260,7 @@
                     {/each}
                   </div>
                   <input
-                    placeholder="https://api.example.com/... or paste a curl command"
+                    placeholder={t("request.urlPlaceholder")}
                     bind:value={editUrl}
                     class="url-input url-input-ghost"
                     oninput={scheduleAutoSave}
@@ -3094,23 +3271,31 @@
               </div>
               <div class="send-action">
                 {#if sending}
-                  <button type="button" class="btn-cancel" onclick={cancelCurrentSend}>Cancel</button>
+                  <button type="button" class="btn-cancel" onclick={cancelCurrentSend}>{t("request.cancel")}</button>
                 {:else}
-                  <button type="button" class="btn-send" onclick={sendCurrentRequest}>Send</button>
+                  <button type="button" class="btn-send" onclick={sendCurrentRequest}>{t("request.send")}</button>
                 {/if}
+                <button
+                  type="button"
+                  class="btn-save"
+                  class:is-error={autoSaveStatus === "error"}
+                  class:is-unsaved={autoSaveStatus === "unsaved"}
+                  title={t("request.saveNow")}
+                  onclick={() => saveRequest()}
+                >
+                  {#if autoSaveStatus === "saving"}{t("request.saving")}
+                  {:else if autoSaveStatus === "unsaved"}{t("request.unsaved")}
+                  {:else if autoSaveStatus === "error"}{t("request.saveFailed")}
+                  {:else}{t("request.saved")}{/if}
+                </button>
               </div>
             </div>
             <div class="request-bar-row secondary">
-              <span class="save-status" class:is-error={autoSaveStatus === "error"}>
-                {#if autoSaveStatus === "saving"}Saving…
-                {:else if autoSaveStatus === "unsaved"}Unsaved changes…
-                {:else if autoSaveStatus === "error"}⚠ Save failed
-                {:else}✓ Saved{/if}
-              </span>
               {#if curlDetectedFeedback}
                 <span class="hint">{curlDetectedFeedback}</span>
               {/if}
-              <button type="button" class="icon-btn" title="Delete request" onclick={() => deleteRequest(selectedRequest!.id)}>🗑</button>
+              <div class="response-stat-spacer"></div>
+              <button type="button" class="icon-btn" title={t("request.deleteRequest")} onclick={() => deleteRequest(selectedRequest!.id)}>🗑</button>
             </div>
           </form>
 
@@ -3118,13 +3303,13 @@
             <div
               class="missing-var-popover-portal"
               role="group"
-              aria-label="Add value for {missingVarHover.name}"
+              aria-label={t("missingvar.addValueFor", { name: missingVarHover.name })}
               style="top: {missingVarHover.top}px; left: {missingVarHover.left}px;"
               onmouseenter={cancelHideMissingVarPopover}
               onmouseleave={scheduleHideMissingVarPopover}
             >
               <input
-                placeholder="Value for {missingVarHover.name}"
+                placeholder={t("missingvar.valueFor", { name: missingVarHover.name })}
                 value={missingVarDrafts[missingVarHover.name] ?? ""}
                 oninput={(e) => (missingVarDrafts[missingVarHover!.name] = (e.target as HTMLInputElement).value)}
                 onkeydown={(e) => {
@@ -3134,22 +3319,22 @@
                   }
                 }}
               />
-              <button type="button" onclick={() => addMissingVariable(missingVarHover!.name)}>Add</button>
+              <button type="button" onclick={() => addMissingVariable(missingVarHover!.name)}>{t("missingvar.add")}</button>
             </div>
           {/if}
 
           {#if urlPreview}
             <div class="url-preview-bar">
-              <span class="preview-label">Resolves to:</span> <code>{urlPreview.resolved}</code>
+              <span class="preview-label">{t("request.resolvesTo")}</span> <code>{urlPreview.resolved}</code>
               {#if urlPreview.missing.length}
-                <span class="warn-inline">(missing: {urlPreview.missing.join(", ")})</span>
+                <span class="warn-inline">{t("request.missing", { list: urlPreview.missing.join(", ") })}</span>
               {/if}
             </div>
           {/if}
 
           {#if requestDiagnostics?.all_missing?.length}
             <div class="warn-banner missing-vars-banner">
-              ⚠️ Unresolved variables:
+              ⚠️ {t("request.unresolvedVariables")}
               {#each requestDiagnostics.all_missing as varName (varName)}
                 <span
                   class="missing-var-chip"
@@ -3160,51 +3345,51 @@
                   <strong>{varName}</strong>
                 </span>
               {/each}
-              <span class="hint">(hover a name to fill it in — saved to {selectedEnvironmentId ? "the active environment" : "this project's global variables"})</span>
+              <span class="hint">{t("request.unresolvedHint", { scope: selectedEnvironmentId ? t("request.scopeEnvironment") : t("request.scopeGlobal") })}</span>
             </div>
           {/if}
 
           <div class="editor-tabs">
             <button type="button" class="editor-tab" class:active={activeEditorTab === "params"} onclick={() => (activeEditorTab = "params")}>
-              Params
+              {t("tab.params")}
               {#if requestDiagnostics?.query_params_missing?.length}
-                <span class="tab-badge-warn" title="Missing in Params: {requestDiagnostics.query_params_missing.join(', ')}">⚠ {requestDiagnostics.query_params_missing.length}</span>
+                <span class="tab-badge-warn" title={t("tab.missingInParams", { list: requestDiagnostics.query_params_missing.join(', ') })}>⚠ {requestDiagnostics.query_params_missing.length}</span>
               {:else if withoutEmptyKeyRows(editQueryParams).length}
                 <span class="tab-badge">{withoutEmptyKeyRows(editQueryParams).length}</span>
               {/if}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "headers"} onclick={() => (activeEditorTab = "headers")}>
-              Headers
+              {t("tab.headers")}
               {#if requestDiagnostics?.headers_missing?.length}
-                <span class="tab-badge-warn" title="Missing in Headers: {requestDiagnostics.headers_missing.join(', ')}">⚠ {requestDiagnostics.headers_missing.length}</span>
+                <span class="tab-badge-warn" title={t("tab.missingInHeaders", { list: requestDiagnostics.headers_missing.join(', ') })}>⚠ {requestDiagnostics.headers_missing.length}</span>
               {:else if withoutEmptyKeyRows(editHeaders).length}
                 <span class="tab-badge">{withoutEmptyKeyRows(editHeaders).length}</span>
               {/if}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "auth"} onclick={() => (activeEditorTab = "auth")}>
-              Auth
+              {t("tab.auth")}
               {#if requestDiagnostics?.auth_missing?.length}
-                <span class="tab-badge-warn" title="Missing in Auth: {requestDiagnostics.auth_missing.join(', ')}">⚠ {requestDiagnostics.auth_missing.length}</span>
+                <span class="tab-badge-warn" title={t("tab.missingInAuth", { list: requestDiagnostics.auth_missing.join(', ') })}>⚠ {requestDiagnostics.auth_missing.length}</span>
               {:else if editAuthType !== "none"}
                 <span class="tab-dot">•</span>
               {/if}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "body"} onclick={() => (activeEditorTab = "body")}>
-              Body
+              {t("tab.body")}
               {#if requestDiagnostics?.body_missing?.length}
-                <span class="tab-badge-warn" title="Missing in Body: {requestDiagnostics.body_missing.join(', ')}">⚠ {requestDiagnostics.body_missing.length}</span>
+                <span class="tab-badge-warn" title={t("tab.missingInBody", { list: requestDiagnostics.body_missing.join(', ') })}>⚠ {requestDiagnostics.body_missing.length}</span>
               {:else if editBody}
                 <span class="tab-dot">•</span>
               {/if}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "scripts"} onclick={() => (activeEditorTab = "scripts")}>
-              Scripts {#if editPreScript || editPostScript}<span class="tab-dot">•</span>{/if}
+              {t("tab.scripts")} {#if editPreScript || editPostScript}<span class="tab-dot">•</span>{/if}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "settings"} onclick={() => (activeEditorTab = "settings")}>
-              Settings
+              {t("tab.settings")}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "docs"} onclick={() => (activeEditorTab = "docs")}>
-              Docs {#if editDescription}<span class="tab-dot">•</span>{/if}
+              {t("tab.docs")} {#if editDescription}<span class="tab-dot">•</span>{/if}
             </button>
           </div>
 
@@ -3215,11 +3400,11 @@
               <div class="params-table">
                 {#each editQueryParams as param, i (i)}
                   <div class="params-row">
-                    <input type="checkbox" bind:checked={param.enabled} title="Enabled" onchange={scheduleAutoSave} />
-                    <input placeholder="Key" bind:value={param.key} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
-                    <input placeholder="Value" bind:value={param.value} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
+                    <input type="checkbox" bind:checked={param.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
+                    <input placeholder={t("params.key")} bind:value={param.key} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
+                    <input placeholder={t("params.value")} bind:value={param.value} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
                     {#if i < editQueryParams.length - 1 || param.key.trim()}
-                      <button type="button" class="icon-btn" title="Remove" onclick={() => { removeQueryParam(i); scheduleAutoSave(); }}>🗑</button>
+                      <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeQueryParam(i); scheduleAutoSave(); }}>🗑</button>
                     {/if}
                   </div>
                 {/each}
@@ -3229,12 +3414,12 @@
               <div class="params-table">
                 {#each editHeaders as header, i (i)}
                   <div class="params-row">
-                    <input type="checkbox" bind:checked={header.enabled} title="Enabled" onchange={scheduleAutoSave} />
-                    <input placeholder="Key" bind:value={header.key} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
-                    <input placeholder="Value" bind:value={header.value} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
-                    <input placeholder="Description (optional)" bind:value={header.description} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
+                    <input type="checkbox" bind:checked={header.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
+                    <input placeholder={t("params.key")} bind:value={header.key} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
+                    <input placeholder={t("params.value")} bind:value={header.value} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
+                    <input placeholder={t("headers.description")} bind:value={header.description} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
                     {#if i < editHeaders.length - 1 || header.key.trim()}
-                      <button type="button" class="icon-btn" title="Remove" onclick={() => { removeHeader(i); scheduleAutoSave(); }}>🗑</button>
+                      <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeHeader(i); scheduleAutoSave(); }}>🗑</button>
                     {/if}
                   </div>
                 {/each}
@@ -3243,27 +3428,27 @@
             {:else if activeEditorTab === "auth"}
               <div class="params-table">
                 <select bind:value={editAuthType} onchange={scheduleAutoSave}>
-                  <option value="none">No Auth</option>
-                  <option value="bearer">Bearer Token</option>
-                  <option value="basic">Basic Auth</option>
-                  <option value="api_key">API Key</option>
+                  <option value="none">{t("auth.none")}</option>
+                  <option value="bearer">{t("auth.bearer")}</option>
+                  <option value="basic">{t("auth.basic")}</option>
+                  <option value="api_key">{t("auth.apiKey")}</option>
                 </select>
                 {#if editAuthType === "bearer"}
                   <div class="params-row">
-                    <input placeholder="Token" bind:value={editAuthBearerToken} oninput={scheduleAutoSave} />
+                    <input placeholder={t("auth.token")} bind:value={editAuthBearerToken} oninput={scheduleAutoSave} />
                   </div>
                 {:else if editAuthType === "basic"}
                   <div class="params-row">
-                    <input placeholder="Username" bind:value={editAuthBasicUsername} oninput={scheduleAutoSave} />
-                    <input placeholder="Password" type="password" bind:value={editAuthBasicPassword} oninput={scheduleAutoSave} />
+                    <input placeholder={t("auth.username")} bind:value={editAuthBasicUsername} oninput={scheduleAutoSave} />
+                    <input placeholder={t("auth.password")} type="password" bind:value={editAuthBasicPassword} oninput={scheduleAutoSave} />
                   </div>
                 {:else if editAuthType === "api_key"}
                   <div class="params-row">
-                    <input placeholder="Key" bind:value={editAuthApiKeyKey} oninput={scheduleAutoSave} />
-                    <input placeholder="Value" bind:value={editAuthApiKeyValue} oninput={scheduleAutoSave} />
+                    <input placeholder={t("params.key")} bind:value={editAuthApiKeyKey} oninput={scheduleAutoSave} />
+                    <input placeholder={t("params.value")} bind:value={editAuthApiKeyValue} oninput={scheduleAutoSave} />
                     <select bind:value={editAuthApiKeyLocation} onchange={scheduleAutoSave}>
-                      <option value="header">Header</option>
-                      <option value="query">Query Param</option>
+                      <option value="header">{t("auth.locationHeader")}</option>
+                      <option value="query">{t("auth.locationQuery")}</option>
                     </select>
                   </div>
                 {/if}
@@ -3273,29 +3458,29 @@
               <div class="params-table">
                 <div class="body-mode-bar">
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="raw" onchange={scheduleAutoSave} /> Raw
+                    <input type="radio" bind:group={editBodyType} value="raw" onchange={scheduleAutoSave} /> {t("body.raw")}
                   </label>
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="form-data" onchange={scheduleAutoSave} /> Form Data
+                    <input type="radio" bind:group={editBodyType} value="form-data" onchange={scheduleAutoSave} /> {t("body.formData")}
                   </label>
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="x-www-form-urlencoded" onchange={scheduleAutoSave} /> URL Encoded
+                    <input type="radio" bind:group={editBodyType} value="x-www-form-urlencoded" onchange={scheduleAutoSave} /> {t("body.urlEncoded")}
                   </label>
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="binary" onchange={scheduleAutoSave} /> Binary
+                    <input type="radio" bind:group={editBodyType} value="binary" onchange={scheduleAutoSave} /> {t("body.binary")}
                   </label>
                   <label class="radio-label">
-                    <input type="radio" bind:group={editBodyType} value="graphql" onchange={scheduleAutoSave} /> GraphQL
+                    <input type="radio" bind:group={editBodyType} value="graphql" onchange={scheduleAutoSave} /> {t("body.graphql")}
                   </label>
                   {#if editBodyType === "raw"}
-                    <button type="button" onclick={() => { if (!editBody) editBody = "{\n  \n}"; scheduleAutoSave(); }}>JSON template</button>
-                    <button type="button" onclick={() => { editBody = ""; scheduleAutoSave(); }}>Clear body</button>
+                    <button type="button" onclick={() => { if (!editBody) editBody = "{\n  \n}"; scheduleAutoSave(); }}>{t("body.jsonTemplate")}</button>
+                    <button type="button" onclick={() => { editBody = ""; scheduleAutoSave(); }}>{t("body.clearBody")}</button>
                   {/if}
                 </div>
 
                 {#if editBodyType === "raw"}
                   <textarea
-                    placeholder="Request body (JSON, text, XML, etc.)"
+                    placeholder={t("body.rawPlaceholder")}
                     bind:value={editBody}
                     class="body-input"
                     rows="8"
@@ -3305,18 +3490,18 @@
                   <div class="params-table">
                     {#each editFormDataItems as item, i (i)}
                       <div class="params-row">
-                        <input type="checkbox" bind:checked={item.enabled} title="Enabled" onchange={scheduleAutoSave} />
-                        <input placeholder="Key" bind:value={item.key} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
+                        <input type="checkbox" bind:checked={item.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
+                        <input placeholder={t("params.key")} bind:value={item.key} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
                         {#if item.is_file}
-                          <input placeholder="File path" bind:value={item.file_path} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
+                          <input placeholder={t("body.filePath")} bind:value={item.file_path} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
                         {:else}
-                          <input placeholder="Value" bind:value={item.value} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
+                          <input placeholder={t("params.value")} bind:value={item.value} oninput={() => { growFormDataItems(); scheduleAutoSave(); }} />
                         {/if}
-                        <label class="checkbox-label" title="Send this field as a file (path on disk) instead of text">
-                          <input type="checkbox" bind:checked={item.is_file} onchange={scheduleAutoSave} /> File
+                        <label class="checkbox-label" title={t("body.fileHint")}>
+                          <input type="checkbox" bind:checked={item.is_file} onchange={scheduleAutoSave} /> {t("body.file")}
                         </label>
                         {#if i < editFormDataItems.length - 1 || item.key.trim()}
-                          <button type="button" class="icon-btn" title="Remove" onclick={() => { removeFormDataItem(i); scheduleAutoSave(); }}>🗑</button>
+                          <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeFormDataItem(i); scheduleAutoSave(); }}>🗑</button>
                         {/if}
                       </div>
                     {/each}
@@ -3325,11 +3510,11 @@
                   <div class="params-table">
                     {#each editUrlEncodedItems as item, i (i)}
                       <div class="params-row">
-                        <input type="checkbox" bind:checked={item.enabled} title="Enabled" onchange={scheduleAutoSave} />
-                        <input placeholder="Key" bind:value={item.key} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
-                        <input placeholder="Value" bind:value={item.value} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
+                        <input type="checkbox" bind:checked={item.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
+                        <input placeholder={t("params.key")} bind:value={item.key} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
+                        <input placeholder={t("params.value")} bind:value={item.value} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
                         {#if i < editUrlEncodedItems.length - 1 || item.key.trim()}
-                          <button type="button" class="icon-btn" title="Remove" onclick={() => { removeUrlEncodedItem(i); scheduleAutoSave(); }}>🗑</button>
+                          <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeUrlEncodedItem(i); scheduleAutoSave(); }}>🗑</button>
                         {/if}
                       </div>
                     {/each}
@@ -3337,15 +3522,15 @@
                 {:else if editBodyType === "binary"}
                   <div class="params-table">
                     <div class="params-row">
-                      <input placeholder="Absolute file path (e.g. C:\files\photo.png)" bind:value={editBinaryFilePath} oninput={scheduleAutoSave} />
+                      <input placeholder={t("body.binaryPathPlaceholder")} bind:value={editBinaryFilePath} oninput={scheduleAutoSave} />
                     </div>
-                    <p class="hint">The file is streamed from disk at send time — it's never loaded into the app's memory ahead of time.</p>
+                    <p class="hint">{t("body.binaryHint")}</p>
                   </div>
                 {:else if editBodyType === "graphql"}
                   <div class="graphql-editor">
-                    <h4>Query</h4>
+                    <h4>{t("body.graphqlQuery")}</h4>
                     <textarea
-                      placeholder={"query MyQuery {\n  ...\n}"}
+                      placeholder={t("body.graphqlQueryPlaceholder")}
                       bind:value={editGraphqlQuery}
                       class="body-input"
                       rows="6"
@@ -3359,9 +3544,9 @@
                         scheduleAutoSave();
                       }}
                     ></textarea>
-                    <h4>Variables (JSON)</h4>
+                    <h4>{t("body.graphqlVariables")}</h4>
                     <textarea
-                      placeholder={"{\n  \"key\": \"value\"\n}"}
+                      placeholder={t("body.graphqlVariablesPlaceholder")}
                       bind:value={editGraphqlVariables}
                       class="body-input"
                       rows="3"
@@ -3383,39 +3568,39 @@
               <div class="scripts-layout">
                 <div class="scripts-side">
                   <button type="button" class="scripts-side-item" class:active={activeScriptTab === "pre"} onclick={() => (activeScriptTab = "pre")}>
-                    Pre {#if editPreScript}<span class="tab-dot">•</span>{/if}
+                    {t("scripts.pre")} {#if editPreScript}<span class="tab-dot">•</span>{/if}
                   </button>
                   <button type="button" class="scripts-side-item" class:active={activeScriptTab === "post"} onclick={() => (activeScriptTab = "post")}>
-                    Post {#if editPostScript}<span class="tab-dot">•</span>{/if}
+                    {t("scripts.post")} {#if editPostScript}<span class="tab-dot">•</span>{/if}
                   </button>
                 </div>
                 <div class="scripts-main">
                   {#if activeScriptTab === "pre"}
-                    <p class="hint">Runs before this request is sent.</p>
+                    <p class="hint">{t("scripts.preHint")}</p>
                     <textarea
-                      placeholder="// e.g. pm.environment.set('timestamp', Date.now());"
+                      placeholder={t("scripts.prePlaceholder")}
                       bind:value={editPreScript}
                       class="body-input scripts-textarea"
                       oninput={scheduleAutoSave}
                     ></textarea>
                   {:else}
                     <div class="field-header-row">
-                      <p class="hint">Runs after the response comes back — write pm.test() assertions here.</p>
+                      <p class="hint">{t("scripts.postHint")}</p>
                       <button
                         type="button"
                         class="btn-ghost btn-xs"
                         disabled={generatingTestsDocs}
                         onclick={() => generateTestsAndDocsWithAiAction("tests")}
-                        title="Generate pm.test assertions using Claude AI"
+                        title={t("scripts.generateTestsTitle")}
                       >
-                        {generatingTestsDocs ? "Generating…" : "✨ Generate Tests with AI"}
+                        {generatingTestsDocs ? t("scripts.generating") : t("scripts.generateTests")}
                       </button>
                     </div>
                     {#if testsDocsFeedback}
                       <p class="action-feedback-inline">{testsDocsFeedback}</p>
                     {/if}
                     <textarea
-                      placeholder="// e.g. pm.test('Status is 200', () => pm.response.to.have.status(200));"
+                      placeholder={t("scripts.postPlaceholder")}
                       bind:value={editPostScript}
                       class="body-input scripts-textarea"
                       oninput={scheduleAutoSave}
@@ -3427,10 +3612,10 @@
             {:else if activeEditorTab === "settings"}
               <div class="params-table settings-grid">
                 <label class="settings-row">
-                  <span>Timeout (ms):</span>
+                  <span>{t("reqSettings.timeout")}</span>
                   <input
                     type="number"
-                    placeholder="None (use default)"
+                    placeholder={t("reqSettings.timeoutPlaceholder")}
                     value={editTimeoutMs ?? ""}
                     oninput={(e) => {
                       const val = (e.target as HTMLInputElement).value;
@@ -3441,24 +3626,24 @@
                 </label>
                 <label class="checkbox-label">
                   <input type="checkbox" bind:checked={editFollowRedirects} onchange={scheduleAutoSave} />
-                  Follow HTTP Redirects
+                  {t("reqSettings.followRedirects")}
                 </label>
                 <label class="settings-row">
-                  <span>Max Redirects:</span>
+                  <span>{t("reqSettings.maxRedirects")}</span>
                   <input type="number" bind:value={editMaxRedirects} min="0" max="50" oninput={scheduleAutoSave} />
                 </label>
                 <label class="checkbox-label">
                   <input type="checkbox" bind:checked={editVerifySsl} onchange={scheduleAutoSave} />
-                  Verify SSL / TLS Certificates
+                  {t("reqSettings.verifySsl")}
                 </label>
                 <label class="settings-row">
-                  <span>Proxy URL:</span>
+                  <span>{t("reqSettings.proxyUrl")}</span>
                   <input placeholder="http://127.0.0.1:8080" bind:value={editProxyUrl} oninput={scheduleAutoSave} />
                 </label>
                 <label class="settings-row">
-                  <span>HTTP Version:</span>
+                  <span>{t("reqSettings.httpVersion")}</span>
                   <select bind:value={editHttpVersion} onchange={scheduleAutoSave}>
-                    <option value="">Default (HTTP/1.1 or HTTP/2)</option>
+                    <option value="">{t("reqSettings.httpVersionDefault")}</option>
                     <option value="HTTP/1.1">HTTP/1.1</option>
                     <option value="HTTP/2">HTTP/2</option>
                   </select>
@@ -3468,22 +3653,22 @@
             {:else if activeEditorTab === "docs"}
               <div class="params-table">
                 <div class="field-header-row">
-                  <h4>Documentation & Notes</h4>
+                  <h4>{t("docs.title")}</h4>
                   <button
                     type="button"
                     class="btn-ghost btn-xs"
                     disabled={generatingTestsDocs}
                     onclick={() => generateTestsAndDocsWithAiAction("docs")}
-                    title="Generate Markdown documentation using Claude AI"
+                    title={t("docs.generateTitle")}
                   >
-                    {generatingTestsDocs ? "Generating…" : "✨ Generate Docs with AI"}
+                    {generatingTestsDocs ? t("scripts.generating") : t("docs.generate")}
                   </button>
                 </div>
                 {#if testsDocsFeedback}
                   <p class="action-feedback-inline">{testsDocsFeedback}</p>
                 {/if}
                 <textarea
-                  placeholder="Documentation, notes, or endpoint description (Markdown supported)..."
+                  placeholder={t("docs.placeholder")}
                   bind:value={editDescription}
                   class="body-input"
                   rows="8"
@@ -3497,7 +3682,7 @@
           {#if sending}
             <div class="response-loading">
               <span class="spinner" aria-hidden="true"></span>
-              Sending request…
+              {t("response.sending")}
             </div>
           {:else if activeResponse}
             <div class="response">
@@ -3505,40 +3690,40 @@
                 <span class="response-stat-status" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>
                   {activeResponse.status} {activeResponse.status_text}
                 </span>
-                <span class="response-stat-item"><span class="response-stat-label">Time</span> {activeResponse.duration_ms} ms</span>
-                <span class="response-stat-item"><span class="response-stat-label">Size</span> {formatByteSize(activeResponse.body_size)}</span>
+                <span class="response-stat-item"><span class="response-stat-label">{t("response.time")}</span> {activeResponse.duration_ms} ms</span>
+                <span class="response-stat-item"><span class="response-stat-label">{t("response.size")}</span> {formatByteSize(activeResponse.body_size)}</span>
                 <div class="response-stat-spacer"></div>
                 {#if copyFeedback}
                   <span class="hint">{copyFeedback}</span>
                 {/if}
-                <button type="button" class="icon-btn" title="Copy response body" onclick={copyResponseBody}>⧉</button>
-                <button type="button" class="icon-btn" title="Download response body" onclick={downloadResponseBody}>⭳</button>
-                <button type="button" class="icon-btn" title="Expand to full-detail view" onclick={() => (responseExpanded = true)}>⤢</button>
+                <button type="button" class="icon-btn" title={t("response.copyTitle")} onclick={copyResponseBody}>⧉</button>
+                <button type="button" class="icon-btn" title={t("response.downloadTitle")} onclick={downloadResponseBody}>⭳</button>
+                <button type="button" class="icon-btn" title={t("response.expand")} onclick={() => (responseExpanded = true)}>⤢</button>
               </div>
 
               <div class="response-subtabs">
-                <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>Body</button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>{t("response.body")}</button>
                 <button type="button" class="response-subtab" class:active={responseSubTab === "headers"} onclick={() => (responseSubTab = "headers")}>
-                  Headers
+                  {t("response.headers")}
                   {#if activeResponse.headers?.length}<span class="tab-badge">{activeResponse.headers.length}</span>{/if}
                 </button>
                 <button type="button" class="response-subtab" class:active={responseSubTab === "cookies"} onclick={() => (responseSubTab = "cookies")}>
-                  Cookies
+                  {t("response.cookies")}
                   {#if activeResponse.cookies?.length}<span class="tab-badge">{activeResponse.cookies.length}</span>{/if}
                 </button>
                 <button type="button" class="response-subtab" class:active={responseSubTab === "tests"} onclick={() => (responseSubTab = "tests")}>
-                  Tests
+                  {t("response.tests")}
                   {#if activeResponseTests.length}
-                    <span class="tab-badge" class:tab-badge-warn={activeResponseTests.some((t) => !t.passed)}>
-                      {activeResponseTests.filter((t) => t.passed).length}/{activeResponseTests.length}
+                    <span class="tab-badge" class:tab-badge-warn={activeResponseTests.some((test) => !test.passed)}>
+                      {activeResponseTests.filter((test) => test.passed).length}/{activeResponseTests.length}
                     </span>
                   {/if}
                 </button>
 
                 {#if responseSubTab === "body"}
                   <div class="response-format-toggle">
-                    <button type="button" class="btn-toggle" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>Pretty</button>
-                    <button type="button" class="btn-toggle" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>Raw</button>
+                    <button type="button" class="btn-toggle" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>{t("response.pretty")}</button>
+                    <button type="button" class="btn-toggle" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>{t("response.raw")}</button>
                   </div>
                 {/if}
               </div>
@@ -3547,7 +3732,7 @@
                 {#if responseSubTab === "body"}
                   <pre class="body-view">{prettyResponseBody}</pre>
                   {#if activeResponseTruncated}
-                    <p class="hint">(truncated — body is larger than the preview cap)</p>
+                    <p class="hint">{t("response.truncated")}</p>
                   {/if}
                 {:else if responseSubTab === "headers"}
                   {#if activeResponse.headers?.length}
@@ -3559,7 +3744,7 @@
                       {/each}
                     </div>
                   {:else}
-                    <p class="empty">This response had no headers.</p>
+                    <p class="empty">{t("response.noHeaders")}</p>
                   {/if}
                 {:else if responseSubTab === "cookies"}
                   {#if activeResponse.cookies?.length}
@@ -3567,29 +3752,29 @@
                       {#each activeResponse.cookies as c}
                         <div class="header-line">
                           <strong>{c.name}:</strong> {c.value}
-                          {#if c.domain}<span class="hint">domain: {c.domain}</span>{/if}
-                          {#if c.path}<span class="hint">path: {c.path}</span>{/if}
-                          {#if c.http_only}<span class="badge">HttpOnly</span>{/if}
-                          {#if c.secure}<span class="badge">Secure</span>{/if}
+                          {#if c.domain}<span class="hint">{t("cookie.domain", { value: c.domain })}</span>{/if}
+                          {#if c.path}<span class="hint">{t("cookie.path", { value: c.path })}</span>{/if}
+                          {#if c.http_only}<span class="badge">{t("cookie.httpOnly")}</span>{/if}
+                          {#if c.secure}<span class="badge">{t("cookie.secure")}</span>{/if}
                         </div>
                       {/each}
                     </div>
                   {:else}
-                    <p class="empty">No cookies were set by this response.</p>
+                    <p class="empty">{t("response.noCookies")}</p>
                   {/if}
                 {:else if responseSubTab === "tests"}
                   {#if activeResponseTests.length}
                     <ul class="test-results-list">
-                      {#each activeResponseTests as t, i (i)}
-                        <li class="test-result-row" class:test-pass={t.passed} class:test-fail={!t.passed}>
-                          <span class="test-result-icon">{t.passed ? "✓" : "✗"}</span>
-                          <span class="test-result-name">{t.name}</span>
-                          {#if !t.passed && t.error}<span class="test-result-error">{t.error}</span>{/if}
+                      {#each activeResponseTests as test, i (i)}
+                        <li class="test-result-row" class:test-pass={test.passed} class:test-fail={!test.passed}>
+                          <span class="test-result-icon">{test.passed ? "✓" : "✗"}</span>
+                          <span class="test-result-name">{test.name}</span>
+                          {#if !test.passed && test.error}<span class="test-result-error">{test.error}</span>{/if}
                         </li>
                       {/each}
                     </ul>
                   {:else}
-                    <p class="empty">No tests ran for this request. Add assertions in the Scripts tab to see pass/fail results here.</p>
+                    <p class="empty">{t("response.testsHintFull")}</p>
                   {/if}
                 {/if}
               </div>
@@ -3597,21 +3782,21 @@
           {:else}
             <div class="response-empty-state">
               <div class="empty-icon">📭</div>
-              <p>Send the request to see the response here.</p>
+              <p>{t("response.sendEmpty")}</p>
             </div>
           {/if}
 
           <div class="sample-responses-section">
             <div class="field-header-row">
-              <h3>Sample / Mock Responses ({sampleResponses.length})</h3>
+              <h3>{t("sample.title", { count: sampleResponses.length })}</h3>
               <button
                 type="button"
                 class="btn-ghost btn-xs"
                 disabled={generatingSample}
                 onclick={generateSampleResponseWithAiAction}
-                title="Synthesize a realistic sample response using Claude AI"
+                title={t("sample.generateTitle")}
               >
-                {generatingSample ? "Generating…" : "✨ Generate Sample Response with AI"}
+                {generatingSample ? t("scripts.generating") : t("sample.generate")}
               </button>
             </div>
             {#if sampleFeedback}
@@ -3622,7 +3807,7 @@
                 {#each sampleResponses as sr (sr.id)}
                   <details class="sample-response-card">
                     <summary class="sample-response-summary">
-                      <span class="badge badge-sample">SAMPLE / MOCK</span>
+                      <span class="badge badge-sample">{t("sample.badge")}</span>
                       <strong class:status-ok={sr.status < 400} class:status-err={sr.status >= 400}>
                         {sr.status}
                       </strong>
@@ -3632,7 +3817,7 @@
                         type="button"
                         class="btn-delete-icon"
                         onclick={(e) => { e.stopPropagation(); deleteSampleResponseAction(sr.id); }}
-                        title="Delete sample response"
+                        title={t("sample.delete")}
                       >✕</button>
                     </summary>
                     <pre class="body-view">{sr.body ?? ""}</pre>
@@ -3646,22 +3831,22 @@
 
           {#if rightPanel === "code"}
             <div class="bottom-panel">
-              <h3 class="right-panel-title">Code Snippet</h3>
+              <h3 class="right-panel-title">{t("bottom.codeSnippet")}</h3>
               <div class="params-row">
                 <select bind:value={snippetTarget}>
-                  <option value="windows_cmd">cURL (Windows CMD)</option>
-                  <option value="powershell">cURL (PowerShell)</option>
-                  <option value="bash">cURL (Bash / POSIX)</option>
-                  <option value="python">Python (requests)</option>
-                  <option value="javascript">JavaScript (fetch)</option>
+                  <option value="windows_cmd">{t("bottom.targetWindowsCmd")}</option>
+                  <option value="powershell">{t("bottom.targetPowershell")}</option>
+                  <option value="bash">{t("bottom.targetBash")}</option>
+                  <option value="python">{t("bottom.targetPython")}</option>
+                  <option value="javascript">{t("bottom.targetJavascript")}</option>
                 </select>
                 <select bind:value={snippetMode}>
-                  <option value="placeholder">Placeholder (safe)</option>
-                  <option value="resolved">Resolved (real values)</option>
+                  <option value="placeholder">{t("bottom.placeholderSafe")}</option>
+                  <option value="resolved">{t("bottom.resolvedReal")}</option>
                 </select>
-                <button type="button" class="btn-primary" onclick={copyAsCurl}>Generate Snippet</button>
+                <button type="button" class="btn-primary" onclick={copyAsCurl}>{t("bottom.generateSnippet")}</button>
                 {#if snippet}
-                  <button type="button" onclick={copySnippetToClipboard}>Copy to clipboard</button>
+                  <button type="button" onclick={copySnippetToClipboard}>{t("bottom.copyClipboard")}</button>
                 {/if}
               </div>
               {#if snippetError}
@@ -3673,19 +3858,19 @@
             </div>
           {:else if rightPanel === "info" && selectedRequest}
             <div class="bottom-panel">
-              <h3 class="right-panel-title">Request Info</h3>
+              <h3 class="right-panel-title">{t("bottom.requestInfo")}</h3>
               <dl class="info-list info-list-grid">
-                <dt>ID</dt>
+                <dt>{t("bottom.id")}</dt>
                 <dd>{selectedRequest.id}</dd>
-                <dt>Project ID</dt>
+                <dt>{t("bottom.projectId")}</dt>
                 <dd>{selectedRequest.project_id}</dd>
-                <dt>Created</dt>
+                <dt>{t("bottom.created")}</dt>
                 <dd>{new Date(selectedRequest.created_at).toLocaleString()}</dd>
-                <dt>Updated</dt>
+                <dt>{t("bottom.updated")}</dt>
                 <dd>{new Date(selectedRequest.updated_at).toLocaleString()}</dd>
-                <dt>Headers</dt>
+                <dt>{t("bottom.headersCount")}</dt>
                 <dd>{selectedRequest.headers.length}</dd>
-                <dt>Query Params</dt>
+                <dt>{t("bottom.queryParamsCount")}</dt>
                 <dd>{selectedRequest.query_params.length}</dd>
               </dl>
             </div>
@@ -3697,16 +3882,16 @@
               class="bottom-bar-tab"
               class:active={rightPanel === "code"}
               onclick={() => (rightPanel = rightPanel === "code" ? null : "code")}
-            >&lt;/&gt; Code Snippet</button>
+            >&lt;/&gt; {t("bottom.codeSnippet")}</button>
             <button
               type="button"
               class="bottom-bar-tab"
               class:active={rightPanel === "info"}
               onclick={() => (rightPanel = rightPanel === "info" ? null : "info")}
-            >ⓘ Info</button>
+            >ⓘ {t("bottom.info")}</button>
           </div>
 
-          <h2>History</h2>
+          <h2>{t("history.title")}</h2>
           {#if responseHistory.length}
             <ul class="requests">
               {#each responseHistory as r (r.id)}
@@ -3720,7 +3905,7 @@
               {/each}
             </ul>
           {:else}
-            <p class="empty">Your request history will appear here after you send this request.</p>
+            <p class="empty">{t("history.empty")}</p>
           {/if}
         </section>
       {/if}
@@ -3731,42 +3916,42 @@
     <div class="console-drawer">
       <div class="console-header">
         <div class="console-title-group">
-          <span class="console-title">Developer Console</span>
-          <span class="console-count-badge">{filteredConsoleEvents.length} events</span>
+          <span class="console-title">{t("console.title")}</span>
+          <span class="console-count-badge">{t("console.eventsCount", { count: filteredConsoleEvents.length })}</span>
         </div>
 
         <div class="console-toolbar">
           <select bind:value={consoleLevelFilter} class="console-select">
-            <option value="all">All Levels</option>
-            <option value="info">Info</option>
-            <option value="warn">Warn</option>
-            <option value="error">Error</option>
-            <option value="debug">Debug</option>
+            <option value="all">{t("console.allLevels")}</option>
+            <option value="info">{t("console.info")}</option>
+            <option value="warn">{t("console.warn")}</option>
+            <option value="error">{t("console.error")}</option>
+            <option value="debug">{t("console.debug")}</option>
           </select>
 
-          <label class="console-check-label" title="Show only events for current request">
+          <label class="console-check-label" title={t("console.activeRequestOnlyTitle")}>
             <input type="checkbox" bind:checked={consoleActiveRequestOnly} />
-            Active request only
+            {t("console.activeRequestOnly")}
           </label>
 
           <input
             type="search"
-            placeholder="Filter console..."
+            placeholder={t("console.filterPlaceholder")}
             bind:value={consoleSearchFilter}
             class="console-search"
           />
 
-          <button type="button" class="console-btn" onclick={refreshConsoleEvents} title="Refresh events">↻ Refresh</button>
-          <button type="button" class="console-btn" onclick={clearConsole} title="Clear event buffer">Clear</button>
-          <button type="button" class="console-btn" onclick={copyConsoleLog} title="Copy all visible logs to clipboard">Copy</button>
-          <button type="button" class="console-btn" onclick={exportConsoleJson} title="Export events as JSON">Export JSON</button>
-          <button type="button" class="console-close-btn" onclick={() => (showConsole = false)} title="Close console">✕</button>
+          <button type="button" class="console-btn" onclick={refreshConsoleEvents} title={t("console.refreshTitle")}>{t("console.refresh")}</button>
+          <button type="button" class="console-btn" onclick={clearConsole} title={t("console.clearTitle")}>{t("console.clear")}</button>
+          <button type="button" class="console-btn" onclick={copyConsoleLog} title={t("console.copyTitle")}>{t("console.copy")}</button>
+          <button type="button" class="console-btn" onclick={exportConsoleJson} title={t("console.exportJsonTitle")}>{t("console.exportJson")}</button>
+          <button type="button" class="console-close-btn" onclick={() => (showConsole = false)} title={t("console.closeTitle")}>✕</button>
         </div>
       </div>
 
       <div class="console-body">
         {#if filteredConsoleEvents.length === 0}
-          <div class="console-empty">No console events logged yet. Send a request to see lifecycle diagnostics.</div>
+          <div class="console-empty">{t("console.empty")}</div>
         {:else}
           <div class="console-events-list">
             {#each filteredConsoleEvents as evt (evt.id)}
@@ -3782,14 +3967,14 @@
                   <span class="evt-time">{formatConsoleTime(evt.timestamp)}</span>
                   <span class="evt-level level-{evt.level}">{evt.level.toUpperCase()}</span>
                   <span class="evt-type">{evt.event_type}</span>
-                  <span class="evt-cid" title="Correlation ID: {evt.correlation_id}">#{evt.correlation_id.slice(0, 8)}</span>
+                  <span class="evt-cid" title={t("console.correlationIdTitle", { id: evt.correlation_id })}>#{evt.correlation_id.slice(0, 8)}</span>
                   <span class="evt-msg">{evt.message}</span>
                 </div>
 
                 {#if expandedEventIds.has(evt.id) && evt.details}
                   <div class="console-row-details">
                     <div class="details-actions">
-                      <button type="button" class="console-mini-btn" onclick={() => copyEventDetails(evt)}>Copy Details JSON</button>
+                      <button type="button" class="console-mini-btn" onclick={() => copyEventDetails(evt)}>{t("console.copyDetailsJson")}</button>
                     </div>
                     <pre class="console-json-view">{JSON.stringify(evt.details, null, 2)}</pre>
                   </div>
@@ -3813,7 +3998,7 @@
           if (showConsole) refreshConsoleEvents();
         }}
       >
-        <span>Developer Console</span>
+        <span>{t("console.title")}</span>
         {#if consoleErrorCount > 0}
           <span class="status-badge-error">✖ {consoleErrorCount}</span>
         {/if}
@@ -3828,7 +4013,7 @@
           type="button"
           class="git-status-pill git-kind-{gitStatus?.status_kind ?? 'unconfigured'}"
           class:git-has-conflict={gitStatus?.has_conflicts}
-          title="Git & Remote Sync (Click to open)"
+          title={t("footer.gitSyncTitle")}
           onclick={() => {
             activeScreen = "git";
             if (gitRepoPathInput) refreshGitStatus();
@@ -3836,192 +4021,27 @@
         >
           <span class="git-icon">⎇</span>
           {#if !gitSettings?.repo_path}
-            <span>Git: Not Configured</span>
+            <span>{t("footer.gitNotConfigured")}</span>
           {:else if gitStatusLoading}
-            <span>Git: Checking…</span>
+            <span>{t("footer.gitChecking")}</span>
           {:else if gitStatus?.has_conflicts}
-            <span class="git-alert">⚠ Conflict ({gitStatus.conflict_files.length})</span>
+            <span class="git-alert">{t("footer.gitConflict", { count: gitStatus.conflict_files.length })}</span>
           {:else if gitStatus}
-            <span>{gitStatus.branch}: {gitStatus.status_kind}</span>
+            <span>{t("footer.gitBranchStatus", { branch: gitStatus.branch, status: gitStatus.status_kind })}</span>
             {#if gitStatus.ahead > 0}<span class="git-ahead">↑{gitStatus.ahead}</span>{/if}
             {#if gitStatus.behind > 0}<span class="git-behind">↓{gitStatus.behind}</span>{/if}
           {:else}
-            <span>Git: {gitBranchInput}</span>
+            <span>{t("footer.gitLabel", { branch: gitBranchInput })}</span>
           {/if}
         </button>
-        <span class="status-info">Project: {projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId}</span>
+        <span class="status-info">{t("footer.project", { name: projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId })}</span>
       {/if}
       {#if selectedEnvironmentId}
-        <span class="status-info">Env: {environments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId}</span>
+        <span class="status-info">{t("footer.env", { name: environments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId })}</span>
       {/if}
     </div>
   </footer>
 
-  {#if showCollectionImport}
-    <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) showCollectionImport = false; }} onkeydown={(e) => { if (e.key === "Escape") showCollectionImport = false; }} role="dialog" aria-modal="true" tabindex="0">
-      <div class="modal-container">
-        <div class="modal-header">
-          <h3>Import Postman Collection</h3>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showCollectionImport = false)}>✕</button>
-        </div>
-        <p class="hint">Upload or paste Postman Collection v2.0 or v2.1 JSON.</p>
-
-        <div class="file-dropzone">
-          <label class="file-label">
-            <span>Choose JSON file</span>
-            <input type="file" accept=".json,application/json" onchange={handleCollectionFileUpload} />
-          </label>
-        </div>
-
-        <textarea
-          placeholder="Or paste Postman Collection JSON here..."
-          bind:value={collectionImportText}
-          rows="4"
-          class="body-input"
-        ></textarea>
-
-        {#if selectedProjectId}
-          <div class="radio-row">
-            <label class="radio-label">
-              <input type="radio" name="collectionTarget" value="new" bind:group={collectionImportTarget} />
-              New Project
-            </label>
-            <label class="radio-label">
-              <input type="radio" name="collectionTarget" value="current" bind:group={collectionImportTarget} />
-              Current Project
-            </label>
-          </div>
-        {/if}
-
-        {#if collectionImportError}
-          <p class="error">{collectionImportError}</p>
-        {/if}
-
-        {#if collectionImportReport}
-          <div class="import-report-card">
-            <h4>Import Complete!</h4>
-            <p><strong>Project:</strong> {collectionImportReport.project_name}</p>
-            <p><strong>Requests:</strong> {collectionImportReport.requests_count}</p>
-            <p><strong>Variables:</strong> {collectionImportReport.variables_count}</p>
-            <p><strong>Sample responses:</strong> {collectionImportReport.sample_responses_count}</p>
-            {#if collectionImportReport.warnings.length > 0}
-              <div class="warnings-box">
-                <h5>Compatibility Notes:</h5>
-                <ul>
-                  {#each collectionImportReport.warnings as warn}
-                    <li>{warn}</li>
-                  {/each}
-                </ul>
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        <div class="params-row">
-          <button
-            type="button"
-            class="btn-primary"
-            disabled={!collectionImportText.trim() || collectionImportLoading}
-            onclick={importPostmanCollectionAction}
-          >
-            {collectionImportLoading ? "Importing…" : "Import"}
-          </button>
-          <button type="button" onclick={() => { showCollectionImport = false; }}>
-            {collectionImportReport ? "Done" : "Cancel"}
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  {#if showEnvironmentImport}
-    <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) showEnvironmentImport = false; }} onkeydown={(e) => { if (e.key === "Escape") showEnvironmentImport = false; }} role="dialog" aria-modal="true" tabindex="0">
-      <div class="modal-container">
-        <div class="modal-header">
-          <h3>Import Postman Environment</h3>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showEnvironmentImport = false)}>✕</button>
-        </div>
-        <p class="hint">Upload or paste a Postman Environment JSON file.</p>
-
-        <div class="file-dropzone">
-          <label class="file-label">
-            <span>Choose JSON file</span>
-            <input type="file" accept=".json,application/json" onchange={handleEnvironmentFileUpload} />
-          </label>
-        </div>
-
-        <textarea
-          placeholder="Or paste Postman Environment JSON here..."
-          bind:value={environmentImportText}
-          rows="3"
-          class="body-input"
-        ></textarea>
-
-        {#if environmentImportError}
-          <p class="error">{environmentImportError}</p>
-        {/if}
-
-        {#if environmentImportReport}
-          <div class="import-report-card">
-            <h4>Environment Imported!</h4>
-            <p><strong>Environment:</strong> {environmentImportReport.environment_name}</p>
-            <p><strong>Variables:</strong> {environmentImportReport.variables_count}</p>
-            {#if environmentImportReport.warnings.length > 0}
-              <div class="warnings-box">
-                <h5>Compatibility Notes:</h5>
-                <ul>
-                  {#each environmentImportReport.warnings as warn}
-                    <li>{warn}</li>
-                  {/each}
-                </ul>
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        <div class="params-row">
-          <button
-            type="button"
-            class="btn-primary"
-            disabled={!environmentImportText.trim() || environmentImportLoading}
-            onclick={importPostmanEnvironmentAction}
-          >
-            {environmentImportLoading ? "Importing…" : "Import Environment"}
-          </button>
-          <button type="button" onclick={() => { showEnvironmentImport = false; }}>
-            {environmentImportReport ? "Done" : "Cancel"}
-          </button>
-        </div>
-      </div>
-    </div>
-  {/if}
-
-  {#if showCurlImport}
-    <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) showCurlImport = false; }} onkeydown={(e) => { if (e.key === "Escape") showCurlImport = false; }} role="dialog" aria-modal="true" tabindex="0">
-      <div class="modal-container">
-        <div class="modal-header">
-          <h3>Import from cURL</h3>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showCurlImport = false)}>✕</button>
-        </div>
-        <form onsubmit={importCurlCommand}>
-          <input placeholder="Request Name (optional)" bind:value={curlImportName} />
-          <textarea
-            placeholder="Paste cURL command here (e.g. curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -d 'data')"
-            bind:value={curlImportText}
-            rows="4"
-            class="body-input"
-          ></textarea>
-          {#if curlImportError}
-            <p class="error">{curlImportError}</p>
-          {/if}
-          <div class="params-row">
-            <button type="submit" class="btn-primary">Import Request</button>
-            <button type="button" onclick={() => (showCurlImport = false)}>Cancel</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  {/if}
 
   {#if showAiPanel}
     <div
@@ -4035,10 +4055,10 @@
       <div class="modal-container modal-wide">
         <div class="modal-header">
           <div class="modal-title-wrap">
-            <h3>✨ AI Assistant & Source Intelligence</h3>
-            <span class="modal-sub">Generate requests with project context, discover codebase routes, or configure Claude AI</span>
+            <h3>{t("ai.title")}</h3>
+            <span class="modal-sub">{t("ai.subtitle")}</span>
           </div>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showAiPanel = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showAiPanel = false)}>✕</button>
         </div>
 
         <div class="modal-tabs">
@@ -4048,7 +4068,7 @@
             class:active={aiActiveTab === "generate"}
             onclick={() => (aiActiveTab = "generate")}
           >
-            ✨ Ask AI (Project Context)
+            {t("ai.tabGenerate")}
           </button>
           <button
             type="button"
@@ -4056,7 +4076,7 @@
             class:active={aiActiveTab === "source"}
             onclick={() => (aiActiveTab = "source")}
           >
-            🔍 Source Discovery {#if sourceReport}<span class="badge badge-framework">{sourceReport.endpoints.length}</span>{/if}
+            {t("ai.tabSource")} {#if sourceReport}<span class="badge badge-framework">{sourceReport.endpoints.length}</span>{/if}
           </button>
           <button
             type="button"
@@ -4064,7 +4084,7 @@
             class:active={aiActiveTab === "settings"}
             onclick={() => (aiActiveTab = "settings")}
           >
-            ⚙️ AI Settings {#if !aiConfigured}<span class="tab-badge-alert">!</span>{/if}
+            {t("ai.tabSettings")} {#if !aiConfigured}<span class="tab-badge-alert">!</span>{/if}
           </button>
         </div>
 
@@ -4072,32 +4092,32 @@
           <div class="modal-body">
             {#if !aiConfigured}
               <div class="action-alert warning">
-                <span>AI features aren't set up yet — add a Claude API key to generate requests, docs, and tests.</span>
-                <button type="button" class="btn-primary btn-xs" onclick={() => (aiActiveTab = "settings")}>Configure AI</button>
+                <span>{t("ai.notConfiguredWarning")}</span>
+                <button type="button" class="btn-primary btn-xs" onclick={() => (aiActiveTab = "settings")}>{t("ai.configureAi")}</button>
               </div>
             {/if}
 
             <div class="ai-context-options">
-              <label class="checkbox-label" title="Send existing project request names/methods as context for high fidelity generation">
+              <label class="checkbox-label" title={t("ai.includeExistingTitle")}>
                 <input type="checkbox" bind:checked={aiIncludeExistingRequests} />
-                Include existing project requests as context
+                {t("ai.includeExisting")}
               </label>
-              <label class="checkbox-label" title="Send variable template keys only (e.g. baseUrl, token) — values and secrets are strictly redacted">
+              <label class="checkbox-label" title={t("ai.includeVarsTitle")}>
                 <input type="checkbox" bind:checked={aiIncludeVariables} />
-                Include variable names (keys only, values never sent)
+                {t("ai.includeVars")}
               </label>
             </div>
 
             <form onsubmit={generateWithAi} class="ai-prompt-form">
               <textarea
-                placeholder="Describe the API request you want, e.g. 'Get user profile by ID with Authorization bearer token' or 'Create a checkout order with items array and shipping address'"
+                placeholder={t("ai.promptPlaceholder")}
                 bind:value={aiPrompt}
                 class="body-input"
                 rows="3"
               ></textarea>
               <div class="params-row">
                 <button type="submit" class="btn-primary" disabled={aiGenerating || !aiPrompt.trim()}>
-                  {aiGenerating ? "Generating API Definition…" : "Generate Request"}
+                  {aiGenerating ? t("ai.generatingDefinition") : t("ai.generateRequest")}
                 </button>
               </div>
             </form>
@@ -4113,9 +4133,9 @@
                   <p class="hint preview-desc">{aiPreview.description}</p>
                 {/if}
                 <div class="preview-meta-row">
-                  <span>Headers: <strong>{aiPreview.headers.length}</strong></span>
-                  <span>Query params: <strong>{aiPreview.query_params.length}</strong></span>
-                  {#if aiPreview.body}<span>Has Body</span>{/if}
+                  <span>{t("ai.headersCount", { count: aiPreview.headers.length })}</span>
+                  <span>{t("ai.queryParamsCount", { count: aiPreview.query_params.length })}</span>
+                  {#if aiPreview.body}<span>{t("ai.hasBody")}</span>{/if}
                 </div>
                 {#if aiPreview.body}
                   <pre class="body-view preview-body-pre">{aiPreview.body}</pre>
@@ -4126,9 +4146,9 @@
                     class="btn-primary"
                     onclick={() => { addAiPreviewToProject(); showAiPanel = false; }}
                   >
-                    Add to Project
+                    {t("ai.addToProject")}
                   </button>
-                  <button type="button" onclick={() => (aiPreview = null)}>Discard</button>
+                  <button type="button" onclick={() => (aiPreview = null)}>{t("ai.discard")}</button>
                 </div>
               </div>
             {/if}
@@ -4137,13 +4157,13 @@
         {:else if aiActiveTab === "source"}
           <div class="modal-body">
             <p class="hint">
-              Analyze a local backend project (Node.js, Express, FastAPI, Flask, Django, Spring Boot, Go Gin/Chi, Laravel) to discover endpoints and OpenAPI specifications. <em>Strictly read-only inspection.</em>
+              {t("ai.sourceDesc")} <em>{t("ai.sourceReadOnly")}</em>
             </p>
 
             <div class="source-scan-bar">
               <input
                 type="text"
-                placeholder="Path to backend codebase (e.g. C:/projects/my-api or ../backend)"
+                placeholder={t("ai.sourcePathPlaceholder")}
                 bind:value={sourceDirectoryInput}
                 class="url-input"
               />
@@ -4153,7 +4173,7 @@
                 disabled={sourceScanning || !sourceDirectoryInput.trim()}
                 onclick={scanSourceProjectAction}
               >
-                {sourceScanning ? "Scanning…" : "Scan Codebase"}
+                {sourceScanning ? t("ai.scanning") : t("ai.scanCodebase")}
               </button>
             </div>
 
@@ -4164,14 +4184,14 @@
             {#if sourceReport}
               <div class="source-summary-panel">
                 <div class="source-badges-row">
-                  <span class="badge">Type: {sourceReport.project_type}</span>
-                  <span class="badge">Scanned: {sourceReport.scanned_files_count} files</span>
-                  <span class="badge badge-success">Found: {sourceReport.endpoints.length} routes</span>
+                  <span class="badge">{t("ai.typeLabel", { type: sourceReport.project_type })}</span>
+                  <span class="badge">{t("ai.scannedLabel", { count: sourceReport.scanned_files_count })}</span>
+                  <span class="badge badge-success">{t("ai.foundLabel", { count: sourceReport.endpoints.length })}</span>
                   {#each sourceReport.frameworks as fw}
                     <span class="badge badge-framework">{fw}</span>
                   {/each}
                   {#if sourceReport.has_openapi}
-                    <span class="badge badge-openapi">OpenAPI: {sourceReport.openapi_path ?? "Spec detected"}</span>
+                    <span class="badge badge-openapi">{t("ai.openapiDetected", { path: sourceReport.openapi_path ?? t("ai.specDetected") })}</span>
                   {/if}
                 </div>
 
@@ -4179,7 +4199,7 @@
                   <div class="source-filter-row">
                     <input
                       type="text"
-                      placeholder="Filter routes by path, method, or file..."
+                      placeholder={t("ai.filterRoutesPlaceholder")}
                       bind:value={sourceFilter}
                       class="url-input"
                     />
@@ -4192,7 +4212,7 @@
                           <span class="method method-{ep.method.toLowerCase()}">{ep.method}</span>
                           <code class="ep-path">{ep.path}</code>
                           {#if ep.auth_hint}
-                            <span class="badge badge-auth" title="Authentication detected">🔒 {ep.auth_hint}</span>
+                            <span class="badge badge-auth" title={t("ai.authDetectedTitle")}>🔒 {ep.auth_hint}</span>
                           {/if}
                         </div>
                         <div class="ep-meta">
@@ -4206,18 +4226,18 @@
                           class="btn-xs-primary"
                           disabled={!selectedProjectId}
                           onclick={() => { importDiscoveredEndpointAction(ep); showAiPanel = false; }}
-                          title="Import this endpoint as a request in the active project"
+                          title={t("ai.importEndpointTitle")}
                         >
-                          + Import Request
+                          {t("ai.importRequest")}
                         </button>
                       </div>
                     {/each}
                     {#if filteredSourceEndpoints.length === 0}
-                      <p class="hint text-center">No routes match filter "{sourceFilter}".</p>
+                      <p class="hint text-center">{t("ai.noRoutesMatch", { filter: sourceFilter })}</p>
                     {/if}
                   </div>
                 {:else}
-                  <p class="hint">No API routes or OpenAPI specs discovered in the scanned files.</p>
+                  <p class="hint">{t("ai.noRoutesFound")}</p>
                 {/if}
               </div>
             {/if}
@@ -4228,11 +4248,11 @@
             <div class="ai-settings-grid">
               <div class="settings-field">
                 <label for="ai-api-key-input">
-                  <strong>Anthropic Claude API Key:</strong>
+                  <strong>{t("ai.apiKeyLabel")}</strong>
                   {#if aiConfigured}
-                    <span class="badge badge-success">Configured</span>
+                    <span class="badge badge-success">{t("ai.configured")}</span>
                   {:else}
-                    <span class="badge">Not configured</span>
+                    <span class="badge">{t("ai.notConfigured")}</span>
                   {/if}
                 </label>
                 <div class="password-input-row">
@@ -4244,36 +4264,36 @@
                     class="url-input"
                   />
                   <button type="button" class="btn-ghost" onclick={() => (aiShowKey = !aiShowKey)}>
-                    {aiShowKey ? "Hide" : "Show"}
+                    {aiShowKey ? t("ai.hide") : t("ai.show")}
                   </button>
                 </div>
-                <span class="hint">Stored locally in SQLite or falls back to ANTHROPIC_API_KEY environment variable. Never sent anywhere except directly to Anthropic.</span>
+                <span class="hint">{t("ai.apiKeyHint")}</span>
               </div>
 
               <div class="settings-field">
-                <label for="ai-model-select"><strong>Model:</strong></label>
+                <label for="ai-model-select"><strong>{t("ai.modelLabel")}</strong></label>
                 <select id="ai-model-select" bind:value={aiModelInput} class="url-input">
-                  <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet (Recommended)</option>
-                  <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku (Fastest)</option>
-                  <option value="claude-3-opus-20240229">Claude 3 Opus (Most Powerful)</option>
+                  <option value="claude-3-5-sonnet-20241022">{t("ai.modelSonnet")}</option>
+                  <option value="claude-3-5-haiku-20241022">{t("ai.modelHaiku")}</option>
+                  <option value="claude-3-opus-20240229">{t("ai.modelOpus")}</option>
                 </select>
               </div>
 
               <div class="settings-field">
-                <label for="ai-base-url-input"><strong>Custom Base URL (Optional):</strong></label>
+                <label for="ai-base-url-input"><strong>{t("ai.baseUrlLabel")}</strong></label>
                 <input
                   id="ai-base-url-input"
                   type="text"
-                  placeholder="https://api.anthropic.com (default)"
+                  placeholder={t("ai.baseUrlPlaceholder")}
                   bind:value={aiBaseUrlInput}
                   class="url-input"
                 />
               </div>
 
               <div class="params-row">
-                <button type="button" class="btn-primary" onclick={saveAiSettingsAction}>Save Settings</button>
+                <button type="button" class="btn-primary" onclick={saveAiSettingsAction}>{t("ai.saveSettings")}</button>
                 <button type="button" class="btn-secondary" disabled={aiTesting} onclick={testAiConnectionAction}>
-                  {aiTesting ? "Testing…" : "Test Connection"}
+                  {aiTesting ? t("ai.testing") : t("ai.testConnection")}
                 </button>
               </div>
 
@@ -4295,7 +4315,7 @@
         {/if}
 
         <div class="modal-footer">
-          <button type="button" onclick={() => (showAiPanel = false)}>Close</button>
+          <button type="button" onclick={() => (showAiPanel = false)}>{t("common.close")}</button>
         </div>
       </div>
     </div>
@@ -4312,18 +4332,18 @@
     >
       <div class="modal-container">
         <div class="modal-header">
-          <h3>Git Diff Preview</h3>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showDiffModal = false)}>✕</button>
+          <h3>{t("diff.title")}</h3>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showDiffModal = false)}>✕</button>
         </div>
         <div class="modal-body">
           {#if !gitDiffContent.trim()}
-            <p class="hint">No uncommitted diff detected.</p>
+            <p class="hint">{t("diff.noDiff")}</p>
           {:else}
             <pre class="diff-viewer">{gitDiffContent}</pre>
           {/if}
         </div>
         <div class="modal-footer">
-          <button type="button" onclick={() => (showDiffModal = false)}>Close</button>
+          <button type="button" onclick={() => (showDiffModal = false)}>{t("common.close")}</button>
         </div>
       </div>
     </div>
@@ -4340,12 +4360,12 @@
     >
       <div class="modal-container">
         <div class="modal-header">
-          <h3>Git Commit History</h3>
-          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showHistoryModal = false)}>✕</button>
+          <h3>{t("diffHistory.title")}</h3>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showHistoryModal = false)}>✕</button>
         </div>
         <div class="modal-body">
           {#if gitHistory.length === 0}
-            <p class="hint">No commit history found.</p>
+            <p class="hint">{t("diffHistory.noHistory")}</p>
           {:else}
             <div class="history-list">
               {#each gitHistory as c}
@@ -4362,7 +4382,7 @@
           {/if}
         </div>
         <div class="modal-footer">
-          <button type="button" onclick={() => (showHistoryModal = false)}>Close</button>
+          <button type="button" onclick={() => (showHistoryModal = false)}>{t("common.close")}</button>
         </div>
       </div>
     </div>
@@ -4372,16 +4392,16 @@
 {/if}
 {:else if activeScreen === "environments"}
   {#if !selectedProjectId}
-    {@render noProjectPicker("Environments")}
+    {@render noProjectPicker(t("rail.environments"))}
   {:else}
     <div class="env-screen">
       <aside class="env-screen-side">
         <div class="env-screen-side-header">
-          <span class="screen-kicker">Environments</span>
-          <button type="button" class="icon-btn" title="New environment" onclick={quickCreateEnvironment}>+</button>
+          <span class="screen-kicker">{t("env.title")}</span>
+          <button type="button" class="icon-btn" title={t("env.newEnvironment")} onclick={quickCreateEnvironment}>+</button>
         </div>
         <div class="env-screen-project-row">
-          <span class="env-screen-project-label">Project</span>
+          <span class="env-screen-project-label">{t("env.project")}</span>
           {@render projectSwitcher()}
         </div>
         <div class="env-screen-list">
@@ -4391,14 +4411,14 @@
             class:active={!selectedEnvironmentId}
             onclick={() => { selectedEnvironmentId = null; loadVariables(); }}
           >
-            No Environment
+            {t("env.noEnvironment")}
           </button>
           {#each environments as env (env.id)}
             {#if renamingEnvironmentId === env.id}
               <form class="inline-form env-screen-rename-form" onsubmit={submitRenameEnvironment}>
                 <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
-                <button type="submit" title="Save">✓</button>
-                <button type="button" title="Cancel" onclick={() => (renamingEnvironmentId = null)}>✕</button>
+                <button type="submit" title={t("sidebar.save")}>✓</button>
+                <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>✕</button>
               </form>
             {:else}
               <div class="env-screen-item-row" class:active={selectedEnvironmentId === env.id}>
@@ -4410,8 +4430,8 @@
                 >
                   {env.name}
                 </button>
-                <button type="button" class="icon-btn icon-btn-ghost" title="Rename" onclick={() => startRenameEnvironment(env)}>✎</button>
-                <button type="button" class="icon-btn icon-btn-ghost" title="Delete" onclick={() => deleteEnvironmentAction(env.id)}>🗑</button>
+                <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameEnvironment(env)}>✎</button>
+                <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteEnvironmentAction(env.id)}>🗑</button>
               </div>
             {/if}
           {/each}
@@ -4420,30 +4440,30 @@
 
       <section class="screen-page">
         <div class="screen-page-header">
-          <span class="screen-kicker">Editing</span>
-          <h1 class="screen-title">{selectedEnvironmentId ? (environments.find((e) => e.id === selectedEnvironmentId)?.name ?? "Environment") : "Global (all environments)"}</h1>
+          <span class="screen-kicker">{t("env.editing")}</span>
+          <h1 class="screen-title">{selectedEnvironmentId ? (environments.find((e) => e.id === selectedEnvironmentId)?.name ?? t("env.fallbackName")) : t("env.globalAll")}</h1>
         </div>
 
         <div class="screen-page-body">
-          <h4>Global Variables ({projectVariables.length})</h4>
+          <h4>{t("env.globalVariables", { count: projectVariables.length })}</h4>
           <div class="params-table">
             {#each projectVariables as v (v.id)}
               <div class="params-row">
-                <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} title="Enabled" />
+                <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} title={t("params.enabled")} />
                 <span class="var-key">{v.key}</span>
                 <span class="var-val">{revealedSecrets[v.id] ?? v.value}</span>
                 {#if v.is_local}
-                  <span class="badge badge-local" title="Local only — excluded from git & exports">local</span>
+                  <span class="badge badge-local" title={t("env.localBadgeTitle")}>{t("env.localBadge")}</span>
                 {/if}
                 {#if v.is_secret}
-                  <span class="badge">secret</span>
+                  <span class="badge">{t("env.secretBadge")}</span>
                   {#if !revealedSecrets[v.id]}
-                    <button type="button" class="icon-btn" title="Reveal secret" onclick={() => revealSecret(v.id)}>👁</button>
+                    <button type="button" class="icon-btn" title={t("env.reveal")} onclick={() => revealSecret(v.id)}>👁</button>
                   {/if}
                 {/if}
-                <button type="button" class="icon-btn" title={v.is_local ? "Make Shared" : "Make Local Only"} onclick={() => toggleVariableLocal(v)}>{v.is_local ? "💻" : "🌐"}</button>
-                <button type="button" class="icon-btn" title="Toggle Secret" onclick={() => toggleVariableSecret(v)}>🔒</button>
-                <button type="button" class="icon-btn" title="Delete" onclick={() => deleteVariable(v.id)}>🗑</button>
+                <button type="button" class="icon-btn" title={v.is_local ? t("env.makeShared") : t("env.makeLocalOnly")} onclick={() => toggleVariableLocal(v)}>{v.is_local ? "💻" : "🌐"}</button>
+                <button type="button" class="icon-btn" title={t("env.toggleSecret")} onclick={() => toggleVariableSecret(v)}>🔒</button>
+                <button type="button" class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteVariable(v.id)}>🗑</button>
               </div>
             {/each}
             <div
@@ -4455,44 +4475,44 @@
             >
               <span class="params-row-spacer"></span>
               <input
-                placeholder="Key"
+                placeholder={t("params.key")}
                 bind:value={newGlobalVarDraft.key}
                 onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewGlobalVar(); } }}
               />
               <input
-                placeholder="Value"
+                placeholder={t("params.value")}
                 bind:value={newGlobalVarDraft.value}
                 onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewGlobalVar(); } }}
               />
               <label class="checkbox-label">
-                <input type="checkbox" bind:checked={newGlobalVarDraft.isSecret} /> Secret
+                <input type="checkbox" bind:checked={newGlobalVarDraft.isSecret} /> {t("env.secret")}
               </label>
-              <label class="checkbox-label" title="Keep local on this device; excluded from git & exports">
-                <input type="checkbox" bind:checked={newGlobalVarDraft.isLocal} /> Local
+              <label class="checkbox-label" title={t("env.localHint")}>
+                <input type="checkbox" bind:checked={newGlobalVarDraft.isLocal} /> {t("env.local")}
               </label>
             </div>
           </div>
 
           {#if selectedEnvironmentId}
-            <h4>Environment Variables ({environmentVariables.length})</h4>
+            <h4>{t("env.environmentVariables", { count: environmentVariables.length })}</h4>
             <div class="params-table">
               {#each environmentVariables as v (v.id)}
                 <div class="params-row">
-                  <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} title="Enabled" />
+                  <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} title={t("params.enabled")} />
                   <span class="var-key">{v.key}</span>
                   <span class="var-val">{revealedSecrets[v.id] ?? v.value}</span>
                   {#if v.is_local}
-                    <span class="badge badge-local" title="Local only — excluded from git & exports">local</span>
+                    <span class="badge badge-local" title={t("env.localBadgeTitle")}>{t("env.localBadge")}</span>
                   {/if}
                   {#if v.is_secret}
-                    <span class="badge">secret</span>
+                    <span class="badge">{t("env.secretBadge")}</span>
                     {#if !revealedSecrets[v.id]}
-                      <button type="button" class="icon-btn" title="Reveal secret" onclick={() => revealSecret(v.id)}>👁</button>
+                      <button type="button" class="icon-btn" title={t("env.reveal")} onclick={() => revealSecret(v.id)}>👁</button>
                     {/if}
                   {/if}
-                  <button type="button" class="icon-btn" title={v.is_local ? "Make Shared" : "Make Local Only"} onclick={() => toggleVariableLocal(v)}>{v.is_local ? "💻" : "🌐"}</button>
-                  <button type="button" class="icon-btn" title="Toggle Secret" onclick={() => toggleVariableSecret(v)}>🔒</button>
-                  <button type="button" class="icon-btn" title="Delete" onclick={() => deleteVariable(v.id)}>🗑</button>
+                  <button type="button" class="icon-btn" title={v.is_local ? t("env.makeShared") : t("env.makeLocalOnly")} onclick={() => toggleVariableLocal(v)}>{v.is_local ? "💻" : "🌐"}</button>
+                  <button type="button" class="icon-btn" title={t("env.toggleSecret")} onclick={() => toggleVariableSecret(v)}>🔒</button>
+                  <button type="button" class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteVariable(v.id)}>🗑</button>
                 </div>
               {/each}
               <div
@@ -4504,20 +4524,20 @@
               >
                 <span class="params-row-spacer"></span>
                 <input
-                  placeholder="Key"
+                  placeholder={t("params.key")}
                   bind:value={newEnvVarDraft.key}
                   onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewEnvVar(); } }}
                 />
                 <input
-                  placeholder="Value"
+                  placeholder={t("params.value")}
                   bind:value={newEnvVarDraft.value}
                   onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewEnvVar(); } }}
                 />
                 <label class="checkbox-label">
-                  <input type="checkbox" bind:checked={newEnvVarDraft.isSecret} /> Secret
+                  <input type="checkbox" bind:checked={newEnvVarDraft.isSecret} /> {t("env.secret")}
                 </label>
-                <label class="checkbox-label" title="Keep local on this device; excluded from git & exports">
-                  <input type="checkbox" bind:checked={newEnvVarDraft.isLocal} /> Local
+                <label class="checkbox-label" title={t("env.localHint")}>
+                  <input type="checkbox" bind:checked={newEnvVarDraft.isLocal} /> {t("env.local")}
                 </label>
               </div>
             </div>
@@ -4528,11 +4548,11 @@
   {/if}
 {:else if activeScreen === "git"}
   {#if !selectedProjectId}
-    {@render noProjectPicker("Git & Collaboration")}
+    {@render noProjectPicker(t("git.title"))}
   {:else}
     <section class="screen-page">
       <div class="screen-page-header">
-        <span class="screen-kicker">Git & Collaboration</span>
+        <span class="screen-kicker">{t("git.title")}</span>
         <div class="screen-title-row">
           <h1 class="screen-title">{projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId}</h1>
           {@render projectSwitcher()}
@@ -4546,7 +4566,7 @@
             class:active={gitActiveTab === "sync"}
             onclick={() => (gitActiveTab = "sync")}
           >
-            Repository & Sync
+            {t("git.repoSync")}
           </button>
           <button
             type="button"
@@ -4554,7 +4574,7 @@
             class:active={gitActiveTab === "conflicts"}
             onclick={() => (gitActiveTab = "conflicts")}
           >
-            Conflicts
+            {t("git.conflicts")}
             {#if gitStatus?.has_conflicts}
               <span class="tab-badge-alert">{gitStatus.conflict_files.length}</span>
             {/if}
@@ -4565,7 +4585,7 @@
             class:active={gitActiveTab === "github"}
             onclick={() => (gitActiveTab = "github")}
           >
-            GitHub Auth & Team
+            {t("git.githubAuth")}
           </button>
           <button
             type="button"
@@ -4573,7 +4593,7 @@
             class:active={gitActiveTab === "projectfile"}
             onclick={() => (gitActiveTab = "projectfile")}
           >
-            Project File
+            {t("git.projectFile")}
           </button>
         </div>
 
@@ -4587,76 +4607,76 @@
 
           {#if gitActiveTab === "sync"}
             <div class="git-panel-section">
-              <h4>Local Repository Settings</h4>
+              <h4>{t("git.repositorySettings")}</h4>
               <div class="form-row-stacked">
-                <label for="git-repo-path-input">Repository Directory Path:</label>
+                <label for="git-repo-path-input">{t("git.repoPathLabel")}</label>
                 <div class="input-with-actions">
                   <input
                     id="git-repo-path-input"
                     type="text"
-                    placeholder="e.g. C:/Projects/my-api-repo or /home/user/my-api-repo"
+                    placeholder={t("git.repoPathPlaceholder")}
                     bind:value={gitRepoPathInput}
                     class="path-input"
                   />
-                  <button type="button" onclick={saveGitSettingsAction}>Save Path</button>
+                  <button type="button" onclick={saveGitSettingsAction}>{t("git.savePath")}</button>
                   <button type="button" onclick={() => refreshGitStatus()} disabled={!gitRepoPathInput.trim() || gitStatusLoading}>
-                    {gitStatusLoading ? "Checking…" : "↻ Check Status"}
+                    {gitStatusLoading ? t("git.checkingStatus") : t("git.checkStatus")}
                   </button>
                 </div>
-                <p class="hint">Absolute path to local Git repository folder containing <code>light-postman.json</code>.</p>
+                <p class="hint">{t("git.repoPathHint")}</p>
               </div>
 
               {#if !gitStatus || !gitStatus.is_repo}
                 <div class="alert-box-warning">
-                  <p><strong>Not a Git Repository:</strong> The specified folder is not yet initialized as a Git repository.</p>
+                  <p><strong>{t("git.notARepoTitle")}</strong> {t("git.notARepoDesc")}</p>
                   <button
                     type="button"
                     class="btn-primary"
                     disabled={!gitRepoPathInput.trim() || gitLoading}
                     onclick={initializeGitRepoAction}
                   >
-                    {gitLoading ? "Initializing…" : "Initialize Git Repository"}
+                    {gitLoading ? t("git.initializing") : t("git.initializeRepo")}
                   </button>
                 </div>
               {:else}
                 <div class="git-status-card">
                   <div class="status-summary-row">
-                    <span class="status-label">Branch:</span>
+                    <span class="status-label">{t("git.branch")}</span>
                     <strong>{gitStatus.branch}</strong>
                     <span class="status-sep">|</span>
-                    <span class="status-label">Status:</span>
+                    <span class="status-label">{t("git.status")}</span>
                     <span class="git-badge-kind kind-{gitStatus.status_kind}">{gitStatus.status_kind.toUpperCase()}</span>
                     {#if gitStatus.ahead > 0}
-                      <span class="badge-ahead">↑ {gitStatus.ahead} unpushed</span>
+                      <span class="badge-ahead">{t("git.unpushed", { count: gitStatus.ahead })}</span>
                     {/if}
                     {#if gitStatus.behind > 0}
-                      <span class="badge-behind">↓ {gitStatus.behind} unpulled</span>
+                      <span class="badge-behind">{t("git.unpulled", { count: gitStatus.behind })}</span>
                     {/if}
                   </div>
 
                   {#if gitStatus.staged_files.length > 0 || gitStatus.unstaged_files.length > 0 || gitStatus.untracked_files.length > 0}
                     <div class="files-changed-summary">
                       {#if gitStatus.staged_files.length > 0}
-                        <p class="file-category">Staged: <code>{gitStatus.staged_files.join(", ")}</code></p>
+                        <p class="file-category">{t("git.staged")} <code>{gitStatus.staged_files.join(", ")}</code></p>
                       {/if}
                       {#if gitStatus.unstaged_files.length > 0}
-                        <p class="file-category">Modified: <code>{gitStatus.unstaged_files.join(", ")}</code></p>
+                        <p class="file-category">{t("git.modified")} <code>{gitStatus.unstaged_files.join(", ")}</code></p>
                       {/if}
                       {#if gitStatus.untracked_files.length > 0}
-                        <p class="file-category">Untracked: <code>{gitStatus.untracked_files.join(", ")}</code></p>
+                        <p class="file-category">{t("git.untracked")} <code>{gitStatus.untracked_files.join(", ")}</code></p>
                       {/if}
                     </div>
                   {:else}
-                    <p class="working-tree-clean">Working directory is clean.</p>
+                    <p class="working-tree-clean">{t("git.workingTreeClean")}</p>
                   {/if}
                 </div>
 
                 <div class="git-commit-box">
-                  <h4>Manual Sync & Commit</h4>
+                  <h4>{t("git.manualSync")}</h4>
                   <div class="commit-input-row">
                     <input
                       type="text"
-                      placeholder="Commit message (e.g. 'Add authentication endpoints')"
+                      placeholder={t("git.commitMessagePlaceholder")}
                       bind:value={gitCommitMessage}
                     />
                     <button
@@ -4665,25 +4685,25 @@
                       disabled={gitLoading}
                       onclick={commitAndPushAction}
                     >
-                      {gitLoading ? "Syncing…" : "Commit & Push"}
+                      {gitLoading ? t("git.syncing") : t("git.commitPush")}
                     </button>
                     <button
                       type="button"
                       disabled={gitLoading}
                       onclick={pullRepositoryAction}
                     >
-                      {gitLoading ? "Pulling…" : "Pull Remote"}
+                      {gitLoading ? t("git.pulling") : t("git.pullRemote")}
                     </button>
                   </div>
                   <div class="quick-git-actions">
                     <button type="button" class="icon-btn-text" onclick={saveProjectToRepoAction} disabled={gitLoading}>
-                      💾 Save light-postman.json
+                      {t("git.saveProjectFile")}
                     </button>
                     <button type="button" class="icon-btn-text" onclick={viewDiffAction} disabled={gitLoading}>
-                      📄 View Diff
+                      {t("git.viewDiff")}
                     </button>
                     <button type="button" class="icon-btn-text" onclick={viewHistoryAction} disabled={gitLoading}>
-                      📜 Commit History
+                      {t("git.commitHistory")}
                     </button>
                   </div>
                 </div>
@@ -4691,25 +4711,25 @@
                 <div class="auto-sync-box">
                   <label class="checkbox-label">
                     <input type="checkbox" bind:checked={gitAutoSyncInput} onchange={saveGitSettingsAction} />
-                    <strong>Enable Automatic Background Sync (LP-0708)</strong>
+                    <strong>{t("git.enableAutoSync")}</strong>
                   </label>
-                  <p class="hint">When enabled, synchronizes local commits with remote repository periodically in the background.</p>
+                  <p class="hint">{t("git.autoSyncDesc")}</p>
                   {#if gitSettings?.last_sync_at}
-                    <p class="hint">Last synchronized: {new Date(gitSettings.last_sync_at).toLocaleString()}</p>
+                    <p class="hint">{t("git.lastSynced", { time: new Date(gitSettings.last_sync_at).toLocaleString() })}</p>
                   {/if}
                 </div>
               {/if}
             </div>
           {:else if gitActiveTab === "conflicts"}
             <div class="git-panel-section">
-              <h4>Merge Conflict Detection & Resolution (LP-0710, LP-0711)</h4>
+              <h4>{t("git.conflictDetection")}</h4>
               {#if !gitStatus?.has_conflicts || gitStatus.conflict_files.length === 0}
                 <div class="clean-box">
-                  <p>✔ No merge conflicts detected. All files are in sync.</p>
+                  <p>{t("git.noConflicts")}</p>
                 </div>
               {:else}
                 <div class="conflict-alert-box">
-                  <p><strong>⚠️ Conflicts Detected:</strong> The following files have conflicting modifications between your local project and remote repository. Choose how to resolve each file:</p>
+                  <p><strong>{t("git.conflictsDetectedTitle")}</strong> {t("git.conflictsDetectedDesc")}</p>
                 </div>
                 <div class="conflicts-list">
                   {#each gitStatus.conflict_files as file}
@@ -4720,49 +4740,49 @@
                           <button
                             type="button"
                             class="btn-choice"
-                            title="View the real base/local/remote content for this file"
+                            title={t("git.view3wayDiffTitle")}
                             onclick={() => loadConflictVersions(file)}
                           >
-                            {selectedConflictFile === file && conflictVersions ? "Viewing 3-way diff" : "View 3-way diff"}
+                            {selectedConflictFile === file && conflictVersions ? t("git.viewing3wayDiff") : t("git.view3wayDiff")}
                           </button>
                           <button
                             type="button"
                             class="btn-choice local"
-                            title="Keep your local changes (--ours)"
+                            title={t("git.keepLocalTitle")}
                             onclick={() => { resolveConflictAction(file, "ours"); if (selectedConflictFile === file) { selectedConflictFile = null; conflictVersions = null; } }}
                             disabled={gitLoading}
                           >
-                            Keep Local (Ours)
+                            {t("git.keepLocal")}
                           </button>
                           <button
                             type="button"
                             class="btn-choice remote"
-                            title="Accept incoming remote changes (--theirs)"
+                            title={t("git.keepRemoteTitle")}
                             onclick={() => { resolveConflictAction(file, "theirs"); if (selectedConflictFile === file) { selectedConflictFile = null; conflictVersions = null; } }}
                             disabled={gitLoading}
                           >
-                            Keep Remote (Theirs)
+                            {t("git.keepRemote")}
                           </button>
                         </div>
                       </div>
-                      <p class="hint">Decide whether to preserve your local modifications or replace them with remote version.</p>
+                      <p class="hint">{t("git.conflictDecideHint")}</p>
 
                       {#if selectedConflictFile === file}
                         <div class="conflict-3way">
                           {#if conflictVersionsLoading}
-                            <p class="hint">Loading base/local/remote content…</p>
+                            <p class="hint">{t("git.loadingVersions")}</p>
                           {:else if conflictVersions}
                             <div class="conflict-3way-col">
-                              <span class="screen-kicker">Base (common ancestor)</span>
-                              <pre class="body-view conflict-3way-pre">{conflictVersions.base ?? "(no common ancestor — added independently on both sides)"}</pre>
+                              <span class="screen-kicker">{t("git.baseAncestor")}</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.base ?? t("git.noCommonAncestor")}</pre>
                             </div>
                             <div class="conflict-3way-col">
-                              <span class="screen-kicker">Local (ours)</span>
-                              <pre class="body-view conflict-3way-pre">{conflictVersions.local ?? "(absent locally)"}</pre>
+                              <span class="screen-kicker">{t("git.localOurs")}</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.local ?? t("git.absentLocally")}</pre>
                             </div>
                             <div class="conflict-3way-col">
-                              <span class="screen-kicker">Remote (theirs)</span>
-                              <pre class="body-view conflict-3way-pre">{conflictVersions.remote ?? "(absent on remote)"}</pre>
+                              <span class="screen-kicker">{t("git.remoteTheirs")}</span>
+                              <pre class="body-view conflict-3way-pre">{conflictVersions.remote ?? t("git.absentRemote")}</pre>
                             </div>
                           {/if}
                         </div>
@@ -4774,11 +4794,11 @@
             </div>
           {:else if gitActiveTab === "github"}
             <div class="git-panel-section">
-              <h4>GitHub Collaboration & Permissions (LP-0703, LP-0704)</h4>
-              <p class="hint">Connect your GitHub Personal Access Token (PAT with 'repo' scope) to authenticate remote Git operations and verify team permissions.</p>
+              <h4>{t("git.githubCollab")}</h4>
+              <p class="hint">{t("git.githubTokenDesc")}</p>
 
               <div class="form-row-stacked">
-                <label for="github-pat-input">Personal Access Token (PAT):</label>
+                <label for="github-pat-input">{t("git.patLabel")}</label>
                 <div class="input-with-actions">
                   <input
                     id="github-pat-input"
@@ -4787,7 +4807,7 @@
                     bind:value={githubTokenInput}
                   />
                   <button type="button" onclick={() => (githubShowToken = !githubShowToken)}>
-                    {githubShowToken ? "Hide" : "Show"}
+                    {githubShowToken ? t("git.hide") : t("git.show")}
                   </button>
                   <button
                     type="button"
@@ -4795,7 +4815,7 @@
                     disabled={!githubTokenInput.trim() || githubValidating}
                     onclick={() => { saveGitSettingsAction(); verifyGitHubTokenAction(true); }}
                   >
-                    {githubValidating ? "Verifying…" : "Verify Token"}
+                    {githubValidating ? t("git.verifying") : t("git.verifyToken")}
                   </button>
                 </div>
               </div>
@@ -4812,12 +4832,12 @@
                       <span class="hint">{githubUser.email}</span>
                     {/if}
                   </div>
-                  <span class="badge badge-success">Authenticated</span>
+                  <span class="badge badge-success">{t("git.authenticated")}</span>
                 </div>
               {/if}
 
               <div class="form-row-stacked">
-                <label for="git-remote-url-input">Remote Git Repository URL:</label>
+                <label for="git-remote-url-input">{t("git.remoteUrlLabel")}</label>
                 <div class="input-with-actions">
                   <input
                     id="git-remote-url-input"
@@ -4825,50 +4845,47 @@
                     placeholder="https://github.com/owner/repository.git"
                     bind:value={gitRemoteUrlInput}
                   />
-                  <button type="button" onclick={saveGitSettingsAction}>Save Remote</button>
+                  <button type="button" onclick={saveGitSettingsAction}>{t("git.saveRemote")}</button>
                   <button
                     type="button"
                     disabled={!githubTokenInput.trim() || !gitRemoteUrlInput.trim() || githubValidating}
                     onclick={checkGitHubRepoAction}
                   >
-                    Check Permissions
+                    {t("git.checkPermissions")}
                   </button>
                 </div>
               </div>
 
               {#if githubRepoInfo}
                 <div class="repo-permissions-card">
-                  <h5>Repository: {githubRepoInfo.full_name}</h5>
+                  <h5>{t("git.repository", { name: githubRepoInfo.full_name })}</h5>
                   <div class="perm-badges">
                     <span class="perm-badge" class:perm-granted={githubRepoInfo.permissions?.pull}>
-                      Read / Pull: {githubRepoInfo.permissions?.pull ? "✓ Granted" : "✗ Denied"}
+                      {t("git.readPull", { state: githubRepoInfo.permissions?.pull ? t("git.granted") : t("git.denied") })}
                     </span>
                     <span class="perm-badge" class:perm-granted={githubRepoInfo.permissions?.push}>
-                      Write / Push: {githubRepoInfo.permissions?.push ? "✓ Granted" : "✗ Denied"}
+                      {t("git.writePush", { state: githubRepoInfo.permissions?.push ? t("git.granted") : t("git.denied") })}
                     </span>
                     <span class="perm-badge" class:perm-granted={githubRepoInfo.permissions?.admin}>
-                      Admin: {githubRepoInfo.permissions?.admin ? "✓ Granted" : "✗ Denied"}
+                      {t("git.admin", { state: githubRepoInfo.permissions?.admin ? t("git.granted") : t("git.denied") })}
                     </span>
                   </div>
-                  <p class="hint">Default branch: <code>{githubRepoInfo.default_branch}</code> · {githubRepoInfo.private ? "Private" : "Public"} repository</p>
+                  <p class="hint">{t("git.defaultBranchLine", { branch: githubRepoInfo.default_branch, visibility: githubRepoInfo.private ? t("git.private") : t("git.public") })}</p>
                 </div>
               {/if}
             </div>
           {:else if gitActiveTab === "projectfile"}
             <div class="git-panel-section">
-              <h4>Canonical Project File Format (LP-0701)</h4>
-              <p class="hint">
-                The canonical <code>light-postman.json</code> format is human-readable, deterministically ordered, and Git merge-friendly.
-                Local-only variables are strictly omitted to protect personal credentials.
-              </p>
+              <h4>{t("git.canonicalFormat")}</h4>
+              <p class="hint">{t("git.canonicalFormatDesc")}</p>
 
               <div class="projectfile-options">
                 <label class="checkbox-label">
                   <input type="checkbox" bind:checked={projectFileMaskSecrets} />
-                  Mask secrets as <code>[SECRET]</code> in export
+                  {t("git.maskSecrets")}
                 </label>
                 <button type="button" class="btn-primary" onclick={exportProjectFileAction}>
-                  Generate Project JSON
+                  {t("git.generateJson")}
                 </button>
               </div>
 
@@ -4877,8 +4894,8 @@
                   <div class="json-preview-toolbar">
                     <span>light-postman.json</span>
                     <div class="toolbar-actions">
-                      <button type="button" onclick={downloadProjectFile}>Download File</button>
-                      <button type="button" onclick={importProjectFileAction}>Import Into Project</button>
+                      <button type="button" onclick={downloadProjectFile}>{t("git.downloadFile")}</button>
+                      <button type="button" onclick={importProjectFileAction}>{t("git.importIntoProject")}</button>
                     </div>
                   </div>
                   <textarea rows="12" bind:value={projectFileJson} class="code-area"></textarea>
@@ -4895,36 +4912,36 @@
 {:else if activeScreen === "import"}
   <section class="screen-page">
     <div class="screen-page-header">
-      <span class="screen-kicker">Import</span>
-      <h1 class="screen-title">Bring in a collection, environment, or single request</h1>
+      <span class="screen-kicker">{t("import.title")}</span>
+      <h1 class="screen-title">{t("import.subtitle")}</h1>
     </div>
 
     <div class="modal-tabs" style="flex:none; padding: 0 var(--space-6);">
-      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "collection"} onclick={() => (importActiveTab = "collection")}>Postman Collection</button>
-      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "environment"} onclick={() => (importActiveTab = "environment")}>Postman Environment</button>
-      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "curl"} onclick={() => (importActiveTab = "curl")}>cURL Command</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "collection"} onclick={() => (importActiveTab = "collection")}>{t("import.tabCollection")}</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "environment"} onclick={() => (importActiveTab = "environment")}>{t("import.tabEnvironment")}</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "curl"} onclick={() => (importActiveTab = "curl")}>{t("import.tabCurl")}</button>
     </div>
 
     <div class="screen-page-body">
       {#if importActiveTab === "collection"}
-        <p class="hint">Upload or paste Postman Collection v2.0 or v2.1 JSON.</p>
+        <p class="hint">{t("import.collectionHint")}</p>
         <div class="file-dropzone">
           <label class="file-label">
-            <span>Choose JSON file</span>
+            <span>{t("import.chooseJsonFile")}</span>
             <input type="file" accept=".json,application/json" onchange={handleCollectionFileUpload} />
           </label>
         </div>
-        <textarea placeholder="Or paste Postman Collection JSON here..." bind:value={collectionImportText} rows="6" class="body-input"></textarea>
+        <textarea placeholder={t("import.pasteCollectionPlaceholder")} bind:value={collectionImportText} rows="6" class="body-input"></textarea>
 
         {#if selectedProjectId}
           <div class="radio-row">
             <label class="radio-label">
               <input type="radio" name="collectionTargetScreen" value="new" bind:group={collectionImportTarget} />
-              New Project
+              {t("import.newProject")}
             </label>
             <label class="radio-label">
               <input type="radio" name="collectionTargetScreen" value="current" bind:group={collectionImportTarget} />
-              Current Project
+              {t("import.currentProject")}
             </label>
           </div>
         {/if}
@@ -4933,14 +4950,14 @@
 
         {#if collectionImportReport}
           <div class="import-report-card">
-            <h4>Import Complete</h4>
-            <p><strong>Project:</strong> {collectionImportReport.project_name}</p>
-            <p><strong>Requests:</strong> {collectionImportReport.requests_count}</p>
-            <p><strong>Variables:</strong> {collectionImportReport.variables_count}</p>
-            <p><strong>Sample responses:</strong> {collectionImportReport.sample_responses_count}</p>
+            <h4>{t("import.complete")}</h4>
+            <p>{t("import.project", { name: collectionImportReport.project_name })}</p>
+            <p>{t("import.requests", { count: collectionImportReport.requests_count })}</p>
+            <p>{t("import.variables", { count: collectionImportReport.variables_count })}</p>
+            <p>{t("import.sampleResponses", { count: collectionImportReport.sample_responses_count })}</p>
             {#if collectionImportReport.warnings.length > 0}
               <div class="warnings-box">
-                <h5>Compatibility Notes:</h5>
+                <h5>{t("import.compatNotes")}</h5>
                 <ul>
                   {#each collectionImportReport.warnings as warn}<li>{warn}</li>{/each}
                 </ul>
@@ -4951,29 +4968,29 @@
 
         <div class="params-row">
           <button type="button" class="btn-primary" disabled={!collectionImportText.trim() || collectionImportLoading} onclick={importPostmanCollectionAction}>
-            {collectionImportLoading ? "Importing…" : "Import Collection"}
+            {collectionImportLoading ? t("import.importing") : t("import.importCollection")}
           </button>
         </div>
       {:else if importActiveTab === "environment"}
-        <p class="hint">Upload or paste a Postman Environment JSON file.</p>
+        <p class="hint">{t("import.environmentHint")}</p>
         <div class="file-dropzone">
           <label class="file-label">
-            <span>Choose JSON file</span>
+            <span>{t("import.chooseJsonFile")}</span>
             <input type="file" accept=".json,application/json" onchange={handleEnvironmentFileUpload} />
           </label>
         </div>
-        <textarea placeholder="Or paste Postman Environment JSON here..." bind:value={environmentImportText} rows="4" class="body-input"></textarea>
+        <textarea placeholder={t("import.pasteEnvironmentPlaceholder")} bind:value={environmentImportText} rows="4" class="body-input"></textarea>
 
         {#if environmentImportError}<p class="error">{environmentImportError}</p>{/if}
 
         {#if environmentImportReport}
           <div class="import-report-card">
-            <h4>Environment Imported</h4>
-            <p><strong>Environment:</strong> {environmentImportReport.environment_name}</p>
-            <p><strong>Variables:</strong> {environmentImportReport.variables_count}</p>
+            <h4>{t("import.environmentImported")}</h4>
+            <p>{t("import.environment", { name: environmentImportReport.environment_name })}</p>
+            <p>{t("import.variables", { count: environmentImportReport.variables_count })}</p>
             {#if environmentImportReport.warnings.length > 0}
               <div class="warnings-box">
-                <h5>Compatibility Notes:</h5>
+                <h5>{t("import.compatNotes")}</h5>
                 <ul>
                   {#each environmentImportReport.warnings as warn}<li>{warn}</li>{/each}
                 </ul>
@@ -4984,25 +5001,25 @@
 
         <div class="params-row">
           <button type="button" class="btn-primary" disabled={!environmentImportText.trim() || environmentImportLoading} onclick={importPostmanEnvironmentAction}>
-            {environmentImportLoading ? "Importing…" : "Import Environment"}
+            {environmentImportLoading ? t("import.importing") : t("import.importEnvironment")}
           </button>
         </div>
       {:else if importActiveTab === "curl"}
-        <p class="hint">Paste a single cURL command to add it as one request to the current project.</p>
+        <p class="hint">{t("import.curlHint")}</p>
         {#if !selectedProjectId}
-          <p class="screen-empty-inline">Select a project on the Workspace screen first — a cURL import needs somewhere to add the request.</p>
+          <p class="screen-empty-inline">{t("import.selectProjectFirst")}</p>
         {:else}
           <form onsubmit={importCurlCommand}>
-            <input placeholder="Request Name (optional)" bind:value={curlImportName} />
+            <input placeholder={t("import.requestNamePlaceholder")} bind:value={curlImportName} />
             <textarea
-              placeholder="Paste cURL command here (e.g. curl -X POST https://api.example.com/users -H 'Content-Type: application/json' -d 'data')"
+              placeholder={t("import.curlPlaceholder")}
               bind:value={curlImportText}
               rows="6"
               class="body-input"
             ></textarea>
             {#if curlImportError}<p class="error">{curlImportError}</p>{/if}
             <div class="params-row">
-              <button type="submit" class="btn-primary">Import Request</button>
+              <button type="submit" class="btn-primary">{t("import.importRequest")}</button>
             </div>
           </form>
         {/if}
@@ -5012,13 +5029,13 @@
 {:else if activeScreen === "launcher"}
   <section class="screen-page">
     <div class="screen-page-header">
-      <span class="screen-kicker">Workspace</span>
-      <h1 class="screen-title">Open a project</h1>
-      <p class="screen-subtitle">{projects.length} project{projects.length === 1 ? "" : "s"} in this workspace.</p>
+      <span class="screen-kicker">{t("launcher.kicker")}</span>
+      <h1 class="screen-title">{t("launcher.title")}</h1>
+      <p class="screen-subtitle">{t("launcher.subtitle", { count: projects.length })}</p>
     </div>
 
     {#if projects.length === 0}
-      <p class="screen-empty">No projects yet. Create one from the Workspace screen, or import a Postman collection from the Import screen.</p>
+      <p class="screen-empty">{t("launcher.noProjects")}</p>
     {:else}
       <div class="launcher-grid">
         {#each projects as p (p.id)}
@@ -5028,11 +5045,11 @@
             class:active={p.id === selectedProjectId}
             onclick={() => { selectProject(p.id); activeScreen = "workspace"; }}
           >
-            <span class="screen-kicker" class:current={p.id === selectedProjectId}>{p.id === selectedProjectId ? "Open now" : "Updated " + new Date(p.updated_at).toLocaleDateString()}</span>
+            <span class="screen-kicker" class:current={p.id === selectedProjectId}>{p.id === selectedProjectId ? t("launcher.openNow") : t("launcher.updated", { date: new Date(p.updated_at).toLocaleDateString() })}</span>
             <div class="launcher-card-name">{p.name}</div>
             <div class="hr"></div>
             <div class="launcher-card-meta">
-              <span>{projectRequestCounts[p.id] ?? 0} request{(projectRequestCounts[p.id] ?? 0) === 1 ? "" : "s"}</span>
+              <span>{t("launcher.requestCount", { count: projectRequestCounts[p.id] ?? 0 })}</span>
             </div>
           </button>
         {/each}
@@ -5040,42 +5057,42 @@
     {/if}
 
     <div class="screen-page-body" style="flex:none; display:flex; gap: var(--space-3);">
-      <button type="button" class="btn-primary" onclick={() => (activeScreen = "import")}>Import Postman collection</button>
+      <button type="button" class="btn-primary" onclick={() => (activeScreen = "import")}>{t("launcher.importCollection")}</button>
     </div>
   </section>
 {:else if activeScreen === "history"}
   {#if !selectedProjectId}
-    {@render noProjectPicker("History")}
+    {@render noProjectPicker(t("rail.history"))}
   {:else}
     <section class="screen-page">
       <div class="history-toolbar">
-        <span class="history-toolbar-project-label">Project</span>
+        <span class="history-toolbar-project-label">{t("env.project")}</span>
         {@render projectSwitcher()}
         <div class="hr-v"></div>
-        <input class="history-search" placeholder="Filter by request name, method, URL, or status…" bind:value={historySearchQuery} />
+        <input class="history-search" placeholder={t("history.filterPlaceholder")} bind:value={historySearchQuery} />
         <div class="hr-v"></div>
-        <span class="screen-empty-inline">{filteredProjectHistory.length} of {projectHistory.length} results</span>
+        <span class="screen-empty-inline">{t("history.resultsCount", { shown: filteredProjectHistory.length, total: projectHistory.length })}</span>
         <div class="response-stat-spacer"></div>
         <button type="button" class="history-filter-chip" class:active={historyShowFailuresOnly} onclick={() => (historyShowFailuresOnly = !historyShowFailuresOnly)}>
-          Failures only
+          {t("history.failuresOnly")}
         </button>
-        <button type="button" class="btn-ghost btn-xs" onclick={refreshProjectHistory}>↻ Refresh</button>
+        <button type="button" class="btn-ghost btn-xs" onclick={refreshProjectHistory}>{t("history.refresh")}</button>
       </div>
 
       <div class="history-header-row">
-        <span>Method</span>
-        <span>Request</span>
-        <span>Status</span>
-        <span>Time</span>
-        <span>When</span>
+        <span>{t("history.colMethod")}</span>
+        <span>{t("history.colRequest")}</span>
+        <span>{t("history.colStatus")}</span>
+        <span>{t("history.colTime")}</span>
+        <span>{t("history.colWhen")}</span>
       </div>
 
       <div class="history-rows">
         {#if historyLoading}
-          <p class="screen-empty-inline" style="padding: var(--space-4);">Loading…</p>
+          <p class="screen-empty-inline" style="padding: var(--space-4);">{t("history.loading")}</p>
         {:else if filteredProjectHistory.length === 0}
           <p class="screen-empty-inline" style="padding: var(--space-4);">
-            {projectHistory.length === 0 ? "No requests have been sent in this project yet." : "No results match this filter."}
+            {projectHistory.length === 0 ? t("history.noRequestsSent") : t("history.noResultsMatch")}
           </p>
         {:else}
           {#each filteredProjectHistory as h (h.id)}
@@ -5098,15 +5115,15 @@
 {:else if activeScreen === "settings"}
   <section class="screen-page">
     <div class="screen-page-header">
-      <span class="screen-kicker">Settings</span>
-      <h1 class="screen-title">Resources & behavior</h1>
-      <p class="screen-subtitle">What's actually adjustable is adjustable here; what isn't (yet) is shown honestly as read-only, not faked as a slider that would do nothing.</p>
+      <span class="screen-kicker">{t("rail.settings")}</span>
+      <h1 class="screen-title">{t("settings.title")}</h1>
+      <p class="screen-subtitle">{t("settings.subtitle")}</p>
     </div>
 
     <div class="settings-screen-row">
       <div>
-        <div class="settings-screen-row-label">Auto-sync interval</div>
-        <div class="screen-empty-inline">How often the background Git sync (when enabled) checks the remote. Real and adjustable — this used to be a hardcoded 60s.</div>
+        <div class="settings-screen-row-label">{t("settings.autoSyncInterval")}</div>
+        <div class="screen-empty-inline">{t("settings.autoSyncHint")}</div>
       </div>
       <div class="seg">
         {#each [[30000, "30s"], [60000, "60s"], [120000, "2m"], [300000, "5m"]] as [ms, label]}
@@ -5117,22 +5134,22 @@
 
     <div class="settings-screen-row">
       <div>
-        <div class="settings-screen-row-label">Appearance</div>
-        <div class="screen-empty-inline">Light is this design system's default; dark is a real alternate palette.</div>
+        <div class="settings-screen-row-label">{t("settings.appearance")}</div>
+        <div class="screen-empty-inline">{t("settings.appearanceHint")}</div>
       </div>
       <div class="seg">
-        <button type="button" class="seg-opt" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>Light</button>
-        <button type="button" class="seg-opt" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>Dark</button>
+        <button type="button" class="seg-opt" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>{t("settings.light")}</button>
+        <button type="button" class="seg-opt" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>{t("settings.dark")}</button>
       </div>
     </div>
 
     <div class="settings-screen-row">
       <div>
-        <div class="settings-screen-row-label">Icon & text size</div>
-        <div class="screen-empty-inline">Scales every icon and label app-wide (the root font-size everything else is sized relative to) — not just this screen's preview.</div>
+        <div class="settings-screen-row-label">{t("settings.uiScale")}</div>
+        <div class="screen-empty-inline">{t("settings.uiScaleHint")}</div>
       </div>
       <div class="seg">
-        {#each [[85, "Small"], [100, "Default"], [115, "Large"], [130, "Extra large"]] as [pct, label]}
+        {#each [[85, t("settings.scaleSmall")], [100, t("settings.scaleDefault")], [115, t("settings.scaleLarge")], [130, t("settings.scaleExtraLarge")]] as [pct, label]}
           <button type="button" class="seg-opt" class:active={uiScale === pct} onclick={() => setUiScale(pct as number)}>{label}</button>
         {/each}
       </div>
@@ -5140,8 +5157,19 @@
 
     <div class="settings-screen-row">
       <div>
-        <div class="settings-screen-row-label">Keyboard shortcuts</div>
-        <div class="screen-empty-inline">Each one calls the same function the matching button does — nothing shortcut-only. Turn off any that collide with something else on your system.</div>
+        <div class="settings-screen-row-label">{t("settings.language")}</div>
+        <div class="screen-empty-inline">{t("settings.languageHint")}</div>
+      </div>
+      <div class="seg">
+        <button type="button" class="seg-opt" class:active={locale === "en"} onclick={() => setLocale("en")}>{t("settings.languageEnglish")}</button>
+        <button type="button" class="seg-opt" class:active={locale === "ar"} onclick={() => setLocale("ar")}>{t("settings.languageArabic")}</button>
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.shortcuts")}</div>
+        <div class="screen-empty-inline">{t("settings.shortcutsHint")}</div>
       </div>
       <div class="shortcuts-list">
         {#each SHORTCUT_DEFS as def (def.id)}
@@ -5151,7 +5179,7 @@
               checked={shortcutsEnabled[def.id]}
               onchange={(e) => setShortcutEnabled(def.id, (e.target as HTMLInputElement).checked)}
             />
-            <span class="shortcut-label">{def.label}</span>
+            <span class="shortcut-label">{t(def.label)}</span>
             <kbd class="shortcut-keys">{def.keys}</kbd>
           </label>
         {/each}
@@ -5160,51 +5188,51 @@
 
     <div class="settings-screen-row">
       <div>
-        <div class="settings-screen-row-label">Response held in memory</div>
-        <div class="screen-empty-inline">Bodies larger than this cap stream straight to disk instead of growing the in-memory buffer further (<code>MAX_INLINE_BODY_BYTES</code>, execution.rs). Fixed at build time, not adjustable here.</div>
+        <div class="settings-screen-row-label">{t("settings.responseMemory")}</div>
+        <div class="screen-empty-inline">{t("settings.responseMemoryHint")}</div>
       </div>
       <div class="settings-screen-row-value">256 KB</div>
     </div>
 
     <div class="settings-screen-row">
       <div>
-        <div class="settings-screen-row-label">Script timeout</div>
-        <div class="screen-empty-inline">Hard ceiling on sandboxed pre-request / post-request scripts. Fixed at build time (1,500 ms / 2,000 ms), not adjustable here.</div>
+        <div class="settings-screen-row-label">{t("settings.scriptTimeout")}</div>
+        <div class="screen-empty-inline">{t("settings.scriptTimeoutHint")}</div>
       </div>
       <div class="settings-screen-row-value">1.5s / 2s</div>
     </div>
 
     <div class="settings-screen-row">
       <div>
-        <div class="settings-screen-row-label">Response cache</div>
-        <div class="screen-empty-inline">There isn't one — every response is written straight to SQLite (and disk, past the inline cap above). Nothing to configure.</div>
+        <div class="settings-screen-row-label">{t("settings.responseCache")}</div>
+        <div class="screen-empty-inline">{t("settings.responseCacheHint")}</div>
       </div>
-      <div class="settings-screen-row-value">None</div>
+      <div class="settings-screen-row-value">{t("settings.none")}</div>
     </div>
 
     <div class="settings-screen-row">
       <div>
-        <div class="settings-screen-row-label">History retention</div>
-        <div class="screen-empty-inline">Response history rows accumulate until you delete them — there's no automatic expiry yet.</div>
+        <div class="settings-screen-row-label">{t("settings.historyRetention")}</div>
+        <div class="screen-empty-inline">{t("settings.historyRetentionHint")}</div>
       </div>
-      <div class="settings-screen-row-value">Unbounded</div>
+      <div class="settings-screen-row-value">{t("settings.unbounded")}</div>
     </div>
 
     {#if systemDiagnostics}
       <div class="settings-screen-row">
         <div>
-          <div class="settings-screen-row-label">Current process</div>
-          <div class="screen-empty-inline">Real measurements — memory via <code>sysinfo</code>, everything else a direct SQLite count/file size.</div>
+          <div class="settings-screen-row-label">{t("settings.currentProcess")}</div>
+          <div class="screen-empty-inline">{t("settings.currentProcessHint")}</div>
         </div>
         <div class="settings-screen-diagnostics-grid">
-          <span>Memory (RSS)</span><strong>{formatByteSize(systemDiagnostics.process_rss_bytes)}</strong>
-          <span>Database</span><strong>{formatByteSize(systemDiagnostics.db_size_bytes)}</strong>
-          <span>WAL file</span><strong>{formatByteSize(systemDiagnostics.db_wal_size_bytes)}</strong>
-          <span>Projects</span><strong>{systemDiagnostics.total_projects}</strong>
-          <span>Requests</span><strong>{systemDiagnostics.total_requests}</strong>
-          <span>Responses stored</span><strong>{systemDiagnostics.total_responses}</strong>
-          <span>Console events</span><strong>{systemDiagnostics.console_events_count}</strong>
-          <span>Uptime</span><strong>{Math.floor(systemDiagnostics.uptime_seconds / 60)} min</strong>
+          <span>{t("settings.memoryRss")}</span><strong>{formatByteSize(systemDiagnostics.process_rss_bytes)}</strong>
+          <span>{t("settings.database")}</span><strong>{formatByteSize(systemDiagnostics.db_size_bytes)}</strong>
+          <span>{t("settings.walFile")}</span><strong>{formatByteSize(systemDiagnostics.db_wal_size_bytes)}</strong>
+          <span>{t("settings.projects")}</span><strong>{systemDiagnostics.total_projects}</strong>
+          <span>{t("settings.requests")}</span><strong>{systemDiagnostics.total_requests}</strong>
+          <span>{t("settings.responsesStored")}</span><strong>{systemDiagnostics.total_responses}</strong>
+          <span>{t("settings.consoleEvents")}</span><strong>{systemDiagnostics.console_events_count}</strong>
+          <span>{t("settings.uptime")}</span><strong>{Math.floor(systemDiagnostics.uptime_seconds / 60)} min</strong>
         </div>
       </div>
     {/if}
@@ -5212,19 +5240,19 @@
 {:else if activeScreen === "theme"}
   <section class="screen-page">
     <div class="screen-page-header">
-      <span class="screen-kicker">Appearance</span>
-      <h1 class="screen-title">Light and dark, side by side</h1>
-      <p class="screen-subtitle">Same structure, same 2px rules, same single accent. Dark inverts the ground and lifts the accent one ramp step so it stays legible on ink. You're currently on <strong>{themeMode === "dark" ? "Dark" : "Light"}</strong>.</p>
+      <span class="screen-kicker">{t("settings.appearance")}</span>
+      <h1 class="screen-title">{t("theme.title")}</h1>
+      <p class="screen-subtitle">{t("theme.subtitle")} {t("theme.youAreOn", { mode: themeMode === "dark" ? t("settings.dark") : t("settings.light") })}</p>
     </div>
     <div class="theme-compare">
       <button type="button" class="theme-compare-col" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>
         <div class="theme-compare-header">
-          <span class="screen-kicker">Light — default</span>
-          {#if themeMode === "light"}<span class="theme-active-badge">Active</span>{/if}
+          <span class="screen-kicker">{t("settings.light")} — {t("settings.scaleDefault")}</span>
+          {#if themeMode === "light"}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
         </div>
         <div class="theme-swatch" data-theme="light">
           <div class="theme-swatch-topbar">
-            <span>Lightpost</span>
+            <span>{t("rail.brand")}</span>
             <span class="theme-swatch-sync">SYNC</span>
           </div>
           <div class="theme-swatch-body">
@@ -5245,12 +5273,12 @@
       </button>
       <button type="button" class="theme-compare-col" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>
         <div class="theme-compare-header">
-          <span class="screen-kicker">Dark</span>
-          {#if themeMode === "dark"}<span class="theme-active-badge">Active</span>{/if}
+          <span class="screen-kicker">{t("settings.dark")}</span>
+          {#if themeMode === "dark"}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
         </div>
         <div class="theme-swatch" data-theme="dark">
           <div class="theme-swatch-topbar">
-            <span>Lightpost</span>
+            <span>{t("rail.brand")}</span>
             <span class="theme-swatch-sync">SYNC</span>
           </div>
           <div class="theme-swatch-body">
@@ -5278,8 +5306,8 @@
     <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closePalette(); }} onkeydown={(e) => { if (e.key === "Escape") closePalette(); }} role="dialog" aria-modal="true" tabindex="0">
       <div class="palette">
         <div class="palette-header">
-          <span class="screen-kicker">Go to</span>
-          <input class="palette-input" placeholder="Search projects and requests…" bind:value={paletteQuery} bind:this={paletteInputEl} />
+          <span class="screen-kicker">{t("palette.goTo")}</span>
+          <input class="palette-input" placeholder={t("palette.placeholder")} bind:value={paletteQuery} bind:this={paletteInputEl} />
         </div>
         <div class="palette-results">
           {#each paletteItems as p, i (i)}
@@ -5290,12 +5318,12 @@
               <span class="palette-item-hint">{p.hint}</span>
             </button>
           {:else}
-            <p class="screen-empty-inline">No matches.</p>
+            <p class="screen-empty-inline">{t("palette.noMatches")}</p>
           {/each}
         </div>
         <div class="palette-footer">
-          <span>↵ open</span>
-          <span>esc dismiss</span>
+          <span>{t("palette.openHint")}</span>
+          <span>{t("palette.dismissHint")}</span>
         </div>
       </div>
     </div>
@@ -5496,6 +5524,11 @@
     border-right: 2px solid var(--color-border-strong);
     background: var(--color-bg);
     overflow: hidden;
+    transition: width 0.15s ease;
+  }
+
+  .screens-rail.collapsed {
+    width: 52px;
   }
 
   .rail-brand {
@@ -5510,6 +5543,11 @@
     letter-spacing: 0.02em;
     text-transform: uppercase;
     border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .screens-rail.collapsed .rail-brand {
+    justify-content: center;
+    padding: var(--space-4) var(--space-2) var(--space-3) var(--space-2);
   }
 
   .rail-screens {
@@ -5532,6 +5570,22 @@
     font-size: 0.8rem;
     color: var(--color-text);
     cursor: pointer;
+  }
+
+  .screens-rail.collapsed .rail-screen {
+    justify-content: center;
+    padding: 0.65rem 0;
+  }
+
+  .rail-screen-icon {
+    font-size: 1rem;
+    flex: none;
+  }
+
+  .rail-screen-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .rail-screen:hover {
@@ -6488,13 +6542,27 @@
     border-color: var(--color-primary-hover);
   }
 
-  .save-status {
+  .btn-save {
     font-size: 0.75rem;
     color: var(--color-text-tertiary);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    white-space: nowrap;
   }
 
-  .save-status.is-error {
+  .btn-save:hover {
+    color: var(--color-text-primary);
+    border-color: var(--color-text-tertiary);
+  }
+
+  .btn-save.is-unsaved {
+    color: var(--color-text-primary);
+    border-color: var(--color-accent);
+  }
+
+  .btn-save.is-error {
     color: var(--color-danger);
+    border-color: var(--color-danger);
   }
 
   .btn-send {
@@ -6873,6 +6941,46 @@
     border-radius: var(--radius-sm);
   }
 
+  .folder-node {
+    margin-bottom: 2px;
+  }
+
+  .folder-row {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    border-radius: var(--radius-sm);
+  }
+
+  .folder-row:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .folder-row:hover .project-row-actions {
+    opacity: 1;
+  }
+
+  .folder-link {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.3rem 0.1rem;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .folder-request-list {
+    padding: 0.1rem 0 0.2rem 1.1rem;
+    border-left: 2px solid var(--color-border);
+    margin-left: 0.5rem;
+  }
+
   .request-item:hover {
     background: var(--color-bg-hover);
   }
@@ -7185,6 +7293,7 @@
 
   .send-action {
     display: flex;
+    gap: 0.4rem;
   }
 
   .url-preview-bar {

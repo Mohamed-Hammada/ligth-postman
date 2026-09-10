@@ -40,6 +40,7 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
     let request = RequestFull {
         id: Uuid::new_v4().to_string(),
         project_id: input.project_id,
+        folder_id: input.folder_id,
         name: name.to_string(),
         method,
         url: url.to_string(),
@@ -56,11 +57,12 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
     };
 
     conn.execute(
-        "INSERT INTO requests (id, project_id, name, method, url, headers, query_params, auth, body, description, settings, pre_request_script, post_request_script, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO requests (id, project_id, folder_id, name, method, url, headers, query_params, auth, body, description, settings, pre_request_script, post_request_script, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             request.id,
             request.project_id,
+            request.folder_id,
             request.name,
             request.method,
             request.url,
@@ -89,17 +91,18 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
 /// Never selects `headers`/`body` — list views must stay cheap even with 10k+ requests (README §20).
 pub fn list_requests(conn: &Connection, project_id: &str) -> Result<Vec<RequestSummary>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, name, method, url, updated_at
+        "SELECT id, project_id, folder_id, name, method, url, updated_at
          FROM requests WHERE project_id = ?1 ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map(params![project_id], |row| {
-        let updated_at: String = row.get(5)?;
+        let updated_at: String = row.get(6)?;
         Ok(RequestSummary {
             id: row.get(0)?,
             project_id: row.get(1)?,
-            name: row.get(2)?,
-            method: row.get(3)?,
-            url: row.get(4)?,
+            folder_id: row.get(2)?,
+            name: row.get(3)?,
+            method: row.get(4)?,
+            url: row.get(5)?,
             updated_at: updated_at.parse().unwrap_or_else(|_| Utc::now()),
         })
     })?;
@@ -108,32 +111,33 @@ pub fn list_requests(conn: &Connection, project_id: &str) -> Result<Vec<RequestS
 
 pub fn get_request(conn: &Connection, id: &str) -> Result<RequestFull, AppError> {
     conn.query_row(
-        "SELECT id, project_id, name, method, url, headers, query_params, auth, body, description, settings, pre_request_script, post_request_script, created_at, updated_at
+        "SELECT id, project_id, folder_id, name, method, url, headers, query_params, auth, body, description, settings, pre_request_script, post_request_script, created_at, updated_at
          FROM requests WHERE id = ?1",
         params![id],
         |row| {
-            let headers_json: String = row.get(5)?;
-            let query_params_json: String = row.get(6)?;
-            let auth_json: String = row.get(7)?;
-            let settings_json: Option<String> = row.get(10)?;
-            let created_at: String = row.get(13)?;
-            let updated_at: String = row.get(14)?;
+            let headers_json: String = row.get(6)?;
+            let query_params_json: String = row.get(7)?;
+            let auth_json: String = row.get(8)?;
+            let settings_json: Option<String> = row.get(11)?;
+            let created_at: String = row.get(14)?;
+            let updated_at: String = row.get(15)?;
             Ok(RequestFull {
                 id: row.get(0)?,
                 project_id: row.get(1)?,
-                name: row.get(2)?,
-                method: row.get(3)?,
-                url: row.get(4)?,
+                folder_id: row.get(2)?,
+                name: row.get(3)?,
+                method: row.get(4)?,
+                url: row.get(5)?,
                 headers: serde_json::from_str::<Vec<HeaderEntry>>(&headers_json)
                     .unwrap_or_default(),
                 query_params: serde_json::from_str::<Vec<QueryParam>>(&query_params_json)
                     .unwrap_or_default(),
                 auth: serde_json::from_str::<Auth>(&auth_json).unwrap_or(Auth::None),
-                body: row.get(8)?,
-                description: row.get(9)?,
+                body: row.get(9)?,
+                description: row.get(10)?,
                 settings: settings_json.as_deref().and_then(|s| serde_json::from_str::<RequestSettings>(s).ok()),
-                pre_request_script: row.get(11)?,
-                post_request_script: row.get(12)?,
+                pre_request_script: row.get(12)?,
+                post_request_script: row.get(13)?,
                 created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
                 updated_at: updated_at.parse().unwrap_or_else(|_| Utc::now()),
             })
@@ -208,6 +212,11 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
     } else {
         input.post_request_script.or(existing.post_request_script)
     };
+    let folder_id = if input.clear_folder_id {
+        None
+    } else {
+        input.folder_id.or(existing.folder_id)
+    };
 
     let headers_json = serde_json::to_string(&headers)
         .map_err(|err| AppError::Validation(format!("invalid headers: {err}")))?;
@@ -224,8 +233,8 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
 
     let tx = conn.unchecked_transaction()?;
     tx.execute(
-        "UPDATE requests SET name = ?1, method = ?2, url = ?3, headers = ?4, query_params = ?5, auth = ?6, body = ?7, description = ?8, settings = ?9, pre_request_script = ?10, post_request_script = ?11, updated_at = ?12
-         WHERE id = ?13",
+        "UPDATE requests SET name = ?1, method = ?2, url = ?3, headers = ?4, query_params = ?5, auth = ?6, body = ?7, description = ?8, settings = ?9, pre_request_script = ?10, post_request_script = ?11, folder_id = ?12, updated_at = ?13
+         WHERE id = ?14",
         params![
             name,
             method,
@@ -238,6 +247,7 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
             settings_json,
             pre_request_script,
             post_request_script,
+            folder_id,
             updated_at.to_rfc3339(),
             existing.id
         ],
@@ -247,6 +257,7 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
     Ok(RequestFull {
         id: existing.id,
         project_id: existing.project_id,
+        folder_id,
         name,
         method,
         url,
@@ -857,6 +868,7 @@ mod tests {
                 clear_pre_request_script: false,
                 post_request_script: Some("console.log('after');".into()),
                 clear_post_request_script: false,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -886,6 +898,7 @@ mod tests {
                 clear_pre_request_script: true,
                 post_request_script: None,
                 clear_post_request_script: true,
+                ..Default::default()
             },
         )
         .unwrap();

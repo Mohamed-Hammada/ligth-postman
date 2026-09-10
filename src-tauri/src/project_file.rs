@@ -269,6 +269,10 @@ pub fn import_project_from_json(
             &tx,
             NewRequestInput {
                 project_id: project.id.clone(),
+                // Folders aren't part of the light-postman.json schema yet — imported requests
+                // land at the project root, same as any other request-store caller that hasn't
+                // been taught about folders.
+                folder_id: None,
                 name: req.name,
                 method: req.method,
                 url: req.url,
@@ -371,6 +375,7 @@ pub mod tests {
             &conn,
             NewRequestInput {
                 project_id: project.id.clone(),
+                folder_id: None,
                 name: "Get Users".into(),
                 method: "GET".into(),
                 url: "{{baseUrl}}/users".into(),

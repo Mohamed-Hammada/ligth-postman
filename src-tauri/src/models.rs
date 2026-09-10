@@ -268,6 +268,8 @@ pub struct NewSampleResponseInput {
 pub struct RequestSummary {
     pub id: String,
     pub project_id: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub name: String,
     pub method: String,
     pub url: String,
@@ -279,6 +281,8 @@ pub struct RequestSummary {
 pub struct RequestFull {
     pub id: String,
     pub project_id: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub name: String,
     pub method: String,
     pub url: String,
@@ -301,6 +305,8 @@ pub struct RequestFull {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewRequestInput {
     pub project_id: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
     pub name: String,
     pub method: String,
     pub url: String,
@@ -563,4 +569,31 @@ pub struct UpdateRequestInput {
     pub post_request_script: Option<String>,
     #[serde(default)]
     pub clear_post_request_script: bool,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    /// Moves the request to the project's root, out of whatever folder it was in.
+    #[serde(default)]
+    pub clear_folder_id: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Folder {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewFolderInput {
+    pub project_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpdateFolderInput {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }

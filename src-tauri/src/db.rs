@@ -175,6 +175,22 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // instead (see environment_store::delete_environment).
         "ALTER TABLE projects ADD COLUMN default_environment_id TEXT;",
     ),
+    (
+        13,
+        // Flat (non-nested) folders: a request either sits directly under its project or under
+        // one folder in that project. `folder_id` on requests has no DB-level FK for the same
+        // reason as migration 12 above — folder_store::delete_folder clears/cascades it in
+        // application code instead.
+        "CREATE TABLE folders (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_folders_project_id ON folders(project_id);
+        ALTER TABLE requests ADD COLUMN folder_id TEXT;",
+    ),
 ];
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {

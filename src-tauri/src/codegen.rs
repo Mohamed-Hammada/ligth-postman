@@ -287,6 +287,7 @@ mod tests {
         RequestFull {
             id: "r1".into(),
             project_id: "p1".into(),
+            folder_id: None,
             name: "Get user".into(),
             method: "GET".into(),
             url: "https://api.example.com/users/{{userId}}".into(),

@@ -343,6 +343,7 @@ mod tests {
         RequestFull {
             id: "r1".into(),
             project_id: "p1".into(),
+            folder_id: None,
             name: "Test".into(),
             method: "GET".into(),
             url: "https://api.example.com/users".into(),

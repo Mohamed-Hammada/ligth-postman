@@ -192,6 +192,7 @@ fn import_items_recursive(
                 conn,
                 NewRequestInput {
                     project_id: project_id.to_string(),
+                    folder_id: None,
                     name: full_name,
                     method,
                     url,

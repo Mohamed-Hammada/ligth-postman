@@ -1,0 +1,592 @@
+// Import for Postman's newer "local files" workspace format — an on-disk directory tree
+// (collections/<name>/**/*.request.yaml, environments/*.environment.yaml), NOT the single
+// Postman Collection v2.1 JSON blob that `importer.rs` handles. Every file is parsed
+// defensively via a generic `serde_yaml::Value` walk (never a strict typed deserialize) so one
+// malformed/unusual file among thousands degrades to a warning instead of aborting the run.
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use serde_yaml::Value as Yaml;
+
+use crate::error::AppError;
+use crate::models::{
+    ApiKeyLocation, Auth, FormDataPart, HeaderEntry, NewEnvironmentInput, NewFolderInput,
+    NewProjectInput, NewRequestInput, NewVariableInput, RequestBody, UrlEncodedItem,
+    VariableScope, VALID_METHODS,
+};
+use crate::store::{environment_store, folder_store, project_store, request_store, variable_store};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalWorkspaceImportReport {
+    pub projects_created: usize,
+    pub folders_created: usize,
+    pub requests_imported: usize,
+    pub environments_imported: usize,
+    pub variables_imported: usize,
+    pub warnings: Vec<String>,
+}
+
+// Heuristic only — the source format doesn't mark variables as secret, but real workspaces
+// routinely carry live tokens/passwords in plain values. Flagging obviously-named ones as
+// secret means they render masked by default instead of in plaintext.
+const SECRET_KEY_HINTS: [&str; 8] = [
+    "secret", "password", "passwd", "token", "apikey", "api_key", "private", "credential",
+];
+
+fn looks_like_secret(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    SECRET_KEY_HINTS.iter().any(|hint| lower.contains(hint))
+}
+
+fn yaml_scalar_to_string(value: Option<&Yaml>) -> String {
+    match value {
+        Some(Yaml::String(s)) => s.clone(),
+        Some(Yaml::Number(n)) => n.to_string(),
+        Some(Yaml::Bool(b)) => b.to_string(),
+        Some(Yaml::Null) | None => String::new(),
+        Some(other) => serde_yaml::to_string(other).unwrap_or_default().trim().to_string(),
+    }
+}
+
+fn yaml_get<'a>(doc: &'a Yaml, key: &str) -> Option<&'a Yaml> {
+    doc.as_mapping()?.get(Yaml::String(key.to_string()))
+}
+
+pub fn import_local_workspace(
+    conn: &Connection,
+    root_path: &str,
+) -> Result<LocalWorkspaceImportReport, AppError> {
+    let root = Path::new(root_path);
+    if !root.exists() || !root.is_dir() {
+        return Err(AppError::Validation(format!(
+            "Directory does not exist: {root_path}"
+        )));
+    }
+    let collections_dir = root.join("collections");
+    let environments_dir = root.join("environments");
+    if !collections_dir.is_dir() && !environments_dir.is_dir() {
+        return Err(AppError::Validation(
+            "Not a recognized local Postman workspace — expected a 'collections' and/or 'environments' subfolder here.".into(),
+        ));
+    }
+
+    let mut warnings = Vec::new();
+    let mut projects_created = 0usize;
+    let mut folders_created = 0usize;
+    let mut requests_imported = 0usize;
+    let mut environments_imported = 0usize;
+    let mut variables_imported = 0usize;
+
+    conn.execute_batch("BEGIN TRANSACTION;")
+        .map_err(|err| AppError::Storage(err.to_string()))?;
+
+    let result = (|| -> Result<(), AppError> {
+        if collections_dir.is_dir() {
+            let mut entries: Vec<_> = fs::read_dir(&collections_dir)
+                .map_err(|err| AppError::Storage(err.to_string()))?
+                .filter_map(|e| e.ok())
+                .collect();
+            entries.sort_by_key(|e| e.file_name());
+
+            for entry in entries {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let collection_name = entry.file_name().to_string_lossy().to_string();
+                if collection_name.starts_with('.') {
+                    continue;
+                }
+
+                let project = project_store::create_project(
+                    conn,
+                    NewProjectInput { name: collection_name.clone() },
+                )?;
+                projects_created += 1;
+
+                let mut folder_cache: HashMap<String, String> = HashMap::new();
+                import_collection_dir(
+                    conn,
+                    &path,
+                    &project.id,
+                    "",
+                    &mut folder_cache,
+                    &mut folders_created,
+                    &mut requests_imported,
+                    &mut warnings,
+                );
+            }
+        }
+
+        if environments_dir.is_dir() {
+            let mut env_files: Vec<_> = fs::read_dir(&environments_dir)
+                .map_err(|err| AppError::Storage(err.to_string()))?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_lowercase();
+                    name.ends_with(".yaml") || name.ends_with(".yml")
+                })
+                .collect();
+            env_files.sort_by_key(|e| e.file_name());
+
+            if !env_files.is_empty() {
+                let holder = project_store::create_project(
+                    conn,
+                    NewProjectInput { name: "Imported Environments".to_string() },
+                )?;
+                projects_created += 1;
+
+                for entry in env_files {
+                    let path = entry.path();
+                    let content = match fs::read_to_string(&path) {
+                        Ok(c) => c,
+                        Err(err) => {
+                            warnings.push(format!("Could not read {}: {err}", path.display()));
+                            continue;
+                        }
+                    };
+                    let doc: Yaml = match serde_yaml::from_str(&content) {
+                        Ok(d) => d,
+                        Err(err) => {
+                            warnings.push(format!(
+                                "Skipped environment file '{}': invalid YAML ({err})",
+                                path.display()
+                            ));
+                            continue;
+                        }
+                    };
+
+                    let fallback_name = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Imported Environment".to_string())
+                        .trim_end_matches(".environment")
+                        .to_string();
+                    let name = yaml_get(&doc, "name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or(fallback_name);
+
+                    let env = match environment_store::create_environment(
+                        conn,
+                        NewEnvironmentInput { project_id: holder.id.clone(), name: name.clone() },
+                    ) {
+                        Ok(e) => e,
+                        Err(err) => {
+                            warnings.push(format!("Could not create environment '{name}': {err}"));
+                            continue;
+                        }
+                    };
+                    environments_imported += 1;
+
+                    if let Some(values) = yaml_get(&doc, "values").and_then(|v| v.as_sequence()) {
+                        for item in values {
+                            let key = yaml_get(item, "key")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            if key.is_empty() {
+                                continue;
+                            }
+                            let value = yaml_scalar_to_string(yaml_get(item, "value"));
+                            let enabled = yaml_get(item, "enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                            let is_secret = looks_like_secret(&key);
+
+                            let outcome = variable_store::create_variable(
+                                conn,
+                                NewVariableInput {
+                                    scope: VariableScope::Environment,
+                                    project_id: None,
+                                    environment_id: Some(env.id.clone()),
+                                    request_id: None,
+                                    key: key.clone(),
+                                    value,
+                                    enabled,
+                                    is_secret,
+                                    is_local: false,
+                                    description: None,
+                                },
+                            );
+                            match outcome {
+                                Ok(_) => variables_imported += 1,
+                                Err(err) => warnings.push(format!(
+                                    "Environment '{name}': could not import variable '{key}': {err}"
+                                )),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT;")
+                .map_err(|err| AppError::Storage(err.to_string()))?;
+        }
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(err);
+        }
+    }
+
+    warnings.push(
+        "Saved example responses in the source workspace were not imported — only live request \
+         definitions, folders, and environments. Nested Postman folders were flattened into \
+         single-level folders named e.g. 'Parent / Child'."
+            .to_string(),
+    );
+
+    Ok(LocalWorkspaceImportReport {
+        projects_created,
+        folders_created,
+        requests_imported,
+        environments_imported,
+        variables_imported,
+        warnings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_collection_dir(
+    conn: &Connection,
+    dir: &Path,
+    project_id: &str,
+    folder_path: &str,
+    folder_cache: &mut HashMap<String, String>,
+    folders_created: &mut usize,
+    requests_imported: &mut usize,
+    warnings: &mut Vec<String>,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(err) => {
+            warnings.push(format!("Could not read directory {}: {err}", dir.display()));
+            return;
+        }
+    };
+    let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    sorted.sort_by_key(|e| e.file_name());
+
+    for entry in sorted {
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            // `.resources` holds per-request metadata/examples, not a real Postman folder.
+            if file_name == ".resources" {
+                continue;
+            }
+            let child_path = if folder_path.is_empty() {
+                file_name.clone()
+            } else {
+                format!("{folder_path} / {file_name}")
+            };
+            import_collection_dir(
+                conn,
+                &path,
+                project_id,
+                &child_path,
+                folder_cache,
+                folders_created,
+                requests_imported,
+                warnings,
+            );
+        } else if file_name.ends_with(".request.yaml") || file_name.ends_with(".request.yml") {
+            let folder_id = if folder_path.is_empty() {
+                None
+            } else {
+                get_or_create_folder(conn, project_id, folder_path, folder_cache, folders_created, warnings)
+            };
+            import_request_file(conn, &path, project_id, folder_id, requests_imported, warnings);
+        }
+        // `.example.yaml` files (saved sample responses) are intentionally not imported here.
+    }
+}
+
+fn get_or_create_folder(
+    conn: &Connection,
+    project_id: &str,
+    folder_path: &str,
+    folder_cache: &mut HashMap<String, String>,
+    folders_created: &mut usize,
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    if let Some(id) = folder_cache.get(folder_path) {
+        return Some(id.clone());
+    }
+    match folder_store::create_folder(
+        conn,
+        NewFolderInput { project_id: project_id.to_string(), name: folder_path.to_string() },
+    ) {
+        Ok(f) => {
+            folder_cache.insert(folder_path.to_string(), f.id.clone());
+            *folders_created += 1;
+            Some(f.id)
+        }
+        Err(err) => {
+            warnings.push(format!("Could not create folder '{folder_path}': {err}"));
+            None
+        }
+    }
+}
+
+fn import_request_file(
+    conn: &Connection,
+    path: &Path,
+    project_id: &str,
+    folder_id: Option<String>,
+    requests_imported: &mut usize,
+    warnings: &mut Vec<String>,
+) {
+    let file_stem = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let name_from_file = file_stem
+        .strip_suffix(".request.yaml")
+        .or_else(|| file_stem.strip_suffix(".request.yml"))
+        .unwrap_or(&file_stem)
+        .to_string();
+
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(err) => {
+            warnings.push(format!("Could not read '{name_from_file}': {err}"));
+            return;
+        }
+    };
+    let doc: Yaml = match serde_yaml::from_str(&content) {
+        Ok(d) => d,
+        Err(err) => {
+            warnings.push(format!("Skipped '{name_from_file}': invalid YAML ({err})"));
+            return;
+        }
+    };
+
+    let kind = yaml_get(&doc, "$kind").and_then(|v| v.as_str()).unwrap_or("http-request");
+    if kind != "http-request" {
+        warnings.push(format!("Skipped '{name_from_file}': unsupported kind '{kind}'."));
+        return;
+    }
+
+    let name = yaml_get(&doc, "name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(name_from_file.clone());
+
+    let url = yaml_get(&doc, "url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let method_raw = yaml_get(&doc, "method").and_then(|v| v.as_str()).unwrap_or("GET").to_uppercase();
+    let method = if VALID_METHODS.contains(&method_raw.as_str()) {
+        method_raw
+    } else {
+        warnings.push(format!(
+            "Request '{name}': unsupported method '{method_raw}' — imported as GET."
+        ));
+        "GET".to_string()
+    };
+
+    let mut headers = Vec::new();
+    if let Some(map) = yaml_get(&doc, "headers").and_then(|v| v.as_mapping()) {
+        for (k, v) in map {
+            if let Some(key) = k.as_str() {
+                if key.trim().is_empty() {
+                    continue;
+                }
+                headers.push(HeaderEntry {
+                    key: key.to_string(),
+                    value: yaml_scalar_to_string(Some(v)),
+                    enabled: true,
+                    description: None,
+                });
+            }
+        }
+    }
+
+    let description = yaml_get(&doc, "description").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let body = parse_local_body(yaml_get(&doc, "body"), &name, warnings);
+    let auth = parse_local_auth(yaml_get(&doc, "auth"), &name, warnings);
+    let (pre_request_script, post_request_script) = parse_local_scripts(yaml_get(&doc, "scripts"));
+
+    let outcome = request_store::create_request(
+        conn,
+        NewRequestInput {
+            project_id: project_id.to_string(),
+            folder_id,
+            name,
+            method,
+            url,
+            headers,
+            query_params: vec![],
+            auth,
+            body,
+            description,
+            settings: None,
+            pre_request_script,
+            post_request_script,
+        },
+    );
+    match outcome {
+        Ok(_) => *requests_imported += 1,
+        Err(err) => warnings.push(format!("Could not import request '{name_from_file}': {err}")),
+    }
+}
+
+fn parse_local_auth(auth: Option<&Yaml>, req_name: &str, warnings: &mut Vec<String>) -> Auth {
+    let Some(auth) = auth else { return Auth::None };
+    let auth_type = yaml_get(auth, "type").and_then(|v| v.as_str()).unwrap_or("noauth");
+    let credentials = yaml_get(auth, "credentials");
+
+    match auth_type {
+        "noauth" | "none" => Auth::None,
+        "bearer" => {
+            let token = credentials
+                .and_then(|c| yaml_get(c, "token"))
+                .map(|v| yaml_scalar_to_string(Some(v)))
+                .unwrap_or_default();
+            Auth::Bearer { token }
+        }
+        "basic" => {
+            let username = credentials
+                .and_then(|c| yaml_get(c, "username"))
+                .map(|v| yaml_scalar_to_string(Some(v)))
+                .unwrap_or_default();
+            let password = credentials
+                .and_then(|c| yaml_get(c, "password"))
+                .map(|v| yaml_scalar_to_string(Some(v)))
+                .unwrap_or_default();
+            Auth::Basic { username, password }
+        }
+        "apikey" | "api_key" => {
+            let key = credentials
+                .and_then(|c| yaml_get(c, "key"))
+                .map(|v| yaml_scalar_to_string(Some(v)))
+                .unwrap_or_default();
+            let value = credentials
+                .and_then(|c| yaml_get(c, "value"))
+                .map(|v| yaml_scalar_to_string(Some(v)))
+                .unwrap_or_default();
+            let location = credentials
+                .and_then(|c| yaml_get(c, "in"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("header");
+            let location = if location.eq_ignore_ascii_case("query") {
+                ApiKeyLocation::Query
+            } else {
+                ApiKeyLocation::Header
+            };
+            Auth::ApiKey { key, value, location }
+        }
+        other => {
+            warnings.push(format!(
+                "Request '{req_name}': auth type '{other}' is unsupported; imported with No Auth."
+            ));
+            Auth::None
+        }
+    }
+}
+
+fn parse_local_body(body: Option<&Yaml>, req_name: &str, warnings: &mut Vec<String>) -> Option<String> {
+    let body = body?;
+    let body_type = yaml_get(body, "type").and_then(|v| v.as_str()).unwrap_or("none").to_lowercase();
+    let content = yaml_get(body, "content");
+
+    match body_type.as_str() {
+        "none" | "" => None,
+        "urlencoded" => {
+            if let Some(map) = content.and_then(|v| v.as_mapping()) {
+                let items: Vec<UrlEncodedItem> = map
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        let key = k.as_str()?.to_string();
+                        if key.trim().is_empty() {
+                            return None;
+                        }
+                        Some(UrlEncodedItem {
+                            key,
+                            value: yaml_scalar_to_string(Some(v)),
+                            enabled: true,
+                            description: None,
+                        })
+                    })
+                    .collect();
+                serde_json::to_string(&RequestBody::UrlEncoded { items }).ok()
+            } else {
+                warnings.push(format!(
+                    "Request '{req_name}': urlencoded body had an unexpected shape; imported empty."
+                ));
+                None
+            }
+        }
+        "formdata" => {
+            if let Some(seq) = content.and_then(|v| v.as_sequence()) {
+                let items: Vec<FormDataPart> = seq
+                    .iter()
+                    .filter_map(|item| {
+                        let key = yaml_get(item, "key").and_then(|v| v.as_str())?.to_string();
+                        if key.trim().is_empty() {
+                            return None;
+                        }
+                        let is_file = yaml_get(item, "type").and_then(|v| v.as_str()) == Some("file");
+                        if is_file {
+                            warnings.push(format!(
+                                "Request '{req_name}': multipart file part '{key}' references a local file — re-select it on this machine."
+                            ));
+                        }
+                        Some(FormDataPart {
+                            key,
+                            value: yaml_scalar_to_string(yaml_get(item, "value")),
+                            enabled: !yaml_get(item, "disabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                            description: None,
+                            is_file,
+                            file_path: yaml_get(item, "src").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                        })
+                    })
+                    .collect();
+                serde_json::to_string(&RequestBody::FormData { items }).ok()
+            } else {
+                warnings.push(format!(
+                    "Request '{req_name}': formdata body had an unexpected shape; imported empty."
+                ));
+                None
+            }
+        }
+        _ => {
+            // text, json, html, javascript, xml, graphql, or anything unrecognized — the app's
+            // "raw" body editor handles all of these fine as plain text.
+            content.and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+    }
+}
+
+/// Postman's local format lists scripts as `[{type: beforeRequest|afterResponse, code, language}]`
+/// (sometimes prefixed `http:`). Multiple scripts of the same phase are concatenated.
+fn parse_local_scripts(scripts: Option<&Yaml>) -> (Option<String>, Option<String>) {
+    let mut pre_parts = Vec::new();
+    let mut post_parts = Vec::new();
+
+    if let Some(seq) = scripts.and_then(|v| v.as_sequence()) {
+        for item in seq {
+            let script_type = yaml_get(item, "type").and_then(|v| v.as_str()).unwrap_or("");
+            let code = yaml_get(item, "code").and_then(|v| v.as_str()).unwrap_or("");
+            if code.trim().is_empty() {
+                continue;
+            }
+            if script_type.contains("beforeRequest") {
+                pre_parts.push(code.to_string());
+            } else if script_type.contains("afterResponse") {
+                post_parts.push(code.to_string());
+            }
+        }
+    }
+
+    let pre = if pre_parts.is_empty() { None } else { Some(pre_parts.join("\n\n")) };
+    let post = if post_parts.is_empty() { None } else { Some(post_parts.join("\n\n")) };
+    (pre, post)
+}

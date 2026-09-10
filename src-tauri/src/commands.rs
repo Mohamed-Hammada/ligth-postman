@@ -712,6 +712,15 @@ pub fn import_postman_collection(
 }
 
 #[tauri::command]
+pub fn import_local_postman_workspace(
+    state: State<AppState>,
+    root_path: String,
+) -> Result<crate::postman_compat::LocalWorkspaceImportReport, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::postman_compat::import_local_workspace(&conn, &root_path)
+}
+
+#[tauri::command]
 pub fn import_postman_environment(
     state: State<AppState>,
     environment_json: String,

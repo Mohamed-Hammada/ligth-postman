@@ -11,13 +11,15 @@ use crate::error::AppError;
 use crate::execution::{self, ExecutionInput};
 use crate::models::{
     Auth, Environment, Folder, HeaderEntry, NewEnvironmentInput, NewFolderInput, NewProjectInput,
-    NewRequestInput, NewVariableInput, Project, RequestFull, RequestSummary, ResponseBodyPayload,
-    ResponseMeta, ResponseSummary, UpdateEnvironmentInput, UpdateFolderInput, UpdateProjectInput,
-    UpdateRequestInput, UpdateVariableInput, VariableScope, VariableView,
+    NewRequestInput, NewVariableInput, NewWorkspaceInput, Project, RequestFull, RequestSummary,
+    ResponseBodyPayload, ResponseMeta, ResponseSummary, UpdateEnvironmentInput, UpdateFolderInput,
+    UpdateProjectInput, UpdateRequestInput, UpdateVariableInput, UpdateWorkspaceInput,
+    VariableScope, VariableView, Workspace,
 };
 use crate::resolver::{self, ScopeChain};
 use crate::store::{
     environment_store, folder_store, project_store, request_store, response_store, variable_store,
+    workspace_store,
 };
 
 pub struct AppState {
@@ -41,17 +43,51 @@ pub struct AppState {
 }
 
 #[tauri::command]
-pub fn create_project(state: State<AppState>, name: String) -> Result<Project, AppError> {
+pub fn create_project(
+    state: State<AppState>,
+    name: String,
+    workspace_id: String,
+) -> Result<Project, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
-    let project = project_store::create_project(&conn, NewProjectInput { name })?;
+    let project = project_store::create_project(&conn, NewProjectInput { name, workspace_id })?;
     log::info!("created project {}", project.id);
     Ok(project)
 }
 
 #[tauri::command]
-pub fn list_projects(state: State<AppState>) -> Result<Vec<Project>, AppError> {
+pub fn list_projects(state: State<AppState>, workspace_id: String) -> Result<Vec<Project>, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
-    project_store::list_projects(&conn)
+    project_store::list_projects(&conn, &workspace_id)
+}
+
+#[tauri::command]
+pub fn create_workspace(state: State<AppState>, name: String) -> Result<Workspace, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let workspace = workspace_store::create_workspace(&conn, NewWorkspaceInput { name })?;
+    log::info!("created workspace {}", workspace.id);
+    Ok(workspace)
+}
+
+#[tauri::command]
+pub fn list_workspaces(state: State<AppState>) -> Result<Vec<Workspace>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    workspace_store::list_workspaces(&conn)
+}
+
+#[tauri::command]
+pub fn update_workspace(state: State<AppState>, input: UpdateWorkspaceInput) -> Result<Workspace, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let workspace = workspace_store::update_workspace(&conn, input)?;
+    log::info!("updated workspace {}", workspace.id);
+    Ok(workspace)
+}
+
+#[tauri::command]
+pub fn delete_workspace(state: State<AppState>, id: String) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    workspace_store::delete_workspace(&conn, &id)?;
+    log::info!("deleted workspace {id}");
+    Ok(())
 }
 
 #[tauri::command]

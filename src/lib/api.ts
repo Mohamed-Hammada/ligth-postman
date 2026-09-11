@@ -25,6 +25,14 @@ export interface Project {
   id: string;
   name: string;
   default_environment_id: string | null;
+  workspace_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
   created_at: string;
   updated_at: string;
 }
@@ -449,9 +457,15 @@ export function describeError(err: unknown): string {
 }
 
 export const api = {
-  createProject: (name: string) => invoke<Project>("create_project", { name }),
-  listProjects: () => invoke<Project[]>("list_projects"),
+  createProject: (name: string, workspaceId: string) =>
+    invoke<Project>("create_project", { name, workspaceId }),
+  listProjects: (workspaceId: string) => invoke<Project[]>("list_projects", { workspaceId }),
   getProject: (id: string) => invoke<Project>("get_project", { id }),
+  createWorkspace: (name: string) => invoke<Workspace>("create_workspace", { name }),
+  listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
+  updateWorkspace: (id: string, name: string) =>
+    invoke<Workspace>("update_workspace", { input: { id, name } }),
+  deleteWorkspace: (id: string) => invoke<void>("delete_workspace", { id }),
   getProjectRequestCounts: () => invoke<Record<string, number>>("get_project_request_counts"),
   updateProject: (input: UpdateProjectInput) =>
     invoke<Project>("update_project", { input }),

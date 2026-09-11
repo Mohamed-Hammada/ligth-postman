@@ -195,14 +195,14 @@ pub fn import_project_from_json(
         } else {
             file.name.trim().to_string()
         };
-        let existing_projects = project_store::list_projects(&tx)?;
+        let existing_projects = project_store::list_projects(&tx, "default")?;
         let mut name = base_name.clone();
         let mut suffix = 1;
         while existing_projects.iter().any(|p| p.name == name) {
             name = format!("{base_name} ({suffix})");
             suffix += 1;
         }
-        project_store::create_project(&tx, NewProjectInput { name })?
+        project_store::create_project(&tx, NewProjectInput { name, workspace_id: "default".into() })?
     };
 
     // Import Global Variables
@@ -304,6 +304,7 @@ pub mod tests {
             &conn,
             NewProjectInput {
                 name: "Test Sync Project".into(),
+                workspace_id: "default".into(),
             },
         )
         .unwrap();

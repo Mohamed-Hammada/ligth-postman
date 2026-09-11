@@ -18,6 +18,9 @@ pub struct Project {
     /// means "No Environment" — travels with the project (export/import, git sync), same as
     /// any other project-level setting.
     pub default_environment_id: Option<String>,
+    /// The workspace this project belongs to — every project has exactly one (seeded into the
+    /// 'default' workspace by migration 15 for anything created before workspaces existed).
+    pub workspace_id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -25,6 +28,31 @@ pub struct Project {
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewProjectInput {
     pub name: String,
+    pub workspace_id: String,
+}
+
+/// A workspace groups projects — one level above Project in the hierarchy (Workspace -> Project
+/// -> Folder/Request). Every install always has at least one (see migration 15's seeded
+/// 'default' row); workspace_store::delete_workspace refuses to remove the last one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Workspace {
+    pub id: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewWorkspaceInput {
+    pub name: String,
+}
+
+/// `name: None` means "leave unchanged", same convention as `UpdateProjectInput`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UpdateWorkspaceInput {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// `name: None` means "leave unchanged" — omitted fields must never clobber existing data.

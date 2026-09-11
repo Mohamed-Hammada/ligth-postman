@@ -54,7 +54,9 @@ pub fn import_collection(
                 } else {
                     collection.info.name.trim().to_string()
                 };
-                let p = project_store::create_project(conn, NewProjectInput { name })?;
+                // Imports with no target project land in the default workspace — moving a
+                // project between workspaces isn't wired up yet, so this is the safe default.
+                let p = project_store::create_project(conn, NewProjectInput { name, workspace_id: "default".into() })?;
                 (p.id, p.name)
             }
         };

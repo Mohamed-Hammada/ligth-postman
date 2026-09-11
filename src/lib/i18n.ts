@@ -44,6 +44,10 @@ const en: Dict = {
   "topbar.import": "Import",
   "topbar.importTitle": "Import a Postman collection, environment, or cURL command",
 
+  // Workspaces (group projects — one level above Project)
+  "workspace.defaultName": "My Workspace",
+  "workspace.newWorkspace": "New workspace",
+
   // Sidebar / projects
   "sidebar.projects": "Projects",
   "sidebar.importCollection": "Import Postman collection (as a new project)",
@@ -646,6 +650,9 @@ const ar: Dict = {
   "topbar.setupAiTitle": "إعداد ميزات الذكاء الاصطناعي (مفتاح Claude API)",
   "topbar.import": "استيراد",
   "topbar.importTitle": "استيراد مجموعة بوستمان، أو بيئة، أو أمر cURL",
+
+  "workspace.defaultName": "مساحة العمل الخاصة بي",
+  "workspace.newWorkspace": "مساحة عمل جديدة",
 
   "sidebar.projects": "المشاريع",
   "sidebar.importCollection": "استيراد مجموعة بوستمان (كمشروع جديد)",

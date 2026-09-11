@@ -255,7 +255,7 @@ mod tests {
     use crate::store::{project_store, request_store};
 
     fn seed_request(conn: &Connection) -> (String, String) {
-        let project = project_store::create_project(conn, NewProjectInput { name: "Demo".into() }).unwrap();
+        let project = project_store::create_project(conn, NewProjectInput { name: "Demo".into(), workspace_id: "default".into() }).unwrap();
         let request = request_store::create_request(
             conn,
             NewRequestInput {

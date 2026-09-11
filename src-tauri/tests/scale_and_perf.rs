@@ -20,6 +20,7 @@ fn scale_100_projects_and_1000_requests_in_sqlite() {
             &conn,
             NewProjectInput {
                 name: format!("Scale Project {i}"),
+                workspace_id: "default".into(),
             },
         )
         .expect("create project");

@@ -426,7 +426,7 @@ mod tests {
         );
 
         let conn = crate::db::open_in_memory().unwrap();
-        let project = project_store::create_project(&conn, NewProjectInput { name: "Demo".into() }).unwrap();
+        let project = project_store::create_project(&conn, NewProjectInput { name: "Demo".into(), workspace_id: "default".into() }).unwrap();
         let env = environment_store::create_environment(
             &conn,
             NewEnvironmentInput { project_id: project.id.clone(), name: "Local".into() },
@@ -537,7 +537,7 @@ mod tests {
         );
 
         let conn = crate::db::open_in_memory().unwrap();
-        let project = project_store::create_project(&conn, NewProjectInput { name: "Cookie Test".into() }).unwrap();
+        let project = project_store::create_project(&conn, NewProjectInput { name: "Cookie Test".into(), workspace_id: "default".into() }).unwrap();
 
         // Pre-populate an existing cookie
         request_store::create_cookie(
@@ -609,7 +609,7 @@ mod tests {
         );
 
         let conn = crate::db::open_in_memory().unwrap();
-        let project = project_store::create_project(&conn, NewProjectInput { name: "Console Test".into() }).unwrap();
+        let project = project_store::create_project(&conn, NewProjectInput { name: "Console Test".into(), workspace_id: "default".into() }).unwrap();
 
         let request = request_store::create_request(
             &conn,

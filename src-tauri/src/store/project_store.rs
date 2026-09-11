@@ -10,20 +10,26 @@ pub fn create_project(conn: &Connection, input: NewProjectInput) -> Result<Proje
     if name.is_empty() {
         return Err(AppError::Validation("project name must not be empty".into()));
     }
+    let workspace_id = input.workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err(AppError::Validation("workspace_id must not be empty".into()));
+    }
 
     let project = Project {
         id: Uuid::new_v4().to_string(),
         name: name.to_string(),
         default_environment_id: None,
+        workspace_id: workspace_id.to_string(),
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
 
     conn.execute(
-        "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO projects (id, name, workspace_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             project.id,
             project.name,
+            project.workspace_id,
             project.created_at.to_rfc3339(),
             project.updated_at.to_rfc3339()
         ],
@@ -32,12 +38,14 @@ pub fn create_project(conn: &Connection, input: NewProjectInput) -> Result<Proje
     Ok(project)
 }
 
-/// Metadata only — never joins in requests/collections (README §5 project loading).
-pub fn list_projects(conn: &Connection) -> Result<Vec<Project>, AppError> {
+/// Metadata only — never joins in requests/collections (README §5 project loading). Scoped to
+/// one workspace, same reasoning as environments being scoped to one project.
+pub fn list_projects(conn: &Connection, workspace_id: &str) -> Result<Vec<Project>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, default_environment_id, created_at, updated_at FROM projects ORDER BY updated_at DESC",
+        "SELECT id, name, default_environment_id, workspace_id, created_at, updated_at
+         FROM projects WHERE workspace_id = ?1 ORDER BY updated_at DESC",
     )?;
-    let rows = stmt.query_map([], row_to_project)?;
+    let rows = stmt.query_map(params![workspace_id], row_to_project)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
@@ -54,7 +62,8 @@ pub fn request_counts_by_project(
 
 pub fn get_project(conn: &Connection, id: &str) -> Result<Project, AppError> {
     conn.query_row(
-        "SELECT id, name, default_environment_id, created_at, updated_at FROM projects WHERE id = ?1",
+        "SELECT id, name, default_environment_id, workspace_id, created_at, updated_at
+         FROM projects WHERE id = ?1",
         params![id],
         row_to_project,
     )
@@ -100,6 +109,7 @@ pub fn update_project(conn: &Connection, input: UpdateProjectInput) -> Result<Pr
         id: existing.id,
         name,
         default_environment_id,
+        workspace_id: existing.workspace_id,
         created_at: existing.created_at,
         updated_at,
     })
@@ -120,12 +130,13 @@ pub fn delete_project(conn: &Connection, id: &str) -> Result<(), AppError> {
 }
 
 fn row_to_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
-    let created_at: String = row.get(3)?;
-    let updated_at: String = row.get(4)?;
+    let created_at: String = row.get(4)?;
+    let updated_at: String = row.get(5)?;
     Ok(Project {
         id: row.get(0)?,
         name: row.get(1)?,
         default_environment_id: row.get(2)?,
+        workspace_id: row.get(3)?,
         created_at: created_at
             .parse()
             .unwrap_or_else(|_| Utc::now()),
@@ -143,16 +154,16 @@ mod tests {
     #[test]
     fn create_rejects_empty_name() {
         let conn = db::open_in_memory().unwrap();
-        let result = create_project(&conn, NewProjectInput { name: "   ".into() });
+        let result = create_project(&conn, NewProjectInput { name: "   ".into(), workspace_id: "default".into() });
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
     #[test]
     fn create_then_list_then_get_round_trips() {
         let conn = db::open_in_memory().unwrap();
-        let created = create_project(&conn, NewProjectInput { name: "Payments API".into() }).unwrap();
+        let created = create_project(&conn, NewProjectInput { name: "Payments API".into(), workspace_id: "default".into() }).unwrap();
 
-        let listed = list_projects(&conn).unwrap();
+        let listed = list_projects(&conn, "default").unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, created.id);
 
@@ -170,7 +181,7 @@ mod tests {
     #[test]
     fn update_with_no_fields_preserves_existing_values() {
         let conn = db::open_in_memory().unwrap();
-        let created = create_project(&conn, NewProjectInput { name: "Original".into() }).unwrap();
+        let created = create_project(&conn, NewProjectInput { name: "Original".into(), workspace_id: "default".into() }).unwrap();
 
         let updated = update_project(&conn, UpdateProjectInput { id: created.id.clone(), name: None, ..Default::default() }).unwrap();
 
@@ -182,7 +193,7 @@ mod tests {
     #[test]
     fn update_rejects_blank_name() {
         let conn = db::open_in_memory().unwrap();
-        let created = create_project(&conn, NewProjectInput { name: "Original".into() }).unwrap();
+        let created = create_project(&conn, NewProjectInput { name: "Original".into(), workspace_id: "default".into() }).unwrap();
 
         let result = update_project(
             &conn,
@@ -204,7 +215,7 @@ mod tests {
     #[test]
     fn default_environment_id_can_be_set_then_cleared() {
         let conn = db::open_in_memory().unwrap();
-        let project = create_project(&conn, NewProjectInput { name: "Has Envs".into() }).unwrap();
+        let project = create_project(&conn, NewProjectInput { name: "Has Envs".into(), workspace_id: "default".into() }).unwrap();
         assert_eq!(project.default_environment_id, None);
         let env = crate::store::environment_store::create_environment(
             &conn,
@@ -234,7 +245,7 @@ mod tests {
     #[test]
     fn deleting_the_default_environment_clears_the_projects_reference_to_it() {
         let conn = db::open_in_memory().unwrap();
-        let project = create_project(&conn, NewProjectInput { name: "Has Envs".into() }).unwrap();
+        let project = create_project(&conn, NewProjectInput { name: "Has Envs".into(), workspace_id: "default".into() }).unwrap();
         let env = crate::store::environment_store::create_environment(
             &conn,
             crate::models::NewEnvironmentInput { project_id: project.id.clone(), name: "Staging".into() },
@@ -262,8 +273,8 @@ mod tests {
     #[test]
     fn request_counts_by_project_groups_correctly_and_omits_empty_projects() {
         let conn = db::open_in_memory().unwrap();
-        let busy = create_project(&conn, NewProjectInput { name: "Busy".into() }).unwrap();
-        let empty = create_project(&conn, NewProjectInput { name: "Empty".into() }).unwrap();
+        let busy = create_project(&conn, NewProjectInput { name: "Busy".into(), workspace_id: "default".into() }).unwrap();
+        let empty = create_project(&conn, NewProjectInput { name: "Empty".into(), workspace_id: "default".into() }).unwrap();
         let _ = empty; // exists in the DB but gets no requests — must be absent from the map
 
         for name in ["Get users", "Create user"] {
@@ -293,7 +304,7 @@ mod tests {
     #[test]
     fn delete_project_cascades_to_its_requests() {
         let conn = db::open_in_memory().unwrap();
-        let project = create_project(&conn, NewProjectInput { name: "Doomed".into() }).unwrap();
+        let project = create_project(&conn, NewProjectInput { name: "Doomed".into(), workspace_id: "default".into() }).unwrap();
         crate::store::request_store::create_request(
             &conn,
             crate::models::NewRequestInput {

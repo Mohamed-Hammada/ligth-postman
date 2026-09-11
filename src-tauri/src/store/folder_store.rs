@@ -152,7 +152,7 @@ mod tests {
     use crate::store::{project_store, request_store};
 
     fn seed_project(conn: &Connection) -> String {
-        project_store::create_project(conn, NewProjectInput { name: "Demo".into() }).unwrap().id
+        project_store::create_project(conn, NewProjectInput { name: "Demo".into(), workspace_id: "default".into() }).unwrap().id
     }
 
     #[test]

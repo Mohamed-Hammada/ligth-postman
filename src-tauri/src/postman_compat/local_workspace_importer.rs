@@ -105,7 +105,7 @@ pub fn import_local_workspace(
 
                 let project = project_store::create_project(
                     conn,
-                    NewProjectInput { name: collection_name.clone() },
+                    NewProjectInput { name: collection_name.clone(), workspace_id: "default".into() },
                 )?;
                 projects_created += 1;
 
@@ -138,7 +138,7 @@ pub fn import_local_workspace(
             if !env_files.is_empty() {
                 let holder = project_store::create_project(
                     conn,
-                    NewProjectInput { name: "Imported Environments".to_string() },
+                    NewProjectInput { name: "Imported Environments".to_string(), workspace_id: "default".into() },
                 )?;
                 projects_created += 1;
 
@@ -815,7 +815,7 @@ mod tests {
         assert_eq!(report.requests_imported, 1);
         assert_eq!(report.folders_created, 0);
 
-        let projects = project_store::list_projects(&conn).unwrap();
+        let projects = project_store::list_projects(&conn, "default").unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "MyCollection");
 
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(report.requests_imported, 1);
         assert_eq!(report.samples_imported, 1);
 
-        let projects = project_store::list_projects(&conn).unwrap();
+        let projects = project_store::list_projects(&conn, "default").unwrap();
         let requests = request_store::list_requests(&conn, &projects[0].id).unwrap();
         let samples = request_store::list_sample_responses(&conn, &requests[0].id).unwrap();
         assert_eq!(samples.len(), 1);
@@ -879,7 +879,7 @@ mod tests {
         assert_eq!(report.requests_imported, 1);
         assert_eq!(report.folders_created, 1);
 
-        let projects = project_store::list_projects(&conn).unwrap();
+        let projects = project_store::list_projects(&conn, "default").unwrap();
         let folders = folder_store::list_folders(&conn, &projects[0].id).unwrap();
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].name, "A / B");
@@ -902,7 +902,7 @@ mod tests {
         assert_eq!(report.environments_imported, 1);
         assert_eq!(report.variables_imported, 2);
 
-        let projects = project_store::list_projects(&conn).unwrap();
+        let projects = project_store::list_projects(&conn, "default").unwrap();
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "Imported Environments");
 

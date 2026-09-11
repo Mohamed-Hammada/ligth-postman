@@ -163,7 +163,7 @@ fn imports_nested_folders_auth_scripts_and_sample_responses() {
 #[test]
 fn imports_environment_with_secrets() {
     let conn = setup_db();
-    let project = project_store::create_project(&conn, NewProjectInput { name: "Env Test Project".into() }).unwrap();
+    let project = project_store::create_project(&conn, NewProjectInput { name: "Env Test Project".into(), workspace_id: "default".into() }).unwrap();
 
     let json = r#"{
         "name": "Staging Environment",
@@ -205,7 +205,7 @@ fn imports_environment_with_secrets() {
 #[test]
 fn exports_collection_and_roundtrips() {
     let conn = setup_db();
-    let project = project_store::create_project(&conn, NewProjectInput { name: "Exportable API".into() }).unwrap();
+    let project = project_store::create_project(&conn, NewProjectInput { name: "Exportable API".into(), workspace_id: "default".into() }).unwrap();
 
     let _ = variable_store::create_variable(
         &conn,

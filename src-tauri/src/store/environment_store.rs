@@ -168,7 +168,7 @@ mod tests {
     use crate::store::project_store;
 
     fn seed_project(conn: &Connection) -> String {
-        project_store::create_project(conn, NewProjectInput { name: "Demo".into() }).unwrap().id
+        project_store::create_project(conn, NewProjectInput { name: "Demo".into(), workspace_id: "default".into() }).unwrap().id
     }
 
     #[test]
@@ -214,8 +214,8 @@ mod tests {
     #[test]
     fn list_all_environments_spans_every_project_with_project_name_attached() {
         let conn = db::open_in_memory().unwrap();
-        let project_a = project_store::create_project(&conn, NewProjectInput { name: "Alpha".into() }).unwrap();
-        let project_b = project_store::create_project(&conn, NewProjectInput { name: "Beta".into() }).unwrap();
+        let project_a = project_store::create_project(&conn, NewProjectInput { name: "Alpha".into(), workspace_id: "default".into() }).unwrap();
+        let project_b = project_store::create_project(&conn, NewProjectInput { name: "Beta".into(), workspace_id: "default".into() }).unwrap();
         create_environment(&conn, NewEnvironmentInput { project_id: project_a.id.clone(), name: "Prod".into() }).unwrap();
         create_environment(&conn, NewEnvironmentInput { project_id: project_b.id.clone(), name: "Dev".into() }).unwrap();
 

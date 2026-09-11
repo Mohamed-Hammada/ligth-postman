@@ -42,6 +42,7 @@
     type SourceProjectReport,
     type UpdateAiSettingsInput,
     type SystemDiagnostics,
+    type Workspace,
     type ProjectHistoryEntry,
     type ConflictVersions,
   } from "$lib/api";
@@ -55,6 +56,93 @@
     // the whole point of dropping straight into rename mode is writing the name in one go.
     if (node instanceof HTMLInputElement) {
       node.select();
+    }
+  }
+
+  // Workspaces group projects — one level above Project (Workspace -> Project -> Folder/Request).
+  // There's always at least one (the backend seeds/protects a 'default' workspace), so
+  // activeWorkspaceId only stays null for the instant before the first load resolves.
+  let workspaces = $state<Workspace[]>([]);
+  let activeWorkspaceId = $state<string | null>(null);
+  let workspacePickerOpen = $state(false);
+  async function loadWorkspaces() {
+    try {
+      workspaces = await api.listWorkspaces();
+      if (!activeWorkspaceId || !workspaces.some((w) => w.id === activeWorkspaceId)) {
+        const saved = (() => {
+          try {
+            return localStorage.getItem("lp-active-workspace");
+          } catch {
+            return null;
+          }
+        })();
+        const restored = saved && workspaces.some((w) => w.id === saved) ? saved : null;
+        activeWorkspaceId = restored ?? workspaces[0]?.id ?? null;
+      }
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+  async function selectWorkspace(id: string) {
+    if (id === activeWorkspaceId) {
+      workspacePickerOpen = false;
+      return;
+    }
+    activeWorkspaceId = id;
+    workspacePickerOpen = false;
+    try {
+      localStorage.setItem("lp-active-workspace", id);
+    } catch {
+      // workspace choice just won't persist across restarts
+    }
+    selectedProjectId = null;
+    selectedRequest = null;
+    openTabs = [];
+    tabDrafts.clear();
+    await loadProjects();
+  }
+  let renamingWorkspaceId = $state<string | null>(null);
+  let renameWorkspaceValue = $state("");
+  function startRenameWorkspace(ws: Workspace) {
+    renamingWorkspaceId = ws.id;
+    renameWorkspaceValue = ws.name;
+  }
+  async function submitRenameWorkspace(e: Event) {
+    e.preventDefault();
+    const id = renamingWorkspaceId;
+    renamingWorkspaceId = null;
+    if (!id) return;
+    const name = renameWorkspaceValue.trim();
+    if (!name) return;
+    try {
+      const updated = await api.updateWorkspace(id, name);
+      workspaces = workspaces.map((w) => (w.id === id ? updated : w)).sort((a, b) => a.name.localeCompare(b.name));
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+  // Same "create with a placeholder name, then drop straight into inline-rename" pattern as
+  // quickCreateProject — except the picker menu has to stay open so the rename form (which
+  // lives inside it) is actually visible.
+  async function quickCreateWorkspace() {
+    try {
+      const workspace = await api.createWorkspace(t("workspace.defaultName"));
+      workspaces = [...workspaces, workspace].sort((a, b) => a.name.localeCompare(b.name));
+      activeWorkspaceId = workspace.id;
+      try {
+        localStorage.setItem("lp-active-workspace", workspace.id);
+      } catch {
+        // workspace choice just won't persist across restarts
+      }
+      selectedProjectId = null;
+      selectedRequest = null;
+      openTabs = [];
+      tabDrafts.clear();
+      await loadProjects();
+      startRenameWorkspace(workspace);
+      workspacePickerOpen = true;
+    } catch (err) {
+      errorMessage = describeError(err);
     }
   }
 
@@ -1355,7 +1443,7 @@
   }
 
   onMount(() => {
-    loadProjects();
+    loadWorkspaces().then(loadProjects);
     loadAllEnvironments();
     loadAiSettings();
     api.isAiConfigured().then((configured) => (aiConfigured = configured)).catch((err) => console.error("Failed to check AI configuration", err));
@@ -1460,7 +1548,7 @@
     if (activeScreen === "workspace" || activeScreen === "settings") {
       refreshSystemDiagnostics();
     }
-    if (activeScreen === "launcher") {
+    if (activeScreen === "launcher" || activeScreen === "workspace") {
       refreshProjectRequestCounts();
     }
     if (activeScreen === "history") {
@@ -1679,8 +1767,9 @@
   }
 
   async function loadProjects() {
+    if (!activeWorkspaceId) return;
     try {
-      projects = await api.listProjects();
+      projects = await api.listProjects(activeWorkspaceId);
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -1937,8 +2026,9 @@
   // the same inline-rename UI used for renaming an existing project, so the user types the
   // real name in place instead of in a separate form first.
   async function quickCreateProject() {
+    if (!activeWorkspaceId) return;
     try {
-      const project = await api.createProject("New Project");
+      const project = await api.createProject("New Project", activeWorkspaceId);
       projects = [project, ...projects];
       await selectProject(project.id);
       startRenameProject(project);
@@ -3414,6 +3504,7 @@
           <button type="button" class="folder-link" onclick={() => toggleFolderExpanded(folder.id)} ondblclick={() => startRenameFolder(folder)}>
             <span class="folder-icon">{#if isExpanded}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
             <span class="project-name">{folder.name}</span>
+            {#if childRequests.length}<span class="request-count-badge">{childRequests.length}</span>{/if}
           </button>
           <div class="project-row-actions">
             <button class="icon-btn" title={t("sidebar.addSubfolder")} onclick={() => quickCreateFolder(project.id, folder.id)}>{@render iconFolderPlus()}</button>
@@ -3683,6 +3774,38 @@
   <div class="workspace">
     {#if sidebarVisible}
     <aside class="sidebar" style="width: {sidebarWidth}px">
+      <div class="sidebar-workspace-row">
+        <div class="menu-wrap sidebar-workspace-menu">
+          <button
+            type="button"
+            class="workspace-switcher-btn"
+            onclick={() => (workspacePickerOpen = !workspacePickerOpen)}
+          >
+            <span class="workspace-switcher-label">{workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? t("workspace.defaultName")}</span>
+            {@render iconChevronDown()}
+          </button>
+          {#if workspacePickerOpen}
+            <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (workspacePickerOpen = false)}></button>
+            <div class="dropdown-menu workspace-picker-menu">
+              {#each workspaces as ws (ws.id)}
+                {#if renamingWorkspaceId === ws.id}
+                  <form class="inline-form" onsubmit={submitRenameWorkspace}>
+                    <input bind:value={renameWorkspaceValue} use:focusOnMount onblur={submitRenameWorkspace} />
+                    <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                    <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingWorkspaceId = null)}>{@render iconClose()}</button>
+                  </form>
+                {:else}
+                  <div class="dropdown-menu-item workspace-picker-item" class:active={ws.id === activeWorkspaceId}>
+                    <button type="button" class="workspace-picker-item-btn" onclick={() => selectWorkspace(ws.id)}>{ws.name}</button>
+                    <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameWorkspace(ws)}>{@render iconEdit()}</button>
+                  </div>
+                {/if}
+              {/each}
+              <button type="button" class="dropdown-menu-item" onclick={quickCreateWorkspace}>+ {t("workspace.newWorkspace")}</button>
+            </div>
+          {/if}
+        </div>
+      </div>
       <div class="sidebar-header">
         <span class="sidebar-title">{t("sidebar.projects")}</span>
         <div class="sidebar-header-actions">
@@ -3755,6 +3878,7 @@
                 <button type="button" class="project-link" onclick={() => toggleProjectSelection(project.id)} ondblclick={() => startRenameProject(project)}>
                   <span class="folder-icon">{#if project.id === selectedProjectId}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
                   <span class="project-name">{project.name}</span>
+                  {#if projectRequestCounts[project.id]}<span class="request-count-badge">{projectRequestCounts[project.id]}</span>{/if}
                 </button>
                 <div class="project-row-actions" class:force-visible={openProjectMenuId === project.id}>
                   <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id)}>+</button>
@@ -8027,6 +8151,50 @@
     justify-content: space-between;
   }
 
+  .sidebar-workspace-row {
+    padding: 0.6rem 0.9rem 0;
+  }
+
+  .sidebar-workspace-menu {
+    display: block;
+  }
+
+  .workspace-switcher-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+    font-weight: 600;
+  }
+
+  .workspace-switcher-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workspace-picker-menu {
+    min-width: 100%;
+    inset-inline-start: 0;
+    inset-inline-end: auto;
+  }
+
+  .workspace-picker-item {
+    padding: 0;
+  }
+
+  .workspace-picker-item-btn {
+    flex: 1;
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 0.4rem 0.5rem;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
   .sidebar-expand-btn {
     flex: none;
     width: 18px;
@@ -8084,8 +8252,15 @@
     background: var(--color-bg-hover);
   }
 
+  /* Accent bar (inset box-shadow, not a border, so it never shifts the row's content by its own
+     width) plus an accent-tinted fill — a clearer selected-state than a flat neutral tint alone. */
   .project-row.active {
-    background: var(--color-bg-hover);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    box-shadow: inset 3px 0 0 var(--color-accent);
+  }
+
+  .project-row.active .folder-icon {
+    color: var(--color-accent);
   }
 
   .project-link {
@@ -8285,7 +8460,8 @@
   }
 
   .request-item.active {
-    background: var(--color-bg-hover);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    box-shadow: inset 3px 0 0 var(--color-accent);
     font-weight: 600;
   }
 

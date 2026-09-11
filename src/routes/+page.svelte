@@ -106,6 +106,29 @@
     return filtered;
   });
   let selectedEnvironmentId = $state<string | null>(null);
+  // Topbar environment picker — its own open/search state, separate from the Environments
+  // screen's envSearchQuery, so typing here doesn't leave a stale filter behind on that screen.
+  let envPickerOpen = $state(false);
+  let envPickerQuery = $state("");
+  let envPickerFilteredByProject = $derived.by(() => {
+    const q = envPickerQuery.trim().toLowerCase();
+    if (!q) return environmentsByProject;
+    const filtered = new Map<string, EnvironmentWithProject[]>();
+    for (const [projectName, envs] of environmentsByProject) {
+      const matches = envs.filter((e) => e.name.toLowerCase().includes(q));
+      if (matches.length) filtered.set(projectName, matches);
+    }
+    return filtered;
+  });
+  function openEnvPicker() {
+    envPickerQuery = "";
+    envPickerOpen = true;
+  }
+  function pickEnvironment(id: string | null) {
+    selectedEnvironmentId = id;
+    envPickerOpen = false;
+    loadVariables();
+  }
   let renamingEnvironmentId = $state<string | null>(null);
   let renameEnvironmentValue = $state("");
   let urlPreview = $state<ResolvedTemplate | null>(null);
@@ -564,9 +587,17 @@
   // mode reached from the inline response panel instead of a peer top-level destination.
   let responseExpanded = $state(false);
 
-  // Real, persisted light/dark toggle — light is this design system's own default, dark is a
-  // genuine alternate palette (see the :root[data-theme="dark"] block), not a static mockup.
-  let themeMode = $state<"light" | "dark">("light");
+  // Real, persisted theme toggle — light is this design system's own default; dark, terminal and
+  // blueprint are genuine alternate palettes (see the matching [data-theme="..."] blocks), not
+  // static mockups. `label` is an i18n key, same convention as SCREENS above.
+  type ThemeMode = "light" | "dark" | "terminal" | "blueprint";
+  const THEME_OPTIONS: { id: ThemeMode; label: string }[] = [
+    { id: "light", label: "settings.light" },
+    { id: "dark", label: "settings.dark" },
+    { id: "terminal", label: "theme.terminal" },
+    { id: "blueprint", label: "theme.blueprint" },
+  ];
+  let themeMode = $state<ThemeMode>("light");
 
   // Real, user-adjustable auto-sync interval (Settings screen) — previously a hardcoded 60000ms
   // literal with no way to change it. Persisted so it survives a restart.
@@ -579,13 +610,63 @@
       // interval just won't persist across restarts
     }
   }
-  function setThemeMode(mode: "light" | "dark") {
+  function setThemeMode(mode: ThemeMode) {
     themeMode = mode;
     try {
       localStorage.setItem("lp-theme", mode);
     } catch {
       // localStorage can throw in a locked-down webview profile — theme just won't persist.
     }
+  }
+
+  // Accent color override, independent of the theme — `null` means "use the active theme's own
+  // built-in accent" (terracotta / lifted terracotta / teal / blue, per [data-theme]). Presets
+  // are drawn from the app's existing --method-* hues so every option is already a color proven
+  // legible elsewhere in the UI, not invented fresh.
+  const ACCENT_PRESETS: { id: string; hex: string }[] = [
+    { id: "terracotta", hex: "#c1603f" },
+    { id: "teal", hex: "#0f7d8a" },
+    { id: "blue", hex: "#1c5fa8" },
+    { id: "violet", hex: "#6b3fa0" },
+    { id: "rose", hex: "#d1174a" },
+    { id: "amber", hex: "#9a6b00" },
+    { id: "green", hex: "#1a7f37" },
+    { id: "slate", hex: "#57606a" },
+  ];
+  let accentColor = $state<string | null>(null);
+  function setAccentColor(hex: string | null) {
+    accentColor = hex;
+    try {
+      if (hex) localStorage.setItem("lp-accent-color", hex);
+      else localStorage.removeItem("lp-accent-color");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  /** WCAG relative-luminance pick between the app's own light-cream and dark-ink text colors —
+   * covers any custom accent a user picks, not just the theme's own pre-tuned contrast pairs. */
+  function contrastTextFor(hex: string): string {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+    if (!m) return "#fff9f0";
+    const n = parseInt(m[1], 16);
+    const lin = (v: number) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+    const r = lin(((n >> 16) & 255) / 255);
+    const g = lin(((n >> 8) & 255) / 255);
+    const b = lin((n & 255) / 255);
+    const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return luminance > 0.4 ? "#201a14" : "#fff9f0";
+  }
+  /** Inline custom-property overrides for `.app-shell`, layered on top of whatever the active
+   * theme already sets — only present once the user picks a color away from the theme default. */
+  function accentStyleOverride(hex: string | null): string {
+    if (!hex) return "";
+    const contrast = contrastTextFor(hex);
+    const hover = `color-mix(in srgb, ${hex} 80%, black)`;
+    return (
+      `--color-accent: ${hex}; --color-accent-hover: ${hover}; --color-accent-contrast: ${contrast}; ` +
+      `--color-primary: ${hex}; --color-primary-hover: ${hover}; --color-primary-contrast: ${contrast}; ` +
+      `--color-focus: ${hex};`
+    );
   }
 
   // i18n: locale drives both the string dictionary (t()) and the document's real text
@@ -1277,12 +1358,14 @@
     loadProjects();
     loadAllEnvironments();
     loadAiSettings();
-    api.isAiConfigured().then((configured) => (aiConfigured = configured));
+    api.isAiConfigured().then((configured) => (aiConfigured = configured)).catch((err) => console.error("Failed to check AI configuration", err));
     refreshConsoleEvents();
     refreshSystemDiagnostics();
     try {
       const saved = localStorage.getItem("lp-theme");
-      if (saved === "dark" || saved === "light") themeMode = saved;
+      if (saved === "dark" || saved === "light" || saved === "terminal" || saved === "blueprint") themeMode = saved;
+      const savedAccent = localStorage.getItem("lp-accent-color");
+      if (savedAccent && /^#[0-9a-f]{6}$/i.test(savedAccent)) accentColor = savedAccent;
       const savedInterval = localStorage.getItem("lp-auto-sync-interval-ms");
       if (savedInterval && Number(savedInterval) > 0) autoSyncIntervalMs = Number(savedInterval);
       const savedShortcuts = localStorage.getItem("lp-shortcuts-enabled");
@@ -3139,7 +3222,7 @@
 {#snippet iconGrid()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.3" y="2.3" width="4.7" height="4.7"/><rect x="9" y="2.3" width="4.7" height="4.7"/><rect x="2.3" y="9" width="4.7" height="4.7"/><rect x="9" y="9" width="4.7" height="4.7"/></svg>{/snippet}
 {#snippet iconLayout()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2" y="2.3" width="12" height="3.2"/><rect x="2" y="7" width="12" height="6.7"/></svg>{/snippet}
 {#snippet iconClock()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.6V8l2.8 1.8"/></svg>{/snippet}
-{#snippet iconSettings()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.6v2.1M8 12.3v2.1M14.4 8h-2.1M3.7 8H1.6M12.6 3.4l-1.5 1.5M4.9 11.1l-1.5 1.5M12.6 12.6l-1.5-1.5M4.9 4.9L3.4 3.4"/></svg>{/snippet}
+{#snippet iconSettings()}<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>{/snippet}
 {#snippet iconSparkle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M8 1.4c.45 2.85 1.85 4.25 4.6 4.6-2.75.45-4.15 1.85-4.6 4.6-.45-2.75-1.85-4.15-4.6-4.6C6.15 5.65 7.55 4.25 8 1.4Z"/></svg>{/snippet}
 {#snippet iconInboxEmpty()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 9.3 4.4 3h7.2L14 9.3"/><path d="M2 9.3v3.4h12V9.3h-3.1a2.2 2.2 0 0 1-4.4 0H2Z"/></svg>{/snippet}
 {#snippet iconFileText()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M4 2h5.4L12 4.6V14H4Z"/><path d="M9.4 2v2.6H12"/><path d="M6 8.2h4M6 10.6h4"/></svg>{/snippet}
@@ -3164,7 +3247,7 @@
   {/if}
 {/snippet}
 
-<div class="app-shell" data-theme={themeMode === "dark" ? "dark" : "light"}>
+<div class="app-shell" data-theme={themeMode} style={accentStyleOverride(accentColor)}>
   <nav class="screens-rail" class:collapsed={!screensRailVisible}>
     <div class="rail-brand">
       {#if screensRailVisible}<span>{t("rail.brand")}</span>{/if}
@@ -3492,31 +3575,42 @@
     <div class="topbar-center">
       {#if selectedProjectId}
         <div class="env-bar">
-          <select
-            value={selectedEnvironmentId ?? "__none__"}
-            class="env-select"
-            onchange={(e) => {
-              const target = e.target as HTMLSelectElement;
-              const val = target.value;
-              if (val === "__new__") {
-                target.value = selectedEnvironmentId ?? "__none__";
-                quickCreateEnvironment();
-                return;
-              }
-              selectedEnvironmentId = val === "__none__" ? null : val;
-              loadVariables();
-            }}
-          >
-            <option value="__new__">{t("topbar.newEnvironment")}</option>
-            <option value="__none__">{t("topbar.noEnvironment")}</option>
-            {#each environmentsByProject as [projectName, envs] (projectName)}
-              <optgroup label={projectName}>
-                {#each envs as env (env.id)}
-                  <option value={env.id}>{env.name}</option>
-                {/each}
-              </optgroup>
-            {/each}
-          </select>
+          <div class="menu-wrap">
+            <button
+              type="button"
+              class="env-select env-select-btn"
+              onclick={() => (envPickerOpen ? (envPickerOpen = false) : openEnvPicker())}
+            >
+              <span class="env-select-label">{selectedEnvironmentId ? (allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId) : t("topbar.noEnvironment")}</span>
+              {@render iconChevronDown()}
+            </button>
+            {#if envPickerOpen}
+              <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (envPickerOpen = false)}></button>
+              <div class="dropdown-menu env-picker-menu">
+                <input
+                  type="search"
+                  class="request-search-input env-picker-search"
+                  placeholder={t("env.searchEnvironments")}
+                  bind:value={envPickerQuery}
+                  use:focusOnMount
+                />
+                <button type="button" class="dropdown-menu-item" onclick={() => { envPickerOpen = false; quickCreateEnvironment(); }}>{t("topbar.newEnvironment")}</button>
+                {#if !envPickerQuery}
+                  <button type="button" class="dropdown-menu-item" class:active={!selectedEnvironmentId} onclick={() => pickEnvironment(null)}>{t("topbar.noEnvironment")}</button>
+                {/if}
+                <div class="env-picker-list">
+                  {#each envPickerFilteredByProject as [projectName, envs] (projectName)}
+                    <div class="env-screen-group-label">{projectName}</div>
+                    {#each envs as env (env.id)}
+                      <button type="button" class="dropdown-menu-item" class:active={selectedEnvironmentId === env.id} onclick={() => pickEnvironment(env.id)}>{env.name}</button>
+                    {/each}
+                  {:else}
+                    {#if envPickerQuery}<p class="screen-empty-inline">{t("palette.noMatches")}</p>{/if}
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
           {#if selectedProjectId}
             {@const isDefault = projects.find((p) => p.id === selectedProjectId)?.default_environment_id === selectedEnvironmentId}
             <button
@@ -5987,66 +6081,69 @@
         <div class="screen-empty-inline">{t("settings.appearanceHint")}</div>
       </div>
       <div class="seg">
-        <button type="button" class="seg-opt" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>{t("settings.light")}</button>
-        <button type="button" class="seg-opt" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>{t("settings.dark")}</button>
+        {#each THEME_OPTIONS as opt (opt.id)}
+          <button type="button" class="seg-opt" class:active={themeMode === opt.id} onclick={() => setThemeMode(opt.id)}>{t(opt.label)}</button>
+        {/each}
       </div>
     </div>
 
     <div class="settings-screen-block">
       <p class="screen-subtitle">{t("theme.subtitle")}</p>
       <div class="theme-compare">
-        <button type="button" class="theme-compare-col" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>
-          <div class="theme-compare-header">
-            <span class="screen-kicker">{t("settings.light")}</span>
-            {#if themeMode === "light"}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
-          </div>
-          <div class="theme-swatch" data-theme="light">
-            <div class="theme-swatch-topbar">
-              <span>{t("rail.brand")}</span>
-              <span class="theme-swatch-sync">SYNC</span>
+        {#each THEME_OPTIONS as opt (opt.id)}
+          <button type="button" class="theme-compare-col" class:active={themeMode === opt.id} onclick={() => setThemeMode(opt.id)}>
+            <div class="theme-compare-header">
+              <span class="screen-kicker">{t(opt.label)}</span>
+              {#if themeMode === opt.id}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
             </div>
-            <div class="theme-swatch-body">
-              <div class="theme-swatch-side">
-                <div class="screen-kicker">Explorer</div>
-                <div>List charges</div>
-                <div>Create charge</div>
-                <div class="theme-swatch-active">Refund charge</div>
+            <div class="theme-swatch" data-theme={opt.id} style={accentStyleOverride(accentColor)}>
+              <div class="theme-swatch-topbar">
+                <span>{t("rail.brand")}</span>
+                <span class="theme-swatch-sync">SYNC</span>
               </div>
-              <div class="theme-swatch-main">
-                <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
-                <div class="hr"></div>
-                <div class="theme-swatch-status">200 OK</div>
-                <div class="screen-empty-inline">214 ms · 1.2 KB</div>
-              </div>
-            </div>
-          </div>
-        </button>
-        <button type="button" class="theme-compare-col" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>
-          <div class="theme-compare-header">
-            <span class="screen-kicker">{t("settings.dark")}</span>
-            {#if themeMode === "dark"}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
-          </div>
-          <div class="theme-swatch" data-theme="dark">
-            <div class="theme-swatch-topbar">
-              <span>{t("rail.brand")}</span>
-              <span class="theme-swatch-sync">SYNC</span>
-            </div>
-            <div class="theme-swatch-body">
-              <div class="theme-swatch-side">
-                <div class="screen-kicker">Explorer</div>
-                <div>List charges</div>
-                <div>Create charge</div>
-                <div class="theme-swatch-active">Refund charge</div>
-              </div>
-              <div class="theme-swatch-main">
-                <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
-                <div class="hr"></div>
-                <div class="theme-swatch-status">200 OK</div>
-                <div class="screen-empty-inline">214 ms · 1.2 KB</div>
+              <div class="theme-swatch-body">
+                <div class="theme-swatch-side">
+                  <div class="screen-kicker">Explorer</div>
+                  <div>List charges</div>
+                  <div>Create charge</div>
+                  <div class="theme-swatch-active">Refund charge</div>
+                </div>
+                <div class="theme-swatch-main">
+                  <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
+                  <div class="hr"></div>
+                  <div class="theme-swatch-status">200 OK</div>
+                  <div class="screen-empty-inline">214 ms · 1.2 KB</div>
+                </div>
               </div>
             </div>
-          </div>
-        </button>
+          </button>
+        {/each}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.accentColor")}</div>
+        <div class="screen-empty-inline">{t("settings.accentColorHint")}</div>
+      </div>
+      <div class="accent-picker">
+        {#each ACCENT_PRESETS as preset (preset.id)}
+          <button
+            type="button"
+            class="accent-swatch"
+            class:active={accentColor === preset.hex}
+            style="background: {preset.hex}"
+            title={t(`accent.${preset.id}`)}
+            onclick={() => setAccentColor(preset.hex)}
+          ></button>
+        {/each}
+        <label class="accent-swatch accent-swatch-custom" style={accentColor && !ACCENT_PRESETS.some((p) => p.hex === accentColor) ? `background: ${accentColor}` : ""} title={t("accent.custom")}>
+          <input type="color" value={accentColor ?? "#c1603f"} oninput={(e) => setAccentColor((e.currentTarget as HTMLInputElement).value)} />
+          {#if !accentColor || ACCENT_PRESETS.some((p) => p.hex === accentColor)}<span class="accent-swatch-plus">+</span>{/if}
+        </label>
+        {#if accentColor}
+          <button type="button" class="btn-ghost accent-reset" onclick={() => setAccentColor(null)}>{t("accent.reset")}</button>
+        {/if}
       </div>
     </div>
 
@@ -6176,87 +6273,89 @@
 </div>
 
 <style>
-  /* "Modernist" design system: flat, architectural, off-white/off-black grounds, a visible
-     modular grid, zero corner radius, strong 2px rules, Archivo throughout. Adopted wholesale
-     (see the design-system export this was derived from) rather than layered on top of the
-     app's previous dark Postman-style palette — every existing rule below still reads through
-     these same custom-property names, so the remap alone repaints the whole app. Light is the
-     system's own default (not an OS-follow); dark is a real, deliberate alternate palette
-     toggled via `data-theme`, built from the same tonal ramps per the system's own guidance
-     ("dark inverts the ground and lifts the accent one ramp step").
-     Brand orange (--color-primary/--color-accent) is reserved for primary actions and the
+  /* "Softline" design system: warm parchment/ink grounds, soft rounded corners, a serif display
+     face (Newsreader) paired with a humanist sans (Work Sans) for UI text, hairline borders over
+     the old system's strong 2px architectural rules. Replaces the previous "Modernist" palette
+     (flat, zero-radius, Archivo) wholesale through the same custom-property names, so the remap
+     alone repaints the whole app. Light is the system's own default (not an OS-follow); dark is
+     a real, deliberate alternate palette toggled via `data-theme` — a dark espresso ground with
+     the same warm hue family, accents lifted one step for contrast.
+     Terracotta (--color-primary/--color-accent) is reserved for primary actions and the
      active-nav mark only — it no longer doubles as danger or "no color" success, and HTTP
      methods get their own hues (below) instead of staying flat ink, so a dense request list
-     stays scannable at the scale this app targets (thousands of requests). */
-  @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap');
+     stays scannable at the scale this app targets (thousands of requests).
+     Two further themes, "terminal" and "blueprint" (below the light/dark pair), swap the whole
+     structural language, not just color — different fonts, radius and rule-weight — so each
+     carries its own font/radius/shadow declarations instead of only colors. */
+  @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;0,700;0,800;1,500;1,600&family=Work+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=Space+Mono:wght@400;700&display=swap');
 
   :root {
-    --color-bg: #f3f2f2;
-    --color-bg-secondary: #e8e6e5;
-    --color-bg-tertiary: #dedbda;
-    --color-bg-hover: color-mix(in srgb, #201e1d 7%, transparent);
-    --color-sidebar-bg: #f3f2f2;
-    --color-panel-bg: #e8e6e5;
-    --color-border: #d7d3d3;
-    --color-border-strong: color-mix(in srgb, #201e1d 40%, transparent);
-    --color-text: #201e1d;
-    --color-text-secondary: #605d5d;
-    --color-text-tertiary: #7d7979;
-    --color-primary: #ec3013;
-    --color-primary-hover: #dd2b0f;
-    --color-primary-contrast: #f3f2f2;
-    --color-accent: #ec3013;
-    --color-accent-hover: #dd2b0f;
-    --color-accent-contrast: #f3f2f2;
-    --color-success: #1a7f37;
-    --color-success-bg: #eaf7ee;
-    --color-danger: #d1174a;
-    --color-danger-bg: #fdeef1;
-    --color-warn: #9a5b00;
-    --color-warn-bg: #fdf3e0;
-    --color-focus: #ec3013;
+    --color-bg: #faf6ef;
+    --color-bg-secondary: #fff9f0;
+    --color-bg-tertiary: #f4ead9;
+    --color-bg-hover: color-mix(in srgb, #2b2620 6%, transparent);
+    --color-sidebar-bg: #fff9f0;
+    --color-panel-bg: #fff9f0;
+    --color-border: #ecdfd0;
+    --color-border-strong: color-mix(in srgb, #2b2620 22%, transparent);
+    --color-text: #2b2620;
+    --color-text-secondary: #6b5f4e;
+    --color-text-tertiary: #9a8c78;
+    --color-primary: #c1603f;
+    --color-primary-hover: #a84f32;
+    --color-primary-contrast: #fff9f0;
+    --color-accent: #c1603f;
+    --color-accent-hover: #a84f32;
+    --color-accent-contrast: #fff9f0;
+    --color-success: #4d7a3f;
+    --color-success-bg: #e4f1e0;
+    --color-danger: #b0453f;
+    --color-danger-bg: #fbe1e1;
+    --color-warn: #96701c;
+    --color-warn-bg: #fbecd2;
+    --color-focus: #c1603f;
 
     /* Each HTTP method gets its own hue so a dense request list is scannable at a glance.
        GET/DELETE deliberately reuse --color-success/--color-danger (read=safe, delete=danger
        are the same signal in both places); the rest fill out the set without inventing
        unrelated colors. */
     --method-get: var(--color-success);
-    --method-post: #9a6b00;
-    --method-put: #1c5fa8;
-    --method-patch: #0f7d8a;
+    --method-post: #96701c;
+    --method-put: #3a6d9c;
+    --method-patch: #3a8f8e;
     --method-delete: var(--color-danger);
-    --method-head: #6b3fa0;
-    --method-options: #57606a;
-    --method-trace: #786c5a;
+    --method-head: #7c5aa6;
+    --method-options: #6b5f4e;
+    --method-trace: #8a7a5c;
 
     /* JSON response/body syntax highlighting — independent from the method/status palette above
        so the two can evolve separately even though a couple of hues are shared by coincidence. */
-    --json-key: #0b5fb0;
-    --json-string: #1a7a35;
-    --json-number: #7a3d99;
-    --json-boolean: #0f7d8a;
-    --json-null: #767676;
+    --json-key: #96701c;
+    --json-string: #4d7a3f;
+    --json-number: #7c5aa6;
+    --json-boolean: #3a6d9c;
+    --json-null: #9a8c78;
 
-    /* Tonal ramps (OKLCH-derived in the source system) — light steps (100-300) for tinted
-       fills/hovers, 500 as a role's base, dark steps (700-900) for text on tinted fills. */
-    --color-neutral-100: #f8f4f4;
-    --color-neutral-200: #eae7e7;
-    --color-neutral-300: #d7d3d3;
-    --color-neutral-400: #bab6b6;
-    --color-neutral-500: #9b9797;
-    --color-neutral-600: #7d7979;
-    --color-neutral-700: #605d5d;
-    --color-neutral-800: #444141;
-    --color-neutral-900: #2d2b2b;
-    --color-accent-100: #fff2ef;
-    --color-accent-200: #ffe0d9;
-    --color-accent-300: #ffc4b8;
-    --color-accent-400: #ff9783;
-    --color-accent-500: #ff563c;
-    --color-accent-600: #dd2b0f;
-    --color-accent-700: #ae1800;
-    --color-accent-800: #7c1405;
-    --color-accent-900: #4d170e;
+    /* Tonal ramps — warm parchment/ink steps: light (100-300) for tinted fills/hovers, 500 as a
+       role's base, dark (700-900) for text on tinted fills. */
+    --color-neutral-100: #fff9f0;
+    --color-neutral-200: #f4ead9;
+    --color-neutral-300: #ecdfd0;
+    --color-neutral-400: #d8cbb4;
+    --color-neutral-500: #a3937d;
+    --color-neutral-600: #9a8c78;
+    --color-neutral-700: #6b5f4e;
+    --color-neutral-800: #453c30;
+    --color-neutral-900: #2b2620;
+    --color-accent-100: #fdf1ea;
+    --color-accent-200: #fce0d0;
+    --color-accent-300: #f7c3a3;
+    --color-accent-400: #e8936a;
+    --color-accent-500: #c1603f;
+    --color-accent-600: #a84f32;
+    --color-accent-700: #833d27;
+    --color-accent-800: #5f2c1c;
+    --color-accent-900: #3d1c13;
 
     --space-1: 4px;
     --space-2: 8px;
@@ -6280,15 +6379,18 @@
     --text-2xl: 2rem;
     --text-3xl: 2.5rem;
 
-    --radius-sm: 0px;
-    --radius-md: 0px;
-    --radius-lg: 0px;
-    --shadow-sm: 0 1px 2px color-mix(in srgb, #2d2b2b 14%, transparent);
-    --shadow-md: 0 3px 10px color-mix(in srgb, #2d2b2b 16%, transparent);
-    --shadow-lg: 0 12px 32px color-mix(in srgb, #2d2b2b 22%, transparent);
-    --font-sans: "Archivo", system-ui, sans-serif;
-    --font-heading: "Archivo", system-ui, sans-serif;
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --shadow-sm: 0 1px 2px color-mix(in srgb, #3a2f22 12%, transparent);
+    --shadow-md: 0 10px 28px color-mix(in srgb, #3a2f22 14%, transparent);
+    --shadow-lg: 0 24px 56px color-mix(in srgb, #3a2f22 20%, transparent);
+    --font-sans: "Work Sans", system-ui, sans-serif;
+    --font-heading: "Newsreader", Georgia, serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    /* Width of the "strong" structural rules (rail edges, panel dividers) — 1px hairline by
+       default; the blueprint theme below lifts this back to a bold 2px. */
+    --border-strong-width: 1px;
 
     color-scheme: light;
     color: var(--color-text);
@@ -6300,45 +6402,45 @@
   /* Not scoped to :root — also applies to nested [data-theme="dark"] elements (the Theme
      screen's side-by-side comparison swatches), since custom properties inherit normally. */
   [data-theme="dark"] {
-    --color-bg: #201e1d;
-    --color-bg-secondary: #2d2b2b;
-    --color-bg-tertiary: #363433;
-    --color-bg-hover: color-mix(in srgb, #f8f4f4 8%, transparent);
-    --color-sidebar-bg: #201e1d;
-    --color-panel-bg: #2d2b2b;
-    --color-border: #444141;
-    --color-border-strong: color-mix(in srgb, #f8f4f4 25%, transparent);
-    --color-text: #f8f4f4;
-    --color-text-secondary: #bab6b6;
-    --color-text-tertiary: #9b9797;
-    --color-primary: #ff563c;
-    --color-primary-hover: #ff9783;
-    --color-primary-contrast: #201e1d;
-    --color-accent: #ff563c;
-    --color-accent-hover: #ff9783;
-    --color-accent-contrast: #201e1d;
-    --color-success: #4ade80;
-    --color-success-bg: color-mix(in srgb, #4ade80 16%, transparent);
-    --color-danger: #ff5c86;
-    --color-danger-bg: color-mix(in srgb, #ff5c86 16%, transparent);
-    --color-warn: #f0b429;
-    --color-warn-bg: color-mix(in srgb, #f0b429 16%, transparent);
-    --color-focus: #ff563c;
+    --color-bg: #201a14;
+    --color-bg-secondary: #2b2219;
+    --color-bg-tertiary: #362b1e;
+    --color-bg-hover: color-mix(in srgb, #f7ecdc 8%, transparent);
+    --color-sidebar-bg: #201a14;
+    --color-panel-bg: #2b2219;
+    --color-border: #3d3223;
+    --color-border-strong: color-mix(in srgb, #f7ecdc 25%, transparent);
+    --color-text: #f7ecdc;
+    --color-text-secondary: #c9b89e;
+    --color-text-tertiary: #a3907a;
+    --color-primary: #e2835f;
+    --color-primary-hover: #ef9c7a;
+    --color-primary-contrast: #201a14;
+    --color-accent: #e2835f;
+    --color-accent-hover: #ef9c7a;
+    --color-accent-contrast: #201a14;
+    --color-success: #86cf72;
+    --color-success-bg: color-mix(in srgb, #86cf72 16%, transparent);
+    --color-danger: #e2796f;
+    --color-danger-bg: color-mix(in srgb, #e2796f 16%, transparent);
+    --color-warn: #d9a441;
+    --color-warn-bg: color-mix(in srgb, #d9a441 16%, transparent);
+    --color-focus: #e2835f;
 
     --method-get: var(--color-success);
-    --method-post: #f0b429;
-    --method-put: #6cb6ff;
-    --method-patch: #5fd0e0;
+    --method-post: #d9a441;
+    --method-put: #7fb0d9;
+    --method-patch: #6cc9c7;
     --method-delete: var(--color-danger);
-    --method-head: #b98ff0;
-    --method-options: #9aa4af;
-    --method-trace: #b3a58c;
+    --method-head: #b79bdb;
+    --method-options: #c9b89e;
+    --method-trace: #c2ac82;
 
-    --json-key: #6cb6ff;
-    --json-string: #7ee08a;
-    --json-number: #c9a6f0;
-    --json-boolean: #5fd0e0;
-    --json-null: #9b9797;
+    --json-key: #7fb0d9;
+    --json-string: #9adb85;
+    --json-number: #c6a8e8;
+    --json-boolean: #6cc9c7;
+    --json-null: #a3907a;
 
     color-scheme: dark;
   }
@@ -6346,47 +6448,170 @@
   /* Mirrors the :root light values, scoped so a nested [data-theme="light"] element (the Theme
      screen's comparison swatch) resets back to light even while the app itself is on dark. */
   [data-theme="light"] {
-    --color-bg: #f3f2f2;
-    --color-bg-secondary: #e8e6e5;
-    --color-bg-tertiary: #dedbda;
-    --color-bg-hover: color-mix(in srgb, #201e1d 7%, transparent);
-    --color-sidebar-bg: #f3f2f2;
-    --color-panel-bg: #e8e6e5;
-    --color-border: #d7d3d3;
-    --color-border-strong: color-mix(in srgb, #201e1d 40%, transparent);
-    --color-text: #201e1d;
-    --color-text-secondary: #605d5d;
-    --color-text-tertiary: #7d7979;
-    --color-primary: #ec3013;
-    --color-primary-hover: #dd2b0f;
-    --color-primary-contrast: #f3f2f2;
-    --color-accent: #ec3013;
-    --color-accent-hover: #dd2b0f;
-    --color-accent-contrast: #f3f2f2;
-    --color-success: #1a7f37;
-    --color-success-bg: #eaf7ee;
-    --color-danger: #d1174a;
-    --color-danger-bg: #fdeef1;
-    --color-warn: #9a5b00;
-    --color-warn-bg: #fdf3e0;
-    --color-focus: #ec3013;
+    --color-bg: #faf6ef;
+    --color-bg-secondary: #fff9f0;
+    --color-bg-tertiary: #f4ead9;
+    --color-bg-hover: color-mix(in srgb, #2b2620 6%, transparent);
+    --color-sidebar-bg: #fff9f0;
+    --color-panel-bg: #fff9f0;
+    --color-border: #ecdfd0;
+    --color-border-strong: color-mix(in srgb, #2b2620 22%, transparent);
+    --color-text: #2b2620;
+    --color-text-secondary: #6b5f4e;
+    --color-text-tertiary: #9a8c78;
+    --color-primary: #c1603f;
+    --color-primary-hover: #a84f32;
+    --color-primary-contrast: #fff9f0;
+    --color-accent: #c1603f;
+    --color-accent-hover: #a84f32;
+    --color-accent-contrast: #fff9f0;
+    --color-success: #4d7a3f;
+    --color-success-bg: #e4f1e0;
+    --color-danger: #b0453f;
+    --color-danger-bg: #fbe1e1;
+    --color-warn: #96701c;
+    --color-warn-bg: #fbecd2;
+    --color-focus: #c1603f;
 
     --method-get: var(--color-success);
-    --method-post: #9a6b00;
-    --method-put: #1c5fa8;
-    --method-patch: #0f7d8a;
+    --method-post: #96701c;
+    --method-put: #3a6d9c;
+    --method-patch: #3a8f8e;
     --method-delete: var(--color-danger);
-    --method-head: #6b3fa0;
-    --method-options: #57606a;
-    --method-trace: #786c5a;
+    --method-head: #7c5aa6;
+    --method-options: #6b5f4e;
+    --method-trace: #8a7a5c;
 
-    --json-key: #0b5fb0;
-    --json-string: #1a7a35;
-    --json-number: #7a3d99;
-    --json-boolean: #0f7d8a;
-    --json-null: #767676;
+    --json-key: #96701c;
+    --json-string: #4d7a3f;
+    --json-number: #7c5aa6;
+    --json-boolean: #3a6d9c;
+    --json-null: #9a8c78;
 
     color-scheme: light;
+  }
+
+  /* "Terminal" — a dark, monospace dev-console alternate: quiet bracket-style chrome, zero
+     radius, a single teal accent. Overrides font/radius/shadow/rule-weight too, not just color,
+     since its structural language is genuinely different from the light/dark Softline pair. */
+  [data-theme="terminal"] {
+    --color-bg: #0b0f0e;
+    --color-bg-secondary: #0e1312;
+    --color-bg-tertiary: #131a18;
+    --color-bg-hover: color-mix(in srgb, #dceee6 8%, transparent);
+    --color-sidebar-bg: #0e1312;
+    --color-panel-bg: #0e1312;
+    --color-border: #23302c;
+    --color-border-strong: color-mix(in srgb, #dceee6 22%, transparent);
+    --color-text: #dceee6;
+    --color-text-secondary: #93b3a8;
+    --color-text-tertiary: #6f8a80;
+    --color-primary: #5eead4;
+    --color-primary-hover: #99f6e4;
+    --color-primary-contrast: #05201b;
+    --color-accent: #5eead4;
+    --color-accent-hover: #99f6e4;
+    --color-accent-contrast: #05201b;
+    --color-success: #5eead4;
+    --color-success-bg: color-mix(in srgb, #5eead4 16%, transparent);
+    --color-danger: #fb7185;
+    --color-danger-bg: color-mix(in srgb, #fb7185 16%, transparent);
+    --color-warn: #f2c14e;
+    --color-warn-bg: color-mix(in srgb, #f2c14e 16%, transparent);
+    --color-focus: #5eead4;
+
+    --method-get: var(--color-success);
+    --method-post: #f2c14e;
+    --method-put: #7dd3fc;
+    --method-patch: #5fd0c8;
+    --method-delete: var(--color-danger);
+    --method-head: #b98ff0;
+    --method-options: #93b3a8;
+    --method-trace: #8a9a8f;
+
+    --json-key: #5eead4;
+    --json-string: #a7f3d0;
+    --json-number: #c4b5fd;
+    --json-boolean: #f2c14e;
+    --json-null: #6f8a80;
+
+    --radius-sm: 0px;
+    --radius-md: 0px;
+    --radius-lg: 0px;
+    --shadow-sm: 0 1px 2px color-mix(in srgb, #000000 30%, transparent);
+    --shadow-md: 0 6px 20px color-mix(in srgb, #000000 40%, transparent);
+    --shadow-lg: 0 16px 40px color-mix(in srgb, #000000 50%, transparent);
+    --font-sans: "JetBrains Mono", ui-monospace, monospace;
+    --font-heading: "JetBrains Mono", ui-monospace, monospace;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --border-strong-width: 1px;
+
+    color-scheme: dark;
+  }
+
+  /* "Blueprint" — a light, technical-schematic alternate: pale grid-paper ground, bold black
+     rules, a single blue accent, Space Grotesk/Mono throughout. */
+  [data-theme="blueprint"] {
+    --color-bg: #eef2f6;
+    --color-bg-secondary: #f6f8fa;
+    --color-bg-tertiary: #e4e9ef;
+    --color-bg-hover: color-mix(in srgb, #14202f 6%, transparent);
+    --color-sidebar-bg: #f6f8fa;
+    --color-panel-bg: #ffffff;
+    --color-border: #cfd8e2;
+    --color-border-strong: color-mix(in srgb, #14202f 85%, transparent);
+    --color-text: #14202f;
+    --color-text-secondary: #5b6b80;
+    --color-text-tertiary: #9aa7b6;
+    --color-primary: #2554e6;
+    --color-primary-hover: #1a3fb8;
+    --color-primary-contrast: #ffffff;
+    --color-accent: #2554e6;
+    --color-accent-hover: #1a3fb8;
+    --color-accent-contrast: #ffffff;
+    --color-success: #1a7a3d;
+    --color-success-bg: color-mix(in srgb, #1a7a3d 14%, transparent);
+    --color-danger: #c22b4d;
+    --color-danger-bg: color-mix(in srgb, #c22b4d 14%, transparent);
+    --color-warn: #a3690c;
+    --color-warn-bg: color-mix(in srgb, #a3690c 14%, transparent);
+    --color-focus: #2554e6;
+
+    --method-get: var(--color-success);
+    --method-post: #a3690c;
+    --method-put: var(--color-accent);
+    --method-patch: #0f7d8a;
+    --method-delete: var(--color-danger);
+    --method-head: #7c3aed;
+    --method-options: #5b6b80;
+    --method-trace: #8a7a5c;
+
+    --json-key: #2554e6;
+    --json-string: #1a7a3d;
+    --json-number: #7c3aed;
+    --json-boolean: #a3690c;
+    --json-null: #9aa7b6;
+
+    --radius-sm: 0px;
+    --radius-md: 0px;
+    --radius-lg: 0px;
+    --shadow-sm: none;
+    --shadow-md: none;
+    --shadow-lg: none;
+    --font-sans: "Space Grotesk", system-ui, sans-serif;
+    --font-heading: "Space Grotesk", system-ui, sans-serif;
+    --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --border-strong-width: 2px;
+
+    color-scheme: light;
+  }
+
+  /* Faint graph-paper grid, only for the blueprint theme's own "technical schematic" identity —
+     everywhere else the canvas stays a flat fill. */
+  .app-shell[data-theme="blueprint"] {
+    background-image:
+      repeating-linear-gradient(0deg, rgba(20, 32, 47, 0.06) 0 1px, transparent 1px 24px),
+      repeating-linear-gradient(90deg, rgba(20, 32, 47, 0.06) 0 1px, transparent 1px 24px);
   }
 
   :global(body) {
@@ -6420,7 +6645,7 @@
     flex: none;
     display: flex;
     flex-direction: column;
-    border-right: 2px solid var(--color-border-strong);
+    border-right: var(--border-strong-width) solid var(--color-border-strong);
     background: var(--color-bg);
     overflow: hidden;
     transition: width 0.15s ease;
@@ -6437,11 +6662,10 @@
     justify-content: space-between;
     padding: var(--space-4) var(--space-3) var(--space-3) var(--space-4);
     font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-md);
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    border-bottom: 2px solid var(--color-border-strong);
+    font-style: italic;
+    font-weight: 600;
+    font-size: var(--text-lg);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .screens-rail.collapsed .rail-brand {
@@ -6499,7 +6723,7 @@
 
   .rail-budget {
     flex: none;
-    border-top: 2px solid var(--color-border-strong);
+    border-top: var(--border-strong-width) solid var(--color-border-strong);
     padding: var(--space-3) var(--space-4);
     display: flex;
     flex-direction: column;
@@ -6554,7 +6778,7 @@
   .screen-page-header {
     flex: none;
     padding: var(--space-8) var(--space-6) var(--space-4);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .screen-kicker {
@@ -6633,7 +6857,7 @@
   .env-screen-side {
     width: 260px;
     flex: none;
-    border-right: 2px solid var(--color-border-strong);
+    border-right: var(--border-strong-width) solid var(--color-border-strong);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
@@ -6645,7 +6869,7 @@
     align-items: center;
     justify-content: space-between;
     padding: var(--space-4) var(--space-4) var(--space-3);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .env-screen-project-row {
@@ -6654,7 +6878,7 @@
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .env-screen-project-label {
@@ -6758,7 +6982,7 @@
   .launcher-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .launcher-card {
@@ -6817,7 +7041,7 @@
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-4) var(--space-6);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .history-search {
@@ -6869,7 +7093,7 @@
     letter-spacing: 0.09em;
     text-transform: uppercase;
     color: var(--color-text-tertiary);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .history-rows {
@@ -6953,7 +7177,7 @@
     display: flex;
     width: 100%;
     overflow: hidden;
-    border: 1px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .seg-opt {
@@ -6968,7 +7192,7 @@
     cursor: pointer;
     background: transparent;
     border: none;
-    border-left: 1px solid var(--color-border-strong);
+    border-left: var(--border-strong-width) solid var(--color-border-strong);
     color: var(--color-text);
     font-family: inherit;
   }
@@ -7008,7 +7232,7 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     padding: 2px 6px;
-    border: 1px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     background: var(--color-bg-secondary);
     color: var(--color-text-secondary);
   }
@@ -7016,7 +7240,7 @@
   /* — Theme screen — */
   .theme-compare {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
     padding: var(--space-6);
     gap: var(--space-6);
   }
@@ -7059,8 +7283,61 @@
     margin-bottom: var(--space-3);
   }
 
+  .accent-picker {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .accent-swatch {
+    width: 1.7rem;
+    height: 1.7rem;
+    flex: none;
+    border-radius: 999px;
+    border: var(--border-strong-width) solid transparent;
+    box-shadow: 0 0 0 1px var(--color-border);
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .accent-swatch.active {
+    border-color: var(--color-text);
+  }
+
+  .accent-swatch-custom {
+    position: relative;
+    background: var(--color-bg-tertiary);
+    overflow: hidden;
+  }
+
+  .accent-swatch-custom input[type="color"] {
+    position: absolute;
+    inset: -4px;
+    width: calc(100% + 8px);
+    height: calc(100% + 8px);
+    padding: 0;
+    border: none;
+    cursor: pointer;
+    opacity: 0;
+  }
+
+  .accent-swatch-plus {
+    pointer-events: none;
+    color: var(--color-text-secondary);
+    font-size: var(--text-md);
+    line-height: 1;
+  }
+
+  .accent-reset {
+    font-size: var(--text-sm);
+  }
+
   .theme-swatch {
-    border: 2px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     background: var(--color-bg);
     color: var(--color-text);
   }
@@ -7070,7 +7347,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 0.7rem 0.9rem;
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
     font-family: var(--font-heading);
     font-weight: 800;
     font-size: var(--text-sm);
@@ -7148,13 +7425,13 @@
   .response-screen-side {
     width: 300px;
     flex: none;
-    border-right: 2px solid var(--color-border-strong);
+    border-right: var(--border-strong-width) solid var(--color-border-strong);
     overflow-y: auto;
   }
 
   .response-screen-stat-block {
     padding: var(--space-4) var(--space-4);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .response-screen-status {
@@ -7173,7 +7450,7 @@
   .response-screen-metrics {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .response-screen-metric {
@@ -7232,7 +7509,7 @@
     width: 620px;
     max-width: 92vw;
     background: var(--color-bg);
-    border: 2px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     box-shadow: var(--shadow-lg);
   }
 
@@ -7241,7 +7518,7 @@
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   .palette-input {
@@ -7373,6 +7650,36 @@
     max-width: 180px;
   }
 
+  .env-select-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+  }
+
+  .env-select-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .env-picker-menu {
+    min-width: 15rem;
+    max-width: 18rem;
+    inset-inline-start: 0;
+    inset-inline-end: auto;
+  }
+
+  .env-picker-search {
+    width: 100%;
+    margin-bottom: 0.25rem;
+  }
+
+  .env-picker-list {
+    overflow-y: auto;
+    max-height: 16rem;
+  }
+
   /* ---------- Buttons & inputs ---------- */
   button {
     font-family: inherit;
@@ -7429,7 +7736,7 @@
 
   .btn-secondary {
     background: transparent;
-    border: 1px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     color: var(--color-text);
   }
 
@@ -7471,7 +7778,7 @@
     font-size: var(--text-sm);
     color: var(--color-text-tertiary);
     background: transparent;
-    border: 1px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     white-space: nowrap;
   }
 
@@ -7596,7 +7903,7 @@
     display: flex;
     position: fixed;
     background: var(--color-bg);
-    border: 2px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     padding: var(--space-2);
     gap: 4px;
     z-index: 1000;
@@ -7767,7 +8074,9 @@
     align-items: center;
     gap: 0.2rem;
     padding: 0.1rem 0.5rem 0.1rem 0.7rem;
-    border-radius: var(--radius-sm);
+    /* Flat, not rounded — a dense project/folder/request tree reads as a list, not a stack of
+       cards, even under the Softline theme's generally-rounded language. */
+    border-radius: 0;
     margin: 0 0.4rem;
   }
 
@@ -7873,7 +8182,7 @@
     z-index: 56;
     min-width: 10rem;
     background: var(--color-bg);
-    border: 1px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     border-radius: var(--radius-md);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
     display: flex;
@@ -7927,7 +8236,7 @@
   .request-item {
     display: flex;
     align-items: center;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
   }
 
   .folder-node {
@@ -7938,7 +8247,7 @@
     display: flex;
     align-items: center;
     gap: 0.2rem;
-    border-radius: var(--radius-sm);
+    border-radius: 0;
   }
 
   .folder-row:hover {
@@ -8108,19 +8417,26 @@
     letter-spacing: 0.02em;
   }
 
-  /* Method shown as small colored text, never a tinted pill/badge — that's how the
-     reference actually renders it in the sidebar and tab bar. */
-  .method-badge,
-  .tab-method-badge {
-    display: inline-block;
+  /* Method shown as a tinted pill in the sidebar tree — the Softline system's chip treatment.
+     `currentColor` picks up whichever .method-* color class is paired on the same element, so
+     the tint always matches without an separate background rule per method. */
+  .method-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     width: 2.8rem;
-    text-align: left;
     flex-shrink: 0;
-    background: none;
+    border-radius: 999px;
+    padding: 0.1rem 0;
+    background: color-mix(in srgb, currentColor 14%, transparent);
   }
 
   .tab-method-badge {
+    display: inline-block;
     width: auto;
+    text-align: left;
+    flex-shrink: 0;
+    background: none;
   }
 
   .method-select {
@@ -8232,7 +8548,7 @@
     max-height: 420px;
     overflow-y: auto;
     background: var(--color-panel-bg);
-    border: 1px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     box-shadow: var(--shadow-md);
     display: flex;
     flex-direction: column;
@@ -8381,9 +8697,15 @@
     opacity: 0.6;
   }
 
+  /* Floats as its own card on the canvas-tinted `.detail` background — the Softline system's
+     "cards, not edge-to-edge panels" composition — rather than a full-bleed strip. */
   .request-bar {
-    padding: 0.5rem 0.9rem 0.4rem;
-    border-bottom: 1px solid var(--color-border);
+    margin: 0.7rem 0.9rem 0;
+    padding: 0.6rem 0.9rem 0.5rem;
+    background: var(--color-panel-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
   }
 
   .request-bar-row {
@@ -8403,9 +8725,10 @@
     display: flex;
     align-items: center;
     background: var(--color-panel-bg);
-    border: 1px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     border-radius: var(--radius-md);
-    /* No overflow:hidden — the design's radius is 0 here anyway (nothing to corner-clip), and
+    /* No overflow:hidden — the method-select/url-input children paint no background of their
+       own (they sit transparent on this pill's fill), so there's nothing to corner-clip, and
        hiding overflow would clip the missing-variable popover that hangs below the URL bar. */
   }
 
@@ -8585,6 +8908,9 @@
     outline-offset: -2px;
   }
 
+  /* Same floating-card treatment as .request-bar (see comment there) — margin is horizontal
+     and bottom only, so the JS-driven `responsePaneHeight` (an explicit height, not flex-grow)
+     still governs the box's actual height without the margin skewing that math. */
   .response-pane {
     flex: none;
     min-height: 160px;
@@ -8592,7 +8918,11 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    background: var(--color-bg);
+    margin: 0 0.9rem 0.9rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+    background: var(--color-panel-bg);
   }
 
   .response-pane .response-loading,
@@ -8626,7 +8956,7 @@
     flex: none;
     display: flex;
     flex-direction: column;
-    border-left: 2px solid var(--color-border-strong);
+    border-left: var(--border-strong-width) solid var(--color-border-strong);
     background: var(--color-bg);
     overflow: hidden;
   }
@@ -8637,7 +8967,7 @@
     gap: 0.15rem;
     flex: none;
     padding: var(--space-2) var(--space-2);
-    border-bottom: 2px solid var(--color-border-strong);
+    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
   }
 
   /* Code is the sidebar's one real feature now (Info is a small icon toggle beside it, not an
@@ -8818,7 +9148,6 @@
 
   /* ---------- Response panel ---------- */
   .response {
-    border-top: 1px solid var(--color-border);
     padding: 0.7rem 0.9rem 1rem;
   }
 
@@ -8829,7 +9158,6 @@
     padding: 1rem 0.9rem;
     color: var(--color-text-secondary);
     font-size: var(--text-base);
-    border-top: 1px solid var(--color-border);
   }
 
   .response-empty-state {
@@ -8840,14 +9168,13 @@
     gap: 0.4rem;
     padding: 2rem 0.9rem;
     color: var(--color-text-tertiary);
-    border-top: 1px solid var(--color-border);
   }
 
   .spinner {
     width: 13px;
     height: 13px;
     border-radius: 50%;
-    border: 2px solid var(--color-border-strong);
+    border: var(--border-strong-width) solid var(--color-border-strong);
     border-top-color: var(--color-accent);
     animation: spin 0.7s linear infinite;
   }
@@ -9934,7 +10261,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    border-right: 1px solid var(--color-border-strong);
+    border-right: var(--border-strong-width) solid var(--color-border-strong);
     padding-right: var(--space-3);
   }
 

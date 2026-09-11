@@ -200,6 +200,26 @@ const MIGRATIONS: &[(i64, &str)] = &[
         "ALTER TABLE folders ADD COLUMN parent_folder_id TEXT;
         CREATE INDEX idx_folders_parent_folder_id ON folders(parent_folder_id);",
     ),
+    (
+        15,
+        // Workspaces group projects (Workspace -> Project -> Folder/Request, one more level on
+        // top of the existing hierarchy). Every existing project is backfilled into a seeded
+        // 'default' workspace so this ships without an empty-state migration step. No DB-level
+        // FK/CASCADE on workspace_id — same ALTER-table reason as migration 12 above (and
+        // SQLite outright refuses `REFERENCES` combined with a non-NULL `DEFAULT` on ADD
+        // COLUMN) — workspace_store::delete_workspace cascades via project_store::delete_project
+        // in application code instead.
+        "CREATE TABLE workspaces (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO workspaces (id, name, created_at, updated_at)
+            VALUES ('default', 'My Workspace', '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z');
+        ALTER TABLE projects ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';
+        CREATE INDEX idx_projects_workspace_id ON projects(workspace_id);",
+    ),
 ];
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {

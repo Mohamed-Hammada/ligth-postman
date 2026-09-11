@@ -1,4 +1,25 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+
+/** True only inside the actual Tauri desktop shell — absent when this app is opened as a plain
+ * web page (e.g. `vite dev` visited directly in a browser instead of via `tauri dev`), which has
+ * no Rust backend to call into. */
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+/** Same call shape as the real `invoke`, but checked up front — every one of this file's ~80
+ * call sites goes through here. Outside the Tauri shell this rejects with one clear, catchable
+ * message instead of the real `invoke`'s raw `Cannot read properties of undefined (reading
+ * 'invoke')` TypeError, so existing .catch()/try-catch call sites surface something a user can
+ * actually read (and none crash as an unhandled rejection). */
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauriRuntime()) {
+    return Promise.reject(
+      new Error(`This runs as a desktop app — open it via the app window, not a browser tab, to use "${cmd}".`),
+    );
+  }
+  return tauriInvoke<T>(cmd, args);
+}
 
 export interface Project {
   id: string;

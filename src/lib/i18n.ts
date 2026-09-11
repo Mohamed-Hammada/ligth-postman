@@ -59,6 +59,7 @@ const en: Dict = {
   "sidebar.noRequestsInFolder": "No requests in this folder yet — use its + above.",
   "sidebar.addRequest": "Add request",
   "sidebar.addFolder": "Add folder",
+  "sidebar.addSubfolder": "Add subfolder",
   "sidebar.importInto": "Import a Postman collection, cURL command, or project file into this project",
   "sidebar.exportCollection": "Export as Postman Collection v2.1",
   "sidebar.exportProjectFile": "Export as this app's own project file (.json) — used for git sync",
@@ -106,6 +107,7 @@ const en: Dict = {
   "workspace.selectProject": "Select a project on the left, or create one to get started.",
   "tab.unsavedChanges": "Unsaved changes",
   "tab.closeTab": "Close tab",
+  "tab.allOpenTabs": "All open tabs",
 
   // Missing-variable popover
   "missingvar.addValueFor": "Add value for {name}",
@@ -246,7 +248,6 @@ const en: Dict = {
   // Bottom bar (code snippet / info)
   "bottom.codeSnippet": "Code Snippet",
   "bottom.info": "Info",
-  "bottom.pickPanel": "Pick Code Snippet or Info above.",
   "bottom.target": "Target",
   "bottom.targetWindowsCmd": "cURL (Windows CMD)",
   "bottom.targetPowershell": "cURL (PowerShell)",
@@ -268,6 +269,8 @@ const en: Dict = {
 
   // Environments screen
   "env.title": "Environments",
+  "env.searchEnvironments": "Search environments...",
+  "env.searchVariables": "Search variables...",
   "env.newEnvironment": "New environment",
   "env.noEnvironment": "No Environment",
   "env.pickProject": "Pick a project",
@@ -582,6 +585,7 @@ const en: Dict = {
   "console.exportJsonTitle": "Export events as JSON",
   "console.exportJson": "Export JSON",
   "console.closeTitle": "Close console",
+  "console.resizeHandle": "Resize console panel",
   "console.empty": "No console events logged yet. Send a request to see lifecycle diagnostics.",
   "console.correlationIdTitle": "Correlation ID: {id}",
   "console.copyDetailsJson": "Copy Details JSON",
@@ -643,6 +647,7 @@ const ar: Dict = {
   "sidebar.noRequestsInFolder": "لا توجد طلبات في هذا المجلد بعد — استخدم علامة + الخاصة به أعلاه.",
   "sidebar.addRequest": "إضافة طلب",
   "sidebar.addFolder": "إضافة مجلد",
+  "sidebar.addSubfolder": "إضافة مجلد فرعي",
   "sidebar.importInto": "استيراد مجموعة بوستمان أو أمر cURL أو ملف مشروع إلى هذا المشروع",
   "sidebar.exportCollection": "تصدير كمجموعة بوستمان الإصدار 2.1",
   "sidebar.exportProjectFile": "تصدير كملف مشروع خاص بالتطبيق (.json) — يُستخدم لمزامنة جيت",
@@ -688,6 +693,7 @@ const ar: Dict = {
   "workspace.selectProject": "اختر مشروعًا من القائمة على اليمين، أو أنشئ واحدًا للبدء.",
   "tab.unsavedChanges": "تغييرات غير محفوظة",
   "tab.closeTab": "إغلاق التبويب",
+  "tab.allOpenTabs": "كل التبويبات المفتوحة",
 
   "missingvar.addValueFor": "إضافة قيمة لـ {name}",
   "missingvar.valueFor": "القيمة لـ {name}",
@@ -816,7 +822,6 @@ const ar: Dict = {
 
   "bottom.codeSnippet": "مقتطف الشيفرة",
   "bottom.info": "معلومات",
-  "bottom.pickPanel": "اختر مقتطف الشيفرة أو المعلومات أعلاه.",
   "bottom.target": "الهدف",
   "bottom.targetWindowsCmd": "cURL (Windows CMD)",
   "bottom.targetPowershell": "cURL (PowerShell)",
@@ -837,6 +842,8 @@ const ar: Dict = {
   "bottom.queryParamsCount": "معاملات الاستعلام",
 
   "env.title": "البيئات",
+  "env.searchEnvironments": "بحث في البيئات...",
+  "env.searchVariables": "بحث في المتغيرات...",
   "env.newEnvironment": "بيئة جديدة",
   "env.noEnvironment": "بلا بيئة",
   "env.pickProject": "اختر مشروعًا",
@@ -1139,6 +1146,7 @@ const ar: Dict = {
   "console.exportJsonTitle": "تصدير الأحداث كـ JSON",
   "console.exportJson": "تصدير JSON",
   "console.closeTitle": "إغلاق وحدة التحكم",
+  "console.resizeHandle": "تغيير حجم لوحة وحدة التحكم",
   "console.empty": "لا توجد أحداث مسجّلة بعد. أرسل طلبًا لرؤية تشخيصات دورة الحياة.",
   "console.correlationIdTitle": "معرّف الارتباط: {id}",
   "console.copyDetailsJson": "نسخ تفاصيل JSON",

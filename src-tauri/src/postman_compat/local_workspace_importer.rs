@@ -485,7 +485,11 @@ fn get_or_create_folder(
     }
     match folder_store::create_folder(
         conn,
-        NewFolderInput { project_id: project_id.to_string(), name: folder_path.to_string() },
+        NewFolderInput {
+            project_id: project_id.to_string(),
+            name: folder_path.to_string(),
+            ..Default::default()
+        },
     ) {
         Ok(f) => {
             folder_cache.insert(folder_path.to_string(), f.id.clone());

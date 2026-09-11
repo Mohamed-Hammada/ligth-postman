@@ -92,6 +92,19 @@
     }
     return map;
   });
+  // Environments screen search (LP redesign: this screen had no filtering at all, unlike the
+  // request sidebar — a gap on the same "large workspace" scale the rest of the app targets).
+  let envSearchQuery = $state("");
+  let filteredEnvironmentsByProject = $derived.by(() => {
+    const q = envSearchQuery.trim().toLowerCase();
+    if (!q) return environmentsByProject;
+    const filtered = new Map<string, EnvironmentWithProject[]>();
+    for (const [projectName, envs] of environmentsByProject) {
+      const matches = envs.filter((e) => e.name.toLowerCase().includes(q));
+      if (matches.length) filtered.set(projectName, matches);
+    }
+    return filtered;
+  });
   let selectedEnvironmentId = $state<string | null>(null);
   let renamingEnvironmentId = $state<string | null>(null);
   let renameEnvironmentValue = $state("");
@@ -99,6 +112,15 @@
 
   let projectVariables = $state<VariableView[]>([]);
   let environmentVariables = $state<VariableView[]>([]);
+  let envVarSearchQuery = $state("");
+  let filteredProjectVariables = $derived.by(() => {
+    const q = envVarSearchQuery.trim().toLowerCase();
+    return q ? projectVariables.filter((v) => v.key.toLowerCase().includes(q)) : projectVariables;
+  });
+  let filteredEnvironmentVariables = $derived.by(() => {
+    const q = envVarSearchQuery.trim().toLowerCase();
+    return q ? environmentVariables.filter((v) => v.key.toLowerCase().includes(q)) : environmentVariables;
+  });
   // Trailing draft rows for the Global/Environment variable tables — same "always one empty
   // row, commits when you're done with it" pattern as Params/Headers, just committing to a
   // real backend variable (createVariable) instead of a client-side array, since each row here
@@ -353,6 +375,44 @@
     }
   });
 
+  function escapeHtml(s: string): string {
+    return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+  }
+
+  // Matches exactly the tokens JSON.stringify's own output can contain. Safe to run only on
+  // that output (never on arbitrary/raw response text): well-formed JSON syntax cannot place a
+  // literal <, >, &, or quote character anywhere except inside a string literal, so escaping the
+  // captured string tokens below covers every unsafe character the input could contain.
+  const JSON_TOKEN_RE = /"(?:\\.|[^"\\])*"(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+
+  function highlightJson(source: string): string {
+    return source.replace(JSON_TOKEN_RE, (match, colon: string | undefined) => {
+      if (match[0] === '"') {
+        const str = colon ? match.slice(0, match.length - colon.length) : match;
+        const cls = colon ? "json-key" : "json-string";
+        return `<span class="${cls}">${escapeHtml(str)}</span>${colon ?? ""}`;
+      }
+      if (match === "true" || match === "false") return `<span class="json-boolean">${match}</span>`;
+      if (match === "null") return `<span class="json-null">${match}</span>`;
+      return `<span class="json-number">${match}</span>`;
+    });
+  }
+
+  let responseBodyIsJson = $derived.by(() => {
+    if (!activeResponseBody || responseViewMode === "raw") return false;
+    try {
+      JSON.parse(activeResponseBody);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  let highlightedResponseBody = $derived.by(() => {
+    if (!responseBodyIsJson) return "";
+    return highlightJson(prettyResponseBody);
+  });
+
   // Response area sub-tabs (Body / Headers / Cookies / Tests) — replaces the old flat stacked layout.
   let responseSubTab = $state<"body" | "headers" | "cookies" | "tests" | "history">("body");
 
@@ -438,6 +498,28 @@
     window.addEventListener("mouseup", onUp);
   }
 
+  // Resizable console drawer (drag handle along its top edge) — same pattern as the response
+  // pane above, since it's the same job (a docked panel you drag taller to read more of).
+  let consoleHeight = $state(260);
+  let consoleResizing = $state(false);
+
+  function startConsoleResize(e: MouseEvent) {
+    e.preventDefault();
+    consoleResizing = true;
+    const startY = e.clientY;
+    const startHeight = consoleHeight;
+    const onMove = (ev: MouseEvent) => {
+      consoleHeight = Math.min(window.innerHeight - 160, Math.max(120, startHeight - (ev.clientY - startY)));
+    };
+    const onUp = () => {
+      consoleResizing = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   // Screen navigation shell — a real left-rail switcher between full-page screens. Each
   // screen reuses the exact same state/functions the old modal-based UI used; nothing here
   // introduces a second source of truth for projects/requests/environments/git/etc.
@@ -458,7 +540,11 @@
   // collapsed/expanded is a deliberate choice that should stick until the user changes it
   // again, not reset back to a default every launch.
   let sidebarVisible = $state(true);
-  let screensRailVisible = $state(true);
+  // Icon-only by default (VS Code/IntelliJ activity-bar convention) — the labeled 220px rail
+  // was previously the default, costing real width for a 7-item nav a user checks in at a
+  // glance. Each rail button already carries a `title` tooltip, so nothing is lost by
+  // collapsing; a user who expands it gets that choice remembered via lp-rail-visible below.
+  let screensRailVisible = $state(false);
   let rightSidebarVisible = $state(true);
 
   function setSidebarVisible(v: boolean) {
@@ -904,13 +990,25 @@
   });
 
   // Folders don't have a "method" field, so that sort criterion falls back to name for them.
-  let sortedFolders = $derived.by(() => {
+  // Grouped by parent so the sidebar can render them as a tree — folders can nest inside other
+  // folders now, not just sit directly under the project (see models::Folder on the backend).
+  const ROOT_FOLDER_KEY = "";
+  let foldersByParentId = $derived.by(() => {
     const dir = requestSortDir === "asc" ? 1 : -1;
-    return [...folders].sort((a, b) => {
+    const sorted = [...folders].sort((a, b) => {
       if (requestSortField === "updated") return a.updated_at.localeCompare(b.updated_at) * dir;
       return a.name.localeCompare(b.name) * dir;
     });
+    const map = new Map<string, Folder[]>();
+    for (const f of sorted) {
+      const key = f.parent_folder_id ?? ROOT_FOLDER_KEY;
+      const list = map.get(key) ?? [];
+      list.push(f);
+      map.set(key, list);
+    }
+    return map;
   });
+  let rootFolders = $derived(foldersByParentId.get(ROOT_FOLDER_KEY) ?? []);
 
   // Expand/collapse every folder in the current project's tree at once.
   function toggleExpandAllFolders() {
@@ -1094,13 +1192,19 @@
 
   // Regenerates automatically — the Code Snippet panel has no "Generate" button; it just always
   // shows the snippet for whatever's currently selected (target/mode/request/environment).
+  // Code is the right sidebar's default view (rightPanel starts null, not "code" — see the
+  // template's `{:else}` fallback), so this fires whenever the panel is visible and isn't Info,
+  // not just when it's explicitly "code" — but never while the sidebar itself is hidden, since
+  // a hidden panel isn't "in use" (matches the app's lazy-everything rule: no request costs
+  // CPU/network for a view the user isn't looking at).
   $effect(() => {
+    const visible = rightSidebarVisible;
     const panel = rightPanel;
     const req = selectedRequest;
     const target = snippetTarget;
     const mode = snippetMode;
     const envId = selectedEnvironmentId;
-    if (panel === "code" && req) {
+    if (visible && panel !== "info" && req) {
       copyAsCurl();
     }
   });
@@ -1914,16 +2018,19 @@
     }
   }
 
-  // "+" for folder next to a project — creates the folder, then drops straight into
-  // inline-rename, same pattern as quickCreateRequest/quickCreateProject.
-  async function quickCreateFolder(projectId: string) {
+  // "+" for folder next to a project (or a folder's own "add subfolder" action) — creates the
+  // folder, then drops straight into inline-rename, same pattern as
+  // quickCreateRequest/quickCreateProject.
+  async function quickCreateFolder(projectId: string, parentFolderId: string | null = null) {
     try {
       if (selectedProjectId !== projectId) {
         await selectProject(projectId);
       }
-      const folder = await api.createFolder({ project_id: projectId, name: "New Folder" });
+      const folder = await api.createFolder({ project_id: projectId, name: "New Folder", parent_folder_id: parentFolderId });
       folders = [...folders, folder];
-      expandedFolderIds = new Set([...expandedFolderIds, folder.id]);
+      const nextExpanded = new Set([...expandedFolderIds, folder.id]);
+      if (parentFolderId) nextExpanded.add(parentFolderId);
+      expandedFolderIds = nextExpanded;
       startRenameFolder(folder);
     } catch (err) {
       errorMessage = describeError(err);
@@ -1948,12 +2055,17 @@
     }
   }
 
-  // Ungroups the folder's requests back to the project root instead of deleting them —
-  // matches the backend's own delete_folder semantics (see folder_store.rs).
+  // Ungroups the folder's requests back to the project root and promotes any child folders up
+  // to the deleted folder's own parent, instead of deleting either — matches the backend's own
+  // delete_folder semantics (see folder_store.rs).
   async function deleteFolderAction(id: string) {
     try {
       await api.deleteFolder(id);
-      folders = folders.filter((f) => f.id !== id);
+      const deleted = folders.find((f) => f.id === id);
+      const promotedParentId = deleted?.parent_folder_id ?? null;
+      folders = folders
+        .filter((f) => f.id !== id)
+        .map((f) => (f.parent_folder_id === id ? { ...f, parent_folder_id: promotedParentId } : f));
       requests = requests.map((r) => (r.folder_id === id ? { ...r, folder_id: null } : r));
     } catch (err) {
       errorMessage = describeError(err);
@@ -3017,6 +3129,7 @@
 {#snippet iconMenu()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>{/snippet}
 {#snippet iconFolder()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 4.5h4l1.2 1.5H14v6.5H2Z"/></svg>{/snippet}
 {#snippet iconFolderOpen()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 4.8h4l1.2 1.5H14L12.7 12.5H3.3Z"/></svg>{/snippet}
+{#snippet iconFolderPlus()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter" stroke-linecap="square"><path d="M2 4.5h4l1.2 1.5H14v6.5H2Z"/><path d="M8 7.3v3.4M6.3 9h3.4"/></svg>{/snippet}
 {#snippet iconGlobe()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2.1 2.1 2.1 9.9 0 12M8 2c-2.1 2.1-2.1 9.9 0 12"/></svg>{/snippet}
 {#snippet iconImport()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M8 2.2v7.3M5 6.8L8 9.8l3-3"/><path d="M2.5 10.3v2.2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2.2"/></svg>{/snippet}
 {#snippet iconEye()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.4 8S4 3.6 8 3.6 14.6 8 14.6 8 12 12.4 8 12.4 1.4 8 1.4 8Z"/><circle cx="8" cy="8" r="2"/></svg>{/snippet}
@@ -3112,7 +3225,10 @@
           </select>
         </div>
       {:else}
-        <p class="screen-empty">{t("env.noProjectsYet")}</p>
+        <div class="screen-empty">
+          <div class="empty-icon">{@render iconFolder()}</div>
+          <p>{t("env.noProjectsYet")}</p>
+        </div>
       {/if}
     </section>
   {/snippet}
@@ -3190,6 +3306,59 @@
     </li>
   {/snippet}
 
+  <!-- Recursive: a folder can contain child folders (unlimited depth), each independently
+       collapsible/expandable via the same expandedFolderIds set as its parent — clicking a
+       folder toggles it open/closed regardless of how deep it's nested. -->
+  {#snippet folderNode(project: Project, folder: Folder)}
+    {@const isExpanded = expandedFolderIds.has(folder.id)}
+    {@const childFolders = foldersByParentId.get(folder.id) ?? []}
+    {@const childRequests = requestsByFolderId.get(folder.id) ?? []}
+    <div class="folder-node">
+      <div class="folder-row">
+        {#if renamingFolderId === folder.id}
+          <form class="inline-form" onsubmit={submitRenameFolder}>
+            <input bind:value={renameFolderValue} use:focusOnMount onblur={submitRenameFolder} />
+            <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingFolderId = null)}>{@render iconClose()}</button>
+          </form>
+        {:else}
+          <button
+            type="button"
+            class="tree-expand-btn"
+            title={isExpanded ? t("sidebar.collapseFolder") : t("sidebar.expandFolder")}
+            onclick={() => toggleFolderExpanded(folder.id)}
+          >{#if isExpanded}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</button>
+          <button type="button" class="folder-link" onclick={() => toggleFolderExpanded(folder.id)} ondblclick={() => startRenameFolder(folder)}>
+            <span class="folder-icon">{#if isExpanded}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
+            <span class="project-name">{folder.name}</span>
+          </button>
+          <div class="project-row-actions">
+            <button class="icon-btn" title={t("sidebar.addSubfolder")} onclick={() => quickCreateFolder(project.id, folder.id)}>{@render iconFolderPlus()}</button>
+            <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id, folder.id)}>+</button>
+            <button class="icon-btn" title={t("sidebar.rename")} onclick={() => startRenameFolder(folder)}>{@render iconEdit()}</button>
+            <button class="icon-btn" title={t("sidebar.deleteFolder")} onclick={() => deleteFolderAction(folder.id)}>{@render iconTrash()}</button>
+          </div>
+        {/if}
+      </div>
+      {#if isExpanded}
+        <div class="folder-children">
+          {#each childFolders as child (child.id)}
+            {@render folderNode(project, child)}
+          {/each}
+          <ul class="request-list">
+            {#each childRequests as req (req.id)}
+              {@render requestRow(req)}
+            {:else}
+              {#if !childFolders.length}
+                <li class="empty">{t("sidebar.noRequestsInFolder")}</li>
+              {/if}
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    </div>
+  {/snippet}
+
   {#snippet expandedResponseView()}
     <section class="screen-page">
       <div class="screen-page-header">
@@ -3205,9 +3374,15 @@
       </div>
 
       {#if !selectedRequest}
-        <p class="screen-empty">{t("response.openFromWorkspace")}</p>
+        <div class="screen-empty">
+          <div class="empty-icon">{@render iconInboxEmpty()}</div>
+          <p>{t("response.openFromWorkspace")}</p>
+        </div>
       {:else if !activeResponse}
-        <p class="screen-empty">{t("response.sendToSee")}</p>
+        <div class="screen-empty">
+          <div class="empty-icon">{@render iconInboxEmpty()}</div>
+          <p>{t("response.sendToSee")}</p>
+        </div>
       {:else}
         <div class="response-screen-body">
           <aside class="response-screen-side">
@@ -3270,7 +3445,11 @@
             </div>
             <div class="response-screen-content">
               {#if responseSubTab === "body"}
-                <pre class="body-view screen-body-view">{prettyResponseBody}</pre>
+                {#if responseBodyIsJson}
+                  <pre class="body-view screen-body-view">{@html highlightedResponseBody}</pre>
+                {:else}
+                  <pre class="body-view screen-body-view">{prettyResponseBody}</pre>
+                {/if}
                 {#if activeResponseTruncated}<p class="hint">{t("response.truncated")}</p>{/if}
               {:else if responseSubTab === "headers"}
                 {#if activeResponse.headers?.length}
@@ -3613,43 +3792,8 @@
                     </div>
                   {/if}
                 {:else}
-                  {#each sortedFolders as folder (folder.id)}
-                    <div class="folder-node">
-                      <div class="folder-row">
-                        {#if renamingFolderId === folder.id}
-                          <form class="inline-form" onsubmit={submitRenameFolder}>
-                            <input bind:value={renameFolderValue} use:focusOnMount onblur={submitRenameFolder} />
-                            <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
-                            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingFolderId = null)}>{@render iconClose()}</button>
-                          </form>
-                        {:else}
-                          <button
-                            type="button"
-                            class="tree-expand-btn"
-                            title={expandedFolderIds.has(folder.id) ? t("sidebar.collapseFolder") : t("sidebar.expandFolder")}
-                            onclick={() => toggleFolderExpanded(folder.id)}
-                          >{#if expandedFolderIds.has(folder.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</button>
-                          <button type="button" class="folder-link" onclick={() => toggleFolderExpanded(folder.id)} ondblclick={() => startRenameFolder(folder)}>
-                            <span class="folder-icon">{#if expandedFolderIds.has(folder.id)}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
-                            <span class="project-name">{folder.name}</span>
-                          </button>
-                          <div class="project-row-actions">
-                            <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id, folder.id)}>+</button>
-                            <button class="icon-btn" title={t("sidebar.rename")} onclick={() => startRenameFolder(folder)}>{@render iconEdit()}</button>
-                            <button class="icon-btn" title={t("sidebar.deleteFolder")} onclick={() => deleteFolderAction(folder.id)}>{@render iconTrash()}</button>
-                          </div>
-                        {/if}
-                      </div>
-                      {#if expandedFolderIds.has(folder.id)}
-                        <ul class="request-list folder-request-list">
-                          {#each requestsByFolderId.get(folder.id) ?? [] as req (req.id)}
-                            {@render requestRow(req)}
-                          {:else}
-                            <li class="empty">{t("sidebar.noRequestsInFolder")}</li>
-                          {/each}
-                        </ul>
-                      {/if}
-                    </div>
+                  {#each rootFolders as folder (folder.id)}
+                    {@render folderNode(project, folder)}
                   {/each}
 
                   <ul class="request-list">
@@ -3706,39 +3850,65 @@
       {:else}
         <section class="detail">
           {#if openTabs.length > 0}
-            <div class="request-tabs-bar">
-              {#each openTabs as tab (tab.id)}
-                <div class="request-tab-pill" class:active={tab.id === selectedRequest?.id}>
-                  <button
-                    type="button"
-                    class="tab-pill-btn"
-                    onclick={() => openRequest(tab.id)}
-                    onmousedown={(e) => {
-                      if (e.button === 1) {
-                        e.preventDefault();
+            <div class="request-tabs-row">
+              <div class="request-tabs-bar">
+                {#each openTabs as tab (tab.id)}
+                  <div class="request-tab-pill" class:active={tab.id === selectedRequest?.id}>
+                    <button
+                      type="button"
+                      class="tab-pill-btn"
+                      onclick={() => openRequest(tab.id)}
+                      onmousedown={(e) => {
+                        if (e.button === 1) {
+                          e.preventDefault();
+                          closeTab(tab.id);
+                        }
+                      }}
+                    >
+                      <span class="tab-method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
+                      <span class="tab-title">{tab.name}</span>
+                      {#if isTabDirty(tab.id)}
+                        <span class="dirty-dot" title={t("tab.unsavedChanges")}>•</span>
+                      {/if}
+                    </button>
+                    <button
+                      type="button"
+                      class="tab-close-btn"
+                      title={t("tab.closeTab")}
+                      onclick={(e) => {
+                        e.stopPropagation();
                         closeTab(tab.id);
-                      }
-                    }}
-                  >
-                    <span class="tab-method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
-                    <span class="tab-title">{tab.name}</span>
-                    {#if isTabDirty(tab.id)}
-                      <span class="dirty-dot" title={t("tab.unsavedChanges")}>•</span>
-                    {/if}
-                  </button>
-                  <button
-                    type="button"
-                    class="tab-close-btn"
-                    title={t("tab.closeTab")}
-                    onclick={(e) => {
-                      e.stopPropagation();
-                      closeTab(tab.id);
-                    }}
-                  >
-                    {@render iconClose()}
-                  </button>
-                </div>
-              {/each}
+                      }}
+                    >
+                      {@render iconClose()}
+                    </button>
+                  </div>
+                {/each}
+              </div>
+              {#if openTabs.length > 8}
+                <details class="tab-overflow-menu">
+                  <summary class="tab-overflow-trigger" title={t("tab.allOpenTabs")}>
+                    {@render iconChevronDown()}<span>{openTabs.length}</span>
+                  </summary>
+                  <div class="tab-overflow-list">
+                    {#each openTabs as tab (tab.id)}
+                      <button
+                        type="button"
+                        class="tab-overflow-item"
+                        class:active={tab.id === selectedRequest?.id}
+                        onclick={(e) => {
+                          openRequest(tab.id);
+                          (e.currentTarget as HTMLElement).closest("details")?.removeAttribute("open");
+                        }}
+                      >
+                        <span class="method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
+                        <span class="request-name">{tab.name}</span>
+                        {#if isTabDirty(tab.id)}<span class="dirty-dot" title={t("tab.unsavedChanges")}>•</span>{/if}
+                      </button>
+                    {/each}
+                  </div>
+                </details>
+              {/if}
             </div>
           {/if}
 
@@ -3826,6 +3996,20 @@
                   {:else if autoSaveStatus === "error"}{t("request.saveFailed")}
                   {:else}{t("request.saved")}{/if}
                 </button>
+                <button
+                  type="button"
+                  class="icon-btn btn-code-toggle"
+                  class:active={rightSidebarVisible && rightPanel === "code"}
+                  title={t("bottom.codeSnippet")}
+                  onclick={() => {
+                    if (rightSidebarVisible && rightPanel === "code") {
+                      setRightSidebarVisible(false);
+                    } else {
+                      rightPanel = "code";
+                      setRightSidebarVisible(true);
+                    }
+                  }}
+                >&lt;/&gt;</button>
               </div>
             </div>
             <div class="request-bar-row secondary">
@@ -4336,7 +4520,11 @@
 
               <div class="response-subtab-content">
                 {#if responseSubTab === "body"}
-                  <pre class="body-view">{prettyResponseBody}</pre>
+                  {#if responseBodyIsJson}
+                    <pre class="body-view">{@html highlightedResponseBody}</pre>
+                  {:else}
+                    <pre class="body-view">{prettyResponseBody}</pre>
+                  {/if}
                   {#if activeResponseTruncated}
                     <p class="hint">{t("response.truncated")}</p>
                   {/if}
@@ -4417,25 +4605,40 @@
       {#if rightSidebarVisible}
         <aside class="right-sidebar">
           <div class="right-sidebar-header">
-            <button
-              type="button"
-              class="right-sidebar-tab"
-              class:active={rightPanel === "code"}
-              onclick={() => (rightPanel = rightPanel === "code" ? null : "code")}
-            >&lt;/&gt; {t("bottom.codeSnippet")}</button>
-            <button
-              type="button"
-              class="right-sidebar-tab"
-              class:active={rightPanel === "info"}
-              onclick={() => (rightPanel = rightPanel === "info" ? null : "info")}
-            >{@render iconInfo()} {t("bottom.info")}</button>
+            <span class="right-sidebar-title">
+              {#if rightPanel === "info"}{@render iconInfo()} {t("bottom.info")}{:else}&lt;/&gt; {t("bottom.codeSnippet")}{/if}
+            </span>
             <div class="response-stat-spacer"></div>
+            <button
+              type="button"
+              class="icon-btn"
+              class:active={rightPanel === "info"}
+              title={t("bottom.info")}
+              onclick={() => (rightPanel = rightPanel === "info" ? "code" : "info")}
+            >{@render iconInfo()}</button>
             <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => setRightSidebarVisible(false)}>{@render iconChevronRight()}</button>
           </div>
 
           {#if !selectedRequest}
             <p class="screen-empty-inline">{t("request.selectPrompt")}</p>
-          {:else if rightPanel === "code"}
+          {:else if rightPanel === "info"}
+            <div class="bottom-panel">
+              <dl class="info-list info-list-grid">
+                <dt>{t("bottom.id")}</dt>
+                <dd>{selectedRequest.id}</dd>
+                <dt>{t("bottom.projectId")}</dt>
+                <dd>{selectedRequest.project_id}</dd>
+                <dt>{t("bottom.created")}</dt>
+                <dd>{new Date(selectedRequest.created_at).toLocaleString()}</dd>
+                <dt>{t("bottom.updated")}</dt>
+                <dd>{new Date(selectedRequest.updated_at).toLocaleString()}</dd>
+                <dt>{t("bottom.headersCount")}</dt>
+                <dd>{selectedRequest.headers.length}</dd>
+                <dt>{t("bottom.queryParamsCount")}</dt>
+                <dd>{selectedRequest.query_params.length}</dd>
+              </dl>
+            </div>
+          {:else}
             <div class="bottom-panel">
               <div class="params-row">
                 <select bind:value={snippetTarget}>
@@ -4461,25 +4664,6 @@
                 <pre class="body-view bottom-panel-code">{snippet}</pre>
               {/if}
             </div>
-          {:else if rightPanel === "info"}
-            <div class="bottom-panel">
-              <dl class="info-list info-list-grid">
-                <dt>{t("bottom.id")}</dt>
-                <dd>{selectedRequest.id}</dd>
-                <dt>{t("bottom.projectId")}</dt>
-                <dd>{selectedRequest.project_id}</dd>
-                <dt>{t("bottom.created")}</dt>
-                <dd>{new Date(selectedRequest.created_at).toLocaleString()}</dd>
-                <dt>{t("bottom.updated")}</dt>
-                <dd>{new Date(selectedRequest.updated_at).toLocaleString()}</dd>
-                <dt>{t("bottom.headersCount")}</dt>
-                <dd>{selectedRequest.headers.length}</dd>
-                <dt>{t("bottom.queryParamsCount")}</dt>
-                <dd>{selectedRequest.query_params.length}</dd>
-              </dl>
-            </div>
-          {:else}
-            <p class="screen-empty-inline">{t("bottom.pickPanel")}</p>
           {/if}
         </aside>
       {:else}
@@ -4489,7 +4673,23 @@
   </div>
 
   {#if showConsole}
-    <div class="console-drawer">
+    <div
+      class="console-resize-handle"
+      class:resizing={consoleResizing}
+      onmousedown={startConsoleResize}
+      onkeydown={(e) => {
+        if (e.key === "ArrowUp") consoleHeight = Math.min(window.innerHeight - 160, consoleHeight + 16);
+        else if (e.key === "ArrowDown") consoleHeight = Math.max(120, consoleHeight - 16);
+      }}
+      role="slider"
+      aria-orientation="horizontal"
+      aria-label={t("console.resizeHandle")}
+      aria-valuenow={consoleHeight}
+      aria-valuemin={120}
+      aria-valuemax={900}
+      tabindex="0"
+    ></div>
+    <div class="console-drawer" style="height: {consoleHeight}px">
       <div class="console-header">
         <div class="console-title-group">
           <span class="console-title">{t("console.title")}</span>
@@ -4882,7 +5082,7 @@
                 </div>
               {/if}
               {#if aiTestError}
-                <div class="action-alert danger">
+                <div class="action-alert error">
                   <span>{@render iconXCircle()} {aiTestError}</span>
                 </div>
               {/if}
@@ -4980,16 +5180,26 @@
           <span class="env-screen-project-label">{t("env.project")}</span>
           {@render projectSwitcher()}
         </div>
+        <div class="request-search-box">
+          <input
+            type="search"
+            placeholder={t("env.searchEnvironments")}
+            bind:value={envSearchQuery}
+            class="request-search-input"
+          />
+        </div>
         <div class="env-screen-list">
-          <button
-            type="button"
-            class="env-screen-item"
-            class:active={!selectedEnvironmentId}
-            onclick={() => { selectedEnvironmentId = null; loadVariables(); }}
-          >
-            {t("env.noEnvironment")}
-          </button>
-          {#each environmentsByProject as [projectName, envs] (projectName)}
+          {#if !envSearchQuery}
+            <button
+              type="button"
+              class="env-screen-item"
+              class:active={!selectedEnvironmentId}
+              onclick={() => { selectedEnvironmentId = null; loadVariables(); }}
+            >
+              {t("env.noEnvironment")}
+            </button>
+          {/if}
+          {#each filteredEnvironmentsByProject as [projectName, envs] (projectName)}
             <div class="env-screen-group-label">{projectName}</div>
             {#each envs as env (env.id)}
               {#if renamingEnvironmentId === env.id}
@@ -5013,6 +5223,10 @@
                 </div>
               {/if}
             {/each}
+          {:else}
+            {#if envSearchQuery}
+              <p class="screen-empty-inline">{t("palette.noMatches")}</p>
+            {/if}
           {/each}
         </div>
       </aside>
@@ -5024,9 +5238,20 @@
         </div>
 
         <div class="screen-page-body">
-          <h4>{t("env.globalVariables", { count: projectVariables.length })}</h4>
+          <div class="request-search-box">
+            <input
+              type="search"
+              placeholder={t("env.searchVariables")}
+              bind:value={envVarSearchQuery}
+              class="request-search-input"
+            />
+            {#if envVarSearchQuery}
+              <span class="request-count-badge">{filteredProjectVariables.length + filteredEnvironmentVariables.length}/{projectVariables.length + environmentVariables.length}</span>
+            {/if}
+          </div>
+          <h4>{t("env.globalVariables", { count: filteredProjectVariables.length })}</h4>
           <div class="params-table">
-            {#each projectVariables as v (v.id)}
+            {#each filteredProjectVariables as v (v.id)}
               <div class="params-row">
                 <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} title={t("params.enabled")} />
                 <span class="var-key">{v.key}</span>
@@ -5073,9 +5298,9 @@
           </div>
 
           {#if selectedEnvironmentId}
-            <h4>{t("env.environmentVariables", { count: environmentVariables.length })}</h4>
+            <h4>{t("env.environmentVariables", { count: filteredEnvironmentVariables.length })}</h4>
             <div class="params-table">
-              {#each environmentVariables as v (v.id)}
+              {#each filteredEnvironmentVariables as v (v.id)}
                 <div class="params-row">
                   <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} title={t("params.enabled")} />
                   <span class="var-key">{v.key}</span>
@@ -5656,7 +5881,10 @@
     </div>
 
     {#if projects.length === 0}
-      <p class="screen-empty">{t("launcher.noProjects")}</p>
+      <div class="screen-empty">
+        <div class="empty-icon">{@render iconFolder()}</div>
+        <p>{t("launcher.noProjects")}</p>
+      </div>
     {:else}
       <div class="launcher-grid">
         {#each projects as p (p.id)}
@@ -5948,23 +6176,27 @@
 </div>
 
 <style>
-  /* "Modernist" design system: flat, architectural, near-mono red-on-off-white, a visible
+  /* "Modernist" design system: flat, architectural, off-white/off-black grounds, a visible
      modular grid, zero corner radius, strong 2px rules, Archivo throughout. Adopted wholesale
      (see the design-system export this was derived from) rather than layered on top of the
      app's previous dark Postman-style palette — every existing rule below still reads through
      these same custom-property names, so the remap alone repaints the whole app. Light is the
      system's own default (not an OS-follow); dark is a real, deliberate alternate palette
      toggled via `data-theme`, built from the same tonal ramps per the system's own guidance
-     ("dark inverts the ground and lifts the accent one ramp step"). */
+     ("dark inverts the ground and lifts the accent one ramp step").
+     Brand orange (--color-primary/--color-accent) is reserved for primary actions and the
+     active-nav mark only — it no longer doubles as danger or "no color" success, and HTTP
+     methods get their own hues (below) instead of staying flat ink, so a dense request list
+     stays scannable at the scale this app targets (thousands of requests). */
   @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap');
 
   :root {
     --color-bg: #f3f2f2;
-    --color-bg-secondary: #eae9e9;
-    --color-bg-tertiary: #eae7e7;
+    --color-bg-secondary: #e8e6e5;
+    --color-bg-tertiary: #dedbda;
     --color-bg-hover: color-mix(in srgb, #201e1d 7%, transparent);
     --color-sidebar-bg: #f3f2f2;
-    --color-panel-bg: #eae9e9;
+    --color-panel-bg: #e8e6e5;
     --color-border: #d7d3d3;
     --color-border-strong: color-mix(in srgb, #201e1d 40%, transparent);
     --color-text: #201e1d;
@@ -5976,24 +6208,34 @@
     --color-accent: #ec3013;
     --color-accent-hover: #dd2b0f;
     --color-accent-contrast: #f3f2f2;
-    --color-success: var(--color-text);
-    --color-success-bg: transparent;
-    --color-danger: #ec3013;
-    --color-danger-bg: #fff2ef;
-    --color-warn: #ae1800;
-    --color-warn-bg: #fff2ef;
+    --color-success: #1a7f37;
+    --color-success-bg: #eaf7ee;
+    --color-danger: #d1174a;
+    --color-danger-bg: #fdeef1;
+    --color-warn: #9a5b00;
+    --color-warn-bg: #fdf3e0;
     --color-focus: #ec3013;
 
-    /* The system deliberately does not color-code HTTP verbs (no rainbow GET/POST/etc.) —
-       method text is plain ink, and turns the accent only when its row/tab is active. */
-    --method-get: var(--color-text-secondary);
-    --method-post: var(--color-text-secondary);
-    --method-put: var(--color-text-secondary);
-    --method-patch: var(--color-text-secondary);
-    --method-delete: var(--color-text-secondary);
-    --method-head: var(--color-text-secondary);
-    --method-options: var(--color-text-secondary);
-    --method-trace: var(--color-text-secondary);
+    /* Each HTTP method gets its own hue so a dense request list is scannable at a glance.
+       GET/DELETE deliberately reuse --color-success/--color-danger (read=safe, delete=danger
+       are the same signal in both places); the rest fill out the set without inventing
+       unrelated colors. */
+    --method-get: var(--color-success);
+    --method-post: #9a6b00;
+    --method-put: #1c5fa8;
+    --method-patch: #0f7d8a;
+    --method-delete: var(--color-danger);
+    --method-head: #6b3fa0;
+    --method-options: #57606a;
+    --method-trace: #786c5a;
+
+    /* JSON response/body syntax highlighting — independent from the method/status palette above
+       so the two can evolve separately even though a couple of hues are shared by coincidence. */
+    --json-key: #0b5fb0;
+    --json-string: #1a7a35;
+    --json-number: #7a3d99;
+    --json-boolean: #0f7d8a;
+    --json-null: #767676;
 
     /* Tonal ramps (OKLCH-derived in the source system) — light steps (100-300) for tinted
        fills/hovers, 500 as a role's base, dark steps (700-900) for text on tinted fills. */
@@ -6022,6 +6264,21 @@
     --space-4: 16px;
     --space-6: 24px;
     --space-8: 32px;
+
+    /* Type scale — every font-size in this file resolves to one of these 9 steps (collapsed
+       down from ~22 ad hoc one-off values). Root font-size is 12.5px, not the browser's 16px
+       default, so these rem values render smaller than they'd look in a typical stylesheet —
+       intentional, matches the information-dense reference tools (VS Code, DevTools), not a
+       bug to "fix" by inflating the base size. */
+    --text-2xs: 0.65rem;
+    --text-xs: 0.7rem;
+    --text-sm: 0.76rem;
+    --text-base: 0.8rem;
+    --text-md: 0.9rem;
+    --text-lg: 1.05rem;
+    --text-xl: 1.3rem;
+    --text-2xl: 2rem;
+    --text-3xl: 2.5rem;
 
     --radius-sm: 0px;
     --radius-md: 0px;
@@ -6060,20 +6317,28 @@
     --color-accent: #ff563c;
     --color-accent-hover: #ff9783;
     --color-accent-contrast: #201e1d;
-    --color-danger: #ff563c;
-    --color-danger-bg: color-mix(in srgb, #ff563c 16%, transparent);
-    --color-warn: #ff9783;
-    --color-warn-bg: color-mix(in srgb, #ff563c 16%, transparent);
+    --color-success: #4ade80;
+    --color-success-bg: color-mix(in srgb, #4ade80 16%, transparent);
+    --color-danger: #ff5c86;
+    --color-danger-bg: color-mix(in srgb, #ff5c86 16%, transparent);
+    --color-warn: #f0b429;
+    --color-warn-bg: color-mix(in srgb, #f0b429 16%, transparent);
     --color-focus: #ff563c;
 
-    --method-get: var(--color-text-secondary);
-    --method-post: var(--color-text-secondary);
-    --method-put: var(--color-text-secondary);
-    --method-patch: var(--color-text-secondary);
-    --method-delete: var(--color-text-secondary);
-    --method-head: var(--color-text-secondary);
-    --method-options: var(--color-text-secondary);
-    --method-trace: var(--color-text-secondary);
+    --method-get: var(--color-success);
+    --method-post: #f0b429;
+    --method-put: #6cb6ff;
+    --method-patch: #5fd0e0;
+    --method-delete: var(--color-danger);
+    --method-head: #b98ff0;
+    --method-options: #9aa4af;
+    --method-trace: #b3a58c;
+
+    --json-key: #6cb6ff;
+    --json-string: #7ee08a;
+    --json-number: #c9a6f0;
+    --json-boolean: #5fd0e0;
+    --json-null: #9b9797;
 
     color-scheme: dark;
   }
@@ -6082,11 +6347,11 @@
      screen's comparison swatch) resets back to light even while the app itself is on dark. */
   [data-theme="light"] {
     --color-bg: #f3f2f2;
-    --color-bg-secondary: #eae9e9;
-    --color-bg-tertiary: #eae7e7;
+    --color-bg-secondary: #e8e6e5;
+    --color-bg-tertiary: #dedbda;
     --color-bg-hover: color-mix(in srgb, #201e1d 7%, transparent);
     --color-sidebar-bg: #f3f2f2;
-    --color-panel-bg: #eae9e9;
+    --color-panel-bg: #e8e6e5;
     --color-border: #d7d3d3;
     --color-border-strong: color-mix(in srgb, #201e1d 40%, transparent);
     --color-text: #201e1d;
@@ -6098,20 +6363,28 @@
     --color-accent: #ec3013;
     --color-accent-hover: #dd2b0f;
     --color-accent-contrast: #f3f2f2;
-    --color-danger: #ec3013;
-    --color-danger-bg: #fff2ef;
-    --color-warn: #ae1800;
-    --color-warn-bg: #fff2ef;
+    --color-success: #1a7f37;
+    --color-success-bg: #eaf7ee;
+    --color-danger: #d1174a;
+    --color-danger-bg: #fdeef1;
+    --color-warn: #9a5b00;
+    --color-warn-bg: #fdf3e0;
     --color-focus: #ec3013;
 
-    --method-get: var(--color-text-secondary);
-    --method-post: var(--color-text-secondary);
-    --method-put: var(--color-text-secondary);
-    --method-patch: var(--color-text-secondary);
-    --method-delete: var(--color-text-secondary);
-    --method-head: var(--color-text-secondary);
-    --method-options: var(--color-text-secondary);
-    --method-trace: var(--color-text-secondary);
+    --method-get: var(--color-success);
+    --method-post: #9a6b00;
+    --method-put: #1c5fa8;
+    --method-patch: #0f7d8a;
+    --method-delete: var(--color-danger);
+    --method-head: #6b3fa0;
+    --method-options: #57606a;
+    --method-trace: #786c5a;
+
+    --json-key: #0b5fb0;
+    --json-string: #1a7a35;
+    --json-number: #7a3d99;
+    --json-boolean: #0f7d8a;
+    --json-null: #767676;
 
     color-scheme: light;
   }
@@ -6165,7 +6438,7 @@
     padding: var(--space-4) var(--space-3) var(--space-3) var(--space-4);
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 0.95rem;
+    font-size: var(--text-md);
     letter-spacing: 0.02em;
     text-transform: uppercase;
     border-bottom: 2px solid var(--color-border-strong);
@@ -6193,7 +6466,7 @@
     border-left: 4px solid transparent;
     padding: 0.65rem var(--space-4);
     font-family: var(--font-sans);
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     color: var(--color-text);
     cursor: pointer;
   }
@@ -6204,7 +6477,7 @@
   }
 
   .rail-screen-icon {
-    font-size: 1rem;
+    font-size: var(--text-lg);
     flex: none;
   }
 
@@ -6234,7 +6507,7 @@
   }
 
   .rail-budget-label {
-    font-size: 0.62rem;
+    font-size: var(--text-2xs);
     font-weight: 600;
     letter-spacing: 0.09em;
     text-transform: uppercase;
@@ -6244,11 +6517,11 @@
   .rail-budget-value {
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 1.15rem;
+    font-size: var(--text-lg);
   }
 
   .rail-budget-meta {
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     color: var(--color-text-tertiary);
   }
 
@@ -6286,7 +6559,7 @@
 
   .screen-kicker {
     display: block;
-    font-size: 0.62rem;
+    font-size: var(--text-2xs);
     font-weight: 600;
     letter-spacing: 0.09em;
     text-transform: uppercase;
@@ -6302,38 +6575,46 @@
 
   .project-picker-select {
     font-family: var(--font-sans);
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .project-picker-select-sm {
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     padding: 0.25rem 0.4rem;
   }
 
   .screen-title {
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 1.8rem;
+    font-size: var(--text-2xl);
     line-height: 1.1;
     margin: 0;
   }
 
   .screen-subtitle {
-    font-size: 0.85rem;
+    font-size: var(--text-md);
     color: var(--color-text-secondary);
     max-width: 640px;
     margin-top: 4px;
   }
 
+  /* Same icon-over-message shape as .empty-state (main workspace/response empty states) — this
+     variant doesn't need flex:1 on a parent, since it centers its own content regardless of
+     what container it's dropped into (a screen-page section, not always a flex column). */
   .screen-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
     padding: var(--space-8) var(--space-6);
     color: var(--color-text-tertiary);
-    font-size: 0.85rem;
+    font-size: var(--text-md);
+    text-align: center;
   }
 
   .screen-empty-inline {
     color: var(--color-text-tertiary);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
   }
 
   .screen-page-body {
@@ -6377,7 +6658,7 @@
   }
 
   .env-screen-project-label {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -6400,7 +6681,7 @@
     border-bottom: 1px solid var(--color-border);
     padding: var(--space-3) var(--space-4);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     color: var(--color-text);
     cursor: pointer;
   }
@@ -6424,7 +6705,7 @@
 
   .env-screen-group-label {
     padding: var(--space-2) var(--space-3) 2px;
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
@@ -6510,19 +6791,19 @@
   .launcher-card-name {
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 1.1rem;
+    font-size: var(--text-lg);
     margin: 2px 0 4px;
   }
 
   .launcher-card-meta {
     display: flex;
     gap: var(--space-3);
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     color: var(--color-text-tertiary);
   }
 
   .history-toolbar-project-label {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -6546,7 +6827,7 @@
     background: var(--color-bg-secondary);
     padding: 0.4rem 0.6rem;
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     color: var(--color-text);
   }
 
@@ -6557,7 +6838,7 @@
   }
 
   .history-filter-chip {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     font-weight: 800;
     padding: 5px 10px;
     border: 1px solid var(--color-border);
@@ -6583,7 +6864,7 @@
 
   .history-header-row {
     flex: none;
-    font-size: 0.62rem;
+    font-size: var(--text-2xs);
     font-weight: 600;
     letter-spacing: 0.09em;
     text-transform: uppercase;
@@ -6604,7 +6885,7 @@
     border: none;
     border-bottom: 1px solid var(--color-border);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     color: var(--color-text);
     cursor: pointer;
   }
@@ -6614,14 +6895,14 @@
   }
 
   .history-method {
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     font-weight: 800;
     letter-spacing: 0.04em;
   }
 
   .history-path {
     font-family: var(--font-mono);
-    font-size: 0.74rem;
+    font-size: var(--text-sm);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -6640,7 +6921,7 @@
   .settings-screen-row-label {
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 0.95rem;
+    font-size: var(--text-md);
     margin-bottom: 2px;
   }
 
@@ -6652,7 +6933,7 @@
   .settings-screen-row-value {
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 0.9rem;
+    font-size: var(--text-md);
     color: var(--color-text-secondary);
   }
 
@@ -6661,7 +6942,7 @@
     grid-template-columns: 1fr auto;
     row-gap: 4px;
     column-gap: var(--space-3);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
   }
 
   .settings-screen-diagnostics-grid span {
@@ -6682,7 +6963,7 @@
     justify-content: center;
     gap: 6px;
     padding: 7px 12px;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     font-weight: 600;
     cursor: pointer;
     background: transparent;
@@ -6715,7 +6996,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     cursor: pointer;
   }
 
@@ -6725,7 +7006,7 @@
 
   .shortcut-keys {
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     padding: 2px 6px;
     border: 1px solid var(--color-border-strong);
     background: var(--color-bg-secondary);
@@ -6762,7 +7043,7 @@
   }
 
   .theme-active-badge {
-    font-size: 0.62rem;
+    font-size: var(--text-2xs);
     font-weight: 800;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -6792,7 +7073,7 @@
     border-bottom: 2px solid var(--color-border-strong);
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
@@ -6800,7 +7081,7 @@
   .theme-swatch-sync {
     background: var(--color-accent);
     color: var(--color-accent-contrast);
-    font-size: 0.62rem;
+    font-size: var(--text-2xs);
     padding: 3px 8px;
   }
 
@@ -6813,7 +7094,7 @@
     flex: none;
     border-right: 1px solid var(--color-border);
     padding: 0.9rem;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -6831,13 +7112,13 @@
 
   .theme-swatch-path {
     font-family: var(--font-mono);
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
   }
 
   .theme-swatch-status {
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 1.3rem;
+    font-size: var(--text-xl);
   }
 
   /* — Git screen: real 3-way conflict view — */
@@ -6854,7 +7135,7 @@
 
   .conflict-3way-pre {
     max-height: 220px;
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
   }
 
   /* — Response screen — */
@@ -6879,11 +7160,11 @@
   .response-screen-status {
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 2rem;
+    font-size: var(--text-2xl);
   }
 
   .response-screen-path {
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
     font-family: var(--font-mono);
     word-break: break-all;
@@ -6904,7 +7185,7 @@
   .response-screen-metric-value {
     font-family: var(--font-heading);
     font-weight: 800;
-    font-size: 1.1rem;
+    font-size: var(--text-lg);
   }
 
   .response-screen-tests {
@@ -6917,7 +7198,7 @@
   .response-screen-test-row {
     display: flex;
     gap: var(--space-3);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     padding: 4px 0;
     border-bottom: 1px solid var(--color-border);
   }
@@ -6968,7 +7249,7 @@
     border: none;
     background: transparent;
     font: inherit;
-    font-size: 1rem;
+    font-size: var(--text-lg);
     color: var(--color-text);
     outline: none;
   }
@@ -6989,7 +7270,7 @@
     border-bottom: 1px solid var(--color-border);
     padding: var(--space-3) var(--space-4);
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--text-md);
     cursor: pointer;
   }
 
@@ -7000,14 +7281,14 @@
   .palette-item-method {
     width: 48px;
     flex: none;
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     font-weight: 800;
     letter-spacing: 0.04em;
     color: var(--color-accent);
   }
 
   .palette-item-hint {
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     color: var(--color-text-tertiary);
   }
 
@@ -7015,7 +7296,7 @@
     display: flex;
     gap: var(--space-4);
     padding: var(--space-2) var(--space-4);
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     color: var(--color-text-tertiary);
   }
 
@@ -7028,7 +7309,7 @@
     border: 1px solid var(--color-border);
     padding: 0.4rem 0.7rem;
     font: inherit;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
     cursor: text;
     text-align: left;
@@ -7043,7 +7324,7 @@
   }
 
   .palette-kbd {
-    font-size: 0.62rem;
+    font-size: var(--text-2xs);
     font-weight: 800;
     border: 1px solid var(--color-border);
     padding: 1px 5px;
@@ -7063,7 +7344,7 @@
 
   .brand {
     font-weight: 700;
-    font-size: 0.95rem;
+    font-size: var(--text-md);
     color: var(--color-primary);
     white-space: nowrap;
   }
@@ -7095,7 +7376,7 @@
   /* ---------- Buttons & inputs ---------- */
   button {
     font-family: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     cursor: pointer;
     border: 1px solid var(--color-border);
     background: var(--color-bg);
@@ -7118,7 +7399,7 @@
   select,
   textarea {
     font-family: inherit;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     color: var(--color-text);
     background: var(--color-bg);
     border: 1px solid var(--color-border);
@@ -7163,7 +7444,7 @@
 
   .btn-xs {
     padding: 0.2rem 0.5rem;
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
   }
 
   .btn-xs.active {
@@ -7187,7 +7468,7 @@
   }
 
   .btn-save {
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     color: var(--color-text-tertiary);
     background: transparent;
     border: 1px solid var(--color-border-strong);
@@ -7254,6 +7535,11 @@
     color: var(--color-accent);
   }
 
+  .btn-code-toggle {
+    font-family: var(--font-mono);
+    font-weight: 700;
+  }
+
   .icon-btn-ghost {
     display: none;
   }
@@ -7267,7 +7553,7 @@
     justify-content: space-between;
     gap: 0.5rem;
     padding: 0.45rem 0.9rem;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     flex-shrink: 0;
   }
 
@@ -7318,7 +7604,7 @@
   }
 
   .missing-var-popover-portal input {
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   /* Highlights {{variables}} directly inside the URL bar, in place, instead of only in the
@@ -7345,7 +7631,7 @@
     pointer-events: none;
     padding: 0.35rem 0.55rem;
     font-family: var(--font-mono);
-    font-size: 0.82rem;
+    font-size: var(--text-base);
     color: var(--color-text);
   }
 
@@ -7381,18 +7667,18 @@
 
   .warn-inline {
     color: var(--color-warn);
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
   }
 
   .hint {
     color: var(--color-text-tertiary);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     padding: 0.2rem 0;
   }
 
   .error {
     color: var(--color-danger);
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   /* ---------- Workspace layout ---------- */
@@ -7444,7 +7730,7 @@
     border-right: 1px solid var(--color-border);
     color: var(--color-text-tertiary);
     cursor: pointer;
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
   }
 
   .sidebar-expand-btn:hover {
@@ -7453,7 +7739,7 @@
   }
 
   .sidebar-title {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -7604,7 +7890,7 @@
     border: none;
     text-align: left;
     padding: 0.4rem 0.5rem;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     color: var(--color-text);
     border-radius: var(--radius-sm);
     cursor: pointer;
@@ -7624,7 +7910,7 @@
   }
 
   .request-count-badge {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     color: var(--color-text-tertiary);
     white-space: nowrap;
   }
@@ -7673,13 +7959,13 @@
     border: none;
     text-align: left;
     padding: 0.3rem 0.1rem;
-    font-size: 0.82rem;
+    font-size: var(--text-base);
     font-weight: 500;
     color: var(--color-text);
     cursor: pointer;
   }
 
-  .folder-request-list {
+  .folder-children {
     padding: 0.1rem 0 0.2rem 1.1rem;
     border-left: 2px solid var(--color-border);
     margin-left: 0.5rem;
@@ -7715,7 +8001,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
   }
 
   .request-item:hover .icon-btn-ghost,
@@ -7735,7 +8021,7 @@
     border: none;
     color: var(--color-text-tertiary);
     cursor: pointer;
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
   }
 
   .sample-tree-list {
@@ -7784,7 +8070,7 @@
   .status-chip {
     flex: none;
     font-family: var(--font-mono);
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     font-weight: 700;
   }
 
@@ -7792,7 +8078,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.76rem;
+    font-size: var(--text-sm);
   }
 
   .request-pagination {
@@ -7801,13 +8087,13 @@
     justify-content: center;
     gap: 0.5rem;
     margin-top: 0.4rem;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     color: var(--color-text-secondary);
   }
 
   .empty {
     color: var(--color-text-tertiary);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     padding: 0.3rem 0.9rem;
     list-style: none;
   }
@@ -7818,7 +8104,7 @@
   .method,
   .method-select {
     font-weight: 700;
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     letter-spacing: 0.02em;
   }
 
@@ -7874,7 +8160,7 @@
   }
 
   .empty-icon {
-    font-size: 2.5rem;
+    font-size: var(--text-3xl);
     opacity: 0.5;
   }
 
@@ -7885,13 +8171,101 @@
   }
 
   /* ---------- Request tabs bar ---------- */
+  /* Wraps the scrollable tab strip plus the fixed "N tabs" overflow trigger, so the trigger
+     stays reachable once there are more open tabs than fit — a plain horizontal scrollbar alone
+     doesn't hold up once a workspace has 100+ open tabs. */
+  .request-tabs-row {
+    display: flex;
+    align-items: stretch;
+    background: var(--color-sidebar-bg);
+    border-bottom: 1px solid var(--color-border);
+  }
+
   .request-tabs-bar {
     display: flex;
+    flex: 1;
+    min-width: 0;
     gap: 0;
     padding: 0 0.4rem;
     overflow-x: auto;
-    background: var(--color-sidebar-bg);
-    border-bottom: 1px solid var(--color-border);
+  }
+
+  .tab-overflow-menu {
+    flex: none;
+    position: relative;
+    border-left: 1px solid var(--color-border);
+  }
+
+  .tab-overflow-trigger {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    height: 100%;
+    padding: 0 0.6rem;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+
+  .tab-overflow-trigger::-webkit-details-marker {
+    display: none;
+  }
+
+  .tab-overflow-trigger:hover {
+    color: var(--color-text);
+    background: var(--color-bg-hover);
+  }
+
+  .tab-overflow-menu[open] .tab-overflow-trigger {
+    color: var(--color-text);
+  }
+
+  .tab-overflow-list {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 20;
+    min-width: 240px;
+    max-width: 320px;
+    max-height: 420px;
+    overflow-y: auto;
+    background: var(--color-panel-bg);
+    border: 1px solid var(--color-border-strong);
+    box-shadow: var(--shadow-md);
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-1);
+  }
+
+  .tab-overflow-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 0.35rem 0.5rem;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .tab-overflow-item .request-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tab-overflow-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .tab-overflow-item.active {
+    background: var(--color-bg-hover);
+    font-weight: 600;
   }
 
   .request-tab-pill {
@@ -7935,13 +8309,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.76rem;
+    font-size: var(--text-sm);
     max-width: 110px;
   }
 
   .dirty-dot {
     color: var(--method-post);
-    font-size: 0.9rem;
+    font-size: var(--text-md);
     line-height: 0;
   }
 
@@ -7950,7 +8324,7 @@
     border: none;
     padding: 0.15rem 0.35rem;
     color: var(--color-text-tertiary);
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     opacity: 0;
   }
 
@@ -7969,7 +8343,7 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.5rem 0.9rem 0;
-    font-size: 0.76rem;
+    font-size: var(--text-sm);
     color: var(--color-text-tertiary);
   }
 
@@ -8000,7 +8374,7 @@
 
   .breadcrumb-edit-hint {
     opacity: 0;
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
   }
 
   .breadcrumb-current-btn:hover .breadcrumb-edit-hint {
@@ -8065,7 +8439,7 @@
   .url-input {
     flex: 1;
     font-family: var(--font-mono);
-    font-size: 0.82rem;
+    font-size: var(--text-base);
   }
 
   .send-action {
@@ -8075,7 +8449,7 @@
 
   .url-preview-bar {
     padding: 0.3rem 0.9rem;
-    font-size: 0.76rem;
+    font-size: var(--text-sm);
     color: var(--color-text-secondary);
     background: var(--color-bg-secondary);
     border-bottom: 1px solid var(--color-border);
@@ -8090,7 +8464,7 @@
     background: var(--color-bg-hover);
     padding: 0.05rem 0.3rem;
     border-radius: var(--radius-sm);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
   }
 
   /* ---------- Editor tab strip ---------- */
@@ -8102,12 +8476,19 @@
     overflow-x: auto;
   }
 
-  .editor-tab {
+  /* Shared "panel tab" grammar (.editor-tab and .response-subtab) — one consistent
+     treatment for tabs that switch a sub-view within an already-bounded panel, distinct from
+     .request-tab-pill's document-tab treatment (top border + background fill, for open
+     requests). Active state stays neutral text + a colored underline, not accent-tinted text —
+     matches how DevTools' own panel tabs (Elements/Console/Network) behave. */
+  .editor-tab,
+  .response-subtab {
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
     border-radius: 0;
-    padding: 0.55rem 0.1rem;
+    padding: 0.5rem 0.7rem;
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
     font-weight: 500;
     display: flex;
@@ -8116,21 +8497,23 @@
     white-space: nowrap;
   }
 
-  .editor-tab:hover {
-    background: none;
+  .editor-tab.active,
+  .response-subtab.active {
     color: var(--color-text);
+    border-bottom-color: var(--color-accent);
+    font-weight: 600;
   }
 
-  .editor-tab.active {
-    color: var(--color-primary);
-    border-bottom-color: var(--color-primary);
-    font-weight: 700;
+  .editor-tab:hover,
+  .response-subtab:hover {
+    background: none;
+    color: var(--color-text);
   }
 
   .tab-badge {
     background: var(--color-bg-hover);
     color: var(--color-text-secondary);
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     font-weight: 700;
     border-radius: 999px;
     padding: 0.05rem 0.4rem;
@@ -8139,7 +8522,7 @@
   .tab-badge-warn {
     background: var(--color-warn-bg);
     color: var(--color-warn);
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     font-weight: 700;
     border-radius: 999px;
     padding: 0.05rem 0.4rem;
@@ -8257,29 +8640,18 @@
     border-bottom: 2px solid var(--color-border-strong);
   }
 
-  .right-sidebar-tab {
+  /* Code is the sidebar's one real feature now (Info is a small icon toggle beside it, not an
+     equal-weight tab) — a static label reads better here than a tab control with only one
+     meaningful state. */
+  .right-sidebar-title {
     display: flex;
     align-items: center;
     gap: 0.3rem;
     padding: 0.35rem 0.6rem;
-    border: none;
-    background: transparent;
-    color: var(--color-text-secondary);
-    font-size: 0.78rem;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .right-sidebar-tab:hover {
-    background: var(--color-bg-hover);
     color: var(--color-text);
-  }
-
-  .right-sidebar-tab.active {
-    background: var(--color-bg-hover);
-    color: var(--color-accent);
+    font-size: var(--text-base);
     font-weight: 700;
+    white-space: nowrap;
   }
 
   .bottom-panel {
@@ -8308,13 +8680,13 @@
     grid-template-columns: auto;
     row-gap: 0.5rem;
     margin: 0;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
   }
 
   .info-list dt {
     color: var(--color-text-tertiary);
     text-transform: uppercase;
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     letter-spacing: 0.03em;
     margin-bottom: 0.1rem;
   }
@@ -8329,7 +8701,7 @@
      feature sections not yet given their own class) inherits the same muted label style
      as the rest of the system instead of a jarring browser-default heading. */
   .detail h3 {
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--color-text-tertiary);
@@ -8368,7 +8740,7 @@
     display: flex;
     align-items: center;
     gap: 0.3rem;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     white-space: nowrap;
   }
 
@@ -8380,7 +8752,7 @@
   .body-input {
     width: 100%;
     font-family: var(--font-mono);
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     resize: vertical;
   }
 
@@ -8392,7 +8764,7 @@
 
   .graphql-editor h4,
   .params-table h4 {
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--color-text-tertiary);
@@ -8409,12 +8781,12 @@
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .settings-row span {
     color: var(--color-text-secondary);
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
   }
 
   .var-key {
@@ -8426,13 +8798,13 @@
     flex: 1;
     color: var(--color-text-secondary);
     font-family: var(--font-mono);
-    font-size: 0.76rem;
+    font-size: var(--text-sm);
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
   .badge {
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     background: var(--color-bg-hover);
     color: var(--color-text-secondary);
     border-radius: 999px;
@@ -8456,7 +8828,7 @@
     gap: 0.5rem;
     padding: 1rem 0.9rem;
     color: var(--color-text-secondary);
-    font-size: 0.82rem;
+    font-size: var(--text-base);
     border-top: 1px solid var(--color-border);
   }
 
@@ -8493,18 +8865,18 @@
 
   .response-stat-status {
     font-weight: 700;
-    font-size: 0.85rem;
+    font-size: var(--text-md);
   }
 
   .response-stat-item {
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
   }
 
   .response-stat-label {
     color: var(--color-text-tertiary);
     text-transform: uppercase;
-    font-size: 0.66rem;
+    font-size: var(--text-2xs);
     letter-spacing: 0.03em;
     margin-right: 0.2rem;
   }
@@ -8523,27 +8895,8 @@
     border-bottom: 1px solid var(--color-border);
   }
 
-  .response-subtab {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    padding: 0.4rem 0.7rem;
-    font-size: 0.78rem;
-    color: var(--color-text-secondary);
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-  }
-
-  .response-subtab:hover {
-    color: var(--color-text);
-  }
-
-  .response-subtab.active {
-    color: var(--color-text);
-    border-bottom-color: var(--color-primary);
-    font-weight: 600;
-  }
+  /* .response-subtab base + hover + active styles live with .editor-tab above (shared panel-tab
+     grammar). */
 
   .response-subtab-content {
     padding-top: 0.6rem;
@@ -8562,7 +8915,7 @@
     border: none;
     background: none;
     padding: 0.2rem 0.6rem;
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     border-radius: var(--radius-sm);
   }
 
@@ -8585,7 +8938,7 @@
     display: flex;
     align-items: baseline;
     gap: 0.5rem;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     padding: 0.25rem 0;
   }
 
@@ -8605,7 +8958,7 @@
   .test-result-error {
     color: var(--color-danger);
     font-family: var(--font-mono);
-    font-size: 0.74rem;
+    font-size: var(--text-sm);
   }
 
   .headers-list {
@@ -8616,7 +8969,7 @@
   }
 
   .header-line {
-    font-size: 0.76rem;
+    font-size: var(--text-sm);
     font-family: var(--font-mono);
     display: flex;
     gap: 0.4rem;
@@ -8629,13 +8982,19 @@
     border-radius: var(--radius-md);
     padding: 0.7rem;
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     max-height: 420px;
     overflow: auto;
     white-space: pre-wrap;
     word-break: break-word;
     margin: 0;
   }
+
+  .json-key { color: var(--json-key); }
+  .json-string { color: var(--json-string); }
+  .json-number { color: var(--json-number); }
+  .json-boolean { color: var(--json-boolean); }
+  .json-null { color: var(--json-null); font-style: italic; }
 
   .response-history-list {
     list-style: none;
@@ -8656,7 +9015,7 @@
     text-align: left;
     padding: 0.35rem 0.2rem;
     color: var(--color-text);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     cursor: pointer;
   }
 
@@ -8669,12 +9028,39 @@
 
   /* ---------- Console drawer ---------- */
   .console-drawer {
-    height: 260px;
     flex-shrink: 0;
     border-top: 1px solid var(--color-border);
     background: var(--color-bg-secondary);
     display: flex;
     flex-direction: column;
+    min-height: 120px;
+  }
+
+  .console-resize-handle {
+    flex: none;
+    height: 7px;
+    margin: -3px 0;
+    background: transparent;
+    cursor: row-resize;
+    position: relative;
+    z-index: 1;
+  }
+
+  .console-resize-handle::before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--color-border);
+  }
+
+  .console-resize-handle:hover::before,
+  .console-resize-handle.resizing::before {
+    top: 2px;
+    height: 3px;
+    background: var(--color-accent);
   }
 
   .console-header {
@@ -8695,11 +9081,11 @@
 
   .console-title {
     font-weight: 700;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .console-count-badge {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     color: var(--color-text-tertiary);
   }
 
@@ -8712,7 +9098,7 @@
 
   .console-select,
   .console-search {
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     padding: 0.25rem 0.4rem;
   }
 
@@ -8720,14 +9106,14 @@
     display: flex;
     align-items: center;
     gap: 0.25rem;
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     color: var(--color-text-secondary);
     white-space: nowrap;
   }
 
   .console-btn,
   .console-close-btn {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     padding: 0.25rem 0.5rem;
   }
 
@@ -8740,7 +9126,7 @@
   .console-empty {
     padding: 1rem;
     color: var(--color-text-tertiary);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     font-family: var(--font-sans);
   }
 
@@ -8761,7 +9147,7 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.25rem 0.7rem;
-    font-size: 0.74rem;
+    font-size: var(--text-sm);
     cursor: pointer;
   }
 
@@ -8813,7 +9199,7 @@
   }
 
   .console-mini-btn {
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     padding: 0.15rem 0.4rem;
   }
 
@@ -8822,7 +9208,7 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
     padding: 0.5rem;
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     max-height: 200px;
     overflow: auto;
     margin: 0;
@@ -8837,7 +9223,7 @@
     background: var(--color-bg-secondary);
     border-top: 1px solid var(--color-border);
     flex-shrink: 0;
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
   }
 
   .console-toggle-btn {
@@ -8848,7 +9234,7 @@
     gap: 0.4rem;
     padding: 0.15rem 0.4rem;
     color: var(--color-text-secondary);
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
   }
 
   .console-toggle-btn.active {
@@ -8861,7 +9247,7 @@
     color: #fff;
     border-radius: 999px;
     padding: 0 0.35rem;
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
   }
 
   .status-badge-warn {
@@ -8869,7 +9255,7 @@
     color: #fff;
     border-radius: 999px;
     padding: 0 0.35rem;
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
   }
 
   .status-right {
@@ -8917,7 +9303,7 @@
 
   .modal-header h3 {
     margin: 0;
-    font-size: 0.95rem;
+    font-size: var(--text-md);
   }
 
   .file-dropzone {
@@ -8932,7 +9318,7 @@
     flex-direction: column;
     gap: 0.3rem;
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
   }
 
@@ -8940,7 +9326,7 @@
     background: var(--color-success-bg);
     border-radius: var(--radius-md);
     padding: 0.6rem 0.8rem;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .import-report-card h4 {
@@ -8949,7 +9335,7 @@
 
   .warnings-box {
     margin-top: 0.4rem;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
   }
 
   .warnings-box h5 {
@@ -9000,7 +9386,7 @@
   }
 
   .modal-sub {
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     color: var(--color-text-tertiary);
     font-weight: 400;
   }
@@ -9009,7 +9395,7 @@
     background: none;
     border: none;
     color: var(--color-text-tertiary);
-    font-size: 0.85rem;
+    font-size: var(--text-md);
     padding: 0.15rem 0.4rem;
     border-radius: var(--radius-sm);
   }
@@ -9055,7 +9441,7 @@
   .tab-badge-alert {
     background: var(--color-danger);
     color: #fff;
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     font-weight: 700;
     border-radius: 999px;
     padding: 0.05rem 0.4rem;
@@ -9078,7 +9464,7 @@
   .action-alert {
     padding: 0.4rem 0.7rem;
     border-radius: var(--radius-md);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -9113,7 +9499,7 @@
     border: 1px solid var(--color-border);
     border-radius: 999px;
     padding: 0.1rem 0.6rem;
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     color: var(--color-text-secondary);
   }
 
@@ -9161,12 +9547,12 @@
 
   .git-panel-section h4 {
     margin: 0.2rem 0 0;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .git-panel-section h5 {
     margin: 0.2rem 0;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
   }
 
   .form-row-stacked {
@@ -9176,7 +9562,7 @@
   }
 
   .form-row-stacked label {
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     color: var(--color-text-secondary);
   }
 
@@ -9198,7 +9584,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .git-status-card {
@@ -9214,13 +9600,13 @@
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     flex-wrap: wrap;
   }
 
   .status-label {
     color: var(--color-text-tertiary);
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
   }
 
   .status-sep {
@@ -9228,7 +9614,7 @@
   }
 
   .git-badge-kind {
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     font-weight: 700;
     padding: 0.05rem 0.4rem;
     border-radius: var(--radius-sm);
@@ -9243,7 +9629,7 @@
 
   .badge-ahead,
   .badge-behind {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     font-weight: 600;
     color: var(--color-warn);
     background: var(--color-warn-bg);
@@ -9259,14 +9645,14 @@
 
   .file-category {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     color: var(--color-text-secondary);
   }
 
   .working-tree-clean {
     margin: 0;
     color: var(--color-success);
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .git-commit-box {
@@ -9294,7 +9680,7 @@
     background: none;
     border: none;
     color: var(--color-text-secondary);
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     padding: 0.2rem 0.3rem;
   }
 
@@ -9326,7 +9712,7 @@
     color: var(--color-danger);
     border-radius: var(--radius-md);
     padding: 0.5rem 0.7rem;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .conflict-alert-box p { margin: 0; }
@@ -9353,7 +9739,7 @@
 
   .conflict-filename {
     font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-size: var(--text-base);
     font-weight: 600;
   }
 
@@ -9363,7 +9749,7 @@
   }
 
   .btn-choice {
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
   }
 
   .btn-choice.local {
@@ -9401,7 +9787,7 @@
   .badge-success {
     background: var(--color-success-bg);
     color: var(--color-success);
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     font-weight: 600;
     border-radius: 999px;
     padding: 0.1rem 0.5rem;
@@ -9421,7 +9807,7 @@
   }
 
   .perm-badge {
-    font-size: 0.7rem;
+    font-size: var(--text-xs);
     padding: 0.1rem 0.5rem;
     border-radius: 999px;
     background: var(--color-danger-bg);
@@ -9449,7 +9835,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     color: var(--color-text-secondary);
   }
 
@@ -9462,7 +9848,7 @@
   .diff-viewer {
     width: 100%;
     font-family: var(--font-mono);
-    font-size: 0.76rem;
+    font-size: var(--text-sm);
   }
 
   .diff-viewer {
@@ -9495,7 +9881,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
   }
 
   .commit-hash {
@@ -9513,7 +9899,7 @@
 
   .commit-msg {
     margin: 0.2rem 0 0;
-    font-size: 0.78rem;
+    font-size: var(--text-base);
   }
 
   /* ---------- Phase 08: AI & Source Intelligence Styles ---------- */
@@ -9560,7 +9946,7 @@
     border: none;
     border-left: 3px solid transparent;
     padding: var(--space-2) var(--space-2);
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     font-weight: 600;
     color: var(--color-text-secondary);
     cursor: pointer;
@@ -9591,7 +9977,7 @@
   }
 
   .action-feedback-inline {
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     color: var(--color-primary);
     margin: 0.2rem 0;
     font-weight: 500;
@@ -9629,7 +10015,7 @@
     padding: 0.4rem 0.6rem;
     cursor: pointer;
     user-select: none;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
   }
 
   .sample-name {
@@ -9640,7 +10026,7 @@
   .badge-sample {
     background: color-mix(in srgb, var(--color-primary) 15%, transparent);
     color: var(--color-primary);
-    font-size: 0.65rem;
+    font-size: var(--text-2xs);
     font-weight: 700;
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
@@ -9649,7 +10035,7 @@
   .badge-framework {
     background: color-mix(in srgb, #3b82f6 20%, transparent);
     color: #3b82f6;
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     font-weight: 600;
     padding: 0.1rem 0.45rem;
     border-radius: 999px;
@@ -9658,7 +10044,7 @@
   .badge-openapi {
     background: color-mix(in srgb, #10b981 20%, transparent);
     color: #10b981;
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     font-weight: 600;
     padding: 0.1rem 0.45rem;
     border-radius: 999px;
@@ -9667,7 +10053,7 @@
   .badge-auth {
     background: color-mix(in srgb, #f59e0b 20%, transparent);
     color: #f59e0b;
-    font-size: 0.68rem;
+    font-size: var(--text-xs);
     padding: 0.1rem 0.35rem;
     border-radius: 999px;
   }
@@ -9679,7 +10065,7 @@
     cursor: pointer;
     padding: 0.1rem 0.3rem;
     border-radius: var(--radius-sm);
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
   }
 
   .btn-delete-icon:hover {
@@ -9721,12 +10107,12 @@
 
   .preview-name {
     font-weight: 700;
-    font-size: 0.9rem;
+    font-size: var(--text-md);
   }
 
   .preview-url {
     font-family: monospace;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     color: var(--color-text-secondary);
   }
 
@@ -9737,14 +10123,14 @@
   .preview-meta-row {
     display: flex;
     gap: 1rem;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     color: var(--color-text-secondary);
   }
 
   .preview-body-pre {
     max-height: 180px;
     overflow: auto;
-    font-size: 0.75rem;
+    font-size: var(--text-sm);
     padding: 0.5rem;
     background: var(--color-bg);
     border: 1px solid var(--color-border);
@@ -9807,7 +10193,7 @@
 
   .ep-path {
     font-family: monospace;
-    font-size: 0.8rem;
+    font-size: var(--text-base);
     font-weight: 600;
   }
 
@@ -9815,7 +10201,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.1rem;
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     color: var(--color-text-tertiary);
     flex: 1;
     overflow: hidden;
@@ -9833,7 +10219,7 @@
 
   .btn-xs-primary {
     padding: 0.15rem 0.45rem;
-    font-size: 0.72rem;
+    font-size: var(--text-xs);
     font-weight: 600;
     background: var(--color-primary);
     color: white;

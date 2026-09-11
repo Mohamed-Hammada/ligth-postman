@@ -191,6 +191,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
         CREATE INDEX idx_folders_project_id ON folders(project_id);
         ALTER TABLE requests ADD COLUMN folder_id TEXT;",
     ),
+    (
+        14,
+        // Nested folders: a folder may now sit inside another folder (unlimited depth), not just
+        // directly under the project. No DB-level FK on parent_folder_id for the same ALTER-table
+        // reason as migration 12 above — folder_store::delete_folder reparents/clears this in
+        // application code instead.
+        "ALTER TABLE folders ADD COLUMN parent_folder_id TEXT;
+        CREATE INDEX idx_folders_parent_folder_id ON folders(parent_folder_id);",
+    ),
 ];
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {

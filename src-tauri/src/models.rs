@@ -600,14 +600,19 @@ pub struct Folder {
     pub id: String,
     pub project_id: String,
     pub name: String,
+    /// The folder this one is nested under, or `None` for a folder that sits directly under
+    /// the project root. Always points at another folder in the same `project_id`.
+    pub parent_folder_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewFolderInput {
     pub project_id: String,
     pub name: String,
+    #[serde(default)]
+    pub parent_folder_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

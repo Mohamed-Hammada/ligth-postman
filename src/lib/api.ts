@@ -79,6 +79,7 @@ export interface Folder {
   id: string;
   project_id: string;
   name: string;
+  parent_folder_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -86,6 +87,7 @@ export interface Folder {
 export interface NewFolderInput {
   project_id: string;
   name: string;
+  parent_folder_id?: string | null;
 }
 
 export interface UpdateFolderInput {

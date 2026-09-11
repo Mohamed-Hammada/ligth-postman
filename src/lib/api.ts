@@ -789,6 +789,7 @@ export interface LocalWorkspaceImportReport {
   projects_created: number;
   folders_created: number;
   requests_imported: number;
+  samples_imported: number;
   environments_imported: number;
   variables_imported: number;
   warnings: string[];

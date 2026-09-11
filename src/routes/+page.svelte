@@ -5576,6 +5576,7 @@
             <p>{t("import.localWorkspaceProjects", { count: localWorkspaceImportReport.projects_created })}</p>
             <p>{t("import.localWorkspaceFolders", { count: localWorkspaceImportReport.folders_created })}</p>
             <p>{t("import.requests", { count: localWorkspaceImportReport.requests_imported })}</p>
+            <p>{t("import.localWorkspaceSamples", { count: localWorkspaceImportReport.samples_imported })}</p>
             <p>{t("import.localWorkspaceEnvironments", { count: localWorkspaceImportReport.environments_imported })}</p>
             <p>{t("import.variables", { count: localWorkspaceImportReport.variables_imported })}</p>
             {#if localWorkspaceImportReport.warnings.length > 0}
@@ -6375,6 +6376,15 @@
     align-items: center;
     border-left: 4px solid transparent;
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .env-screen-group-label {
+    padding: var(--space-2) var(--space-3) 2px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-text-tertiary);
   }
 
   .env-screen-item-row:hover {

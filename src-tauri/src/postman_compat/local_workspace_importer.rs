@@ -14,8 +14,8 @@ use serde_yaml::Value as Yaml;
 use crate::error::AppError;
 use crate::models::{
     ApiKeyLocation, Auth, FormDataPart, HeaderEntry, NewEnvironmentInput, NewFolderInput,
-    NewProjectInput, NewRequestInput, NewVariableInput, QueryParam, RequestBody, UrlEncodedItem,
-    VariableScope, VALID_METHODS,
+    NewProjectInput, NewRequestInput, NewSampleResponseInput, NewVariableInput, QueryParam,
+    RequestBody, UrlEncodedItem, VariableScope, VALID_METHODS,
 };
 use crate::store::{environment_store, folder_store, project_store, request_store, variable_store};
 
@@ -24,6 +24,7 @@ pub struct LocalWorkspaceImportReport {
     pub projects_created: usize,
     pub folders_created: usize,
     pub requests_imported: usize,
+    pub samples_imported: usize,
     pub environments_imported: usize,
     pub variables_imported: usize,
     pub warnings: Vec<String>,
@@ -77,6 +78,7 @@ pub fn import_local_workspace(
     let mut projects_created = 0usize;
     let mut folders_created = 0usize;
     let mut requests_imported = 0usize;
+    let mut samples_imported = 0usize;
     let mut environments_imported = 0usize;
     let mut variables_imported = 0usize;
 
@@ -116,6 +118,7 @@ pub fn import_local_workspace(
                     &mut folder_cache,
                     &mut folders_created,
                     &mut requests_imported,
+                    &mut samples_imported,
                     &mut warnings,
                 );
             }
@@ -239,9 +242,7 @@ pub fn import_local_workspace(
     }
 
     warnings.push(
-        "Saved example responses in the source workspace were not imported — only live request \
-         definitions, folders, and environments. Nested Postman folders were flattened into \
-         single-level folders named e.g. 'Parent / Child'."
+        "Nested Postman folders were flattened into single-level folders named e.g. 'Parent / Child'."
             .to_string(),
     );
 
@@ -249,6 +250,7 @@ pub fn import_local_workspace(
         projects_created,
         folders_created,
         requests_imported,
+        samples_imported,
         environments_imported,
         variables_imported,
         warnings,
@@ -264,6 +266,7 @@ fn import_collection_dir(
     folder_cache: &mut HashMap<String, String>,
     folders_created: &mut usize,
     requests_imported: &mut usize,
+    samples_imported: &mut usize,
     warnings: &mut Vec<String>,
 ) {
     let entries = match fs::read_dir(dir) {
@@ -276,39 +279,196 @@ fn import_collection_dir(
     let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).collect();
     sorted.sort_by_key(|e| e.file_name());
 
-    for entry in sorted {
+    // Pass 1: create every request directly in this directory first, keyed by its filename
+    // stem — `.resources/<stem>.resources/examples/*.example.yaml` (pass 2 below) references
+    // requests by that same stem, not by whatever the request's own internal `name:` says.
+    let mut request_ids_by_stem: HashMap<String, String> = HashMap::new();
+    let mut resources_dir: Option<std::path::PathBuf> = None;
+    let mut subdirs: Vec<(std::path::PathBuf, String)> = Vec::new();
+
+    for entry in &sorted {
         let path = entry.path();
         let file_name = entry.file_name().to_string_lossy().to_string();
 
         if path.is_dir() {
-            // `.resources` holds per-request metadata/examples, not a real Postman folder.
             if file_name == ".resources" {
-                continue;
-            }
-            let child_path = if folder_path.is_empty() {
-                file_name.clone()
+                resources_dir = Some(path);
             } else {
-                format!("{folder_path} / {file_name}")
-            };
-            import_collection_dir(
-                conn,
-                &path,
-                project_id,
-                &child_path,
-                folder_cache,
-                folders_created,
-                requests_imported,
-                warnings,
-            );
+                subdirs.push((path, file_name));
+            }
         } else if file_name.ends_with(".request.yaml") || file_name.ends_with(".request.yml") {
+            let stem = file_name
+                .strip_suffix(".request.yaml")
+                .or_else(|| file_name.strip_suffix(".request.yml"))
+                .unwrap_or(&file_name)
+                .to_string();
             let folder_id = if folder_path.is_empty() {
                 None
             } else {
                 get_or_create_folder(conn, project_id, folder_path, folder_cache, folders_created, warnings)
             };
-            import_request_file(conn, &path, project_id, folder_id, requests_imported, warnings);
+            if let Some(id) = import_request_file(conn, &path, project_id, folder_id, requests_imported, warnings) {
+                request_ids_by_stem.insert(stem, id);
+            }
         }
-        // `.example.yaml` files (saved sample responses) are intentionally not imported here.
+    }
+
+    // Pass 2: saved example responses, one `.resources/<stem>.resources/examples/` dir per request.
+    if let Some(resources_dir) = resources_dir {
+        import_examples_in_resources_dir(conn, &resources_dir, &request_ids_by_stem, samples_imported, warnings);
+    }
+
+    // Pass 3: recurse into real Postman sub-folders.
+    for (path, file_name) in subdirs {
+        let child_path = if folder_path.is_empty() {
+            file_name
+        } else {
+            format!("{folder_path} / {file_name}")
+        };
+        import_collection_dir(
+            conn,
+            &path,
+            project_id,
+            &child_path,
+            folder_cache,
+            folders_created,
+            requests_imported,
+            samples_imported,
+            warnings,
+        );
+    }
+}
+
+fn import_examples_in_resources_dir(
+    conn: &Connection,
+    resources_dir: &Path,
+    request_ids_by_stem: &HashMap<String, String>,
+    samples_imported: &mut usize,
+    warnings: &mut Vec<String>,
+) {
+    let entries = match fs::read_dir(resources_dir) {
+        Ok(e) => e,
+        Err(err) => {
+            warnings.push(format!("Could not read {}: {err}", resources_dir.display()));
+            return;
+        }
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().to_string();
+        let Some(request_stem) = dir_name.strip_suffix(".resources") else { continue };
+        let Some(request_id) = request_ids_by_stem.get(request_stem) else { continue };
+
+        let examples_dir = path.join("examples");
+        if !examples_dir.is_dir() {
+            continue;
+        }
+        let mut example_files: Vec<_> = match fs::read_dir(&examples_dir) {
+            Ok(e) => e.filter_map(|e| e.ok()).collect(),
+            Err(err) => {
+                warnings.push(format!("Could not read {}: {err}", examples_dir.display()));
+                continue;
+            }
+        };
+        example_files.sort_by_key(|e| e.file_name());
+
+        for example_entry in example_files {
+            let example_path = example_entry.path();
+            let example_name_raw = example_entry.file_name().to_string_lossy().to_string();
+            if !example_name_raw.ends_with(".example.yaml") && !example_name_raw.ends_with(".example.yml") {
+                continue;
+            }
+            import_example_file(conn, &example_path, request_id, request_stem, samples_imported, warnings);
+        }
+    }
+}
+
+fn import_example_file(
+    conn: &Connection,
+    path: &Path,
+    request_id: &str,
+    request_stem: &str,
+    samples_imported: &mut usize,
+    warnings: &mut Vec<String>,
+) {
+    let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let example_name = file_name
+        .strip_suffix(".example.yaml")
+        .or_else(|| file_name.strip_suffix(".example.yml"))
+        .unwrap_or(&file_name)
+        .to_string();
+
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(err) => {
+            warnings.push(format!("Could not read example '{example_name}' for '{request_stem}': {err}"));
+            return;
+        }
+    };
+    let doc: Yaml = match serde_yaml::from_str(&content) {
+        Ok(d) => d,
+        Err(err) => {
+            warnings.push(format!("Skipped example '{example_name}' for '{request_stem}': invalid YAML ({err})"));
+            return;
+        }
+    };
+
+    let kind = yaml_get(&doc, "$kind").and_then(|v| v.as_str()).unwrap_or("http-example");
+    if kind != "http-example" {
+        warnings.push(format!("Skipped example '{example_name}': unsupported kind '{kind}'."));
+        return;
+    }
+
+    let Some(response) = yaml_get(&doc, "response") else {
+        warnings.push(format!("Skipped example '{example_name}' for '{request_stem}': no saved response."));
+        return;
+    };
+
+    let status = yaml_get(response, "statusCode").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
+    let status_text = yaml_get(response, "statusText").and_then(|v| v.as_str()).unwrap_or("OK").to_string();
+
+    let mut headers = Vec::new();
+    let mut content_type = None;
+    if let Some(seq) = yaml_get(response, "headers").and_then(|v| v.as_sequence()) {
+        for item in seq {
+            let Some(key) = yaml_get(item, "key").and_then(|v| v.as_str()) else { continue };
+            if key.trim().is_empty() {
+                continue;
+            }
+            let value = yaml_scalar_to_string(yaml_get(item, "value"));
+            if key.eq_ignore_ascii_case("content-type") {
+                content_type = Some(value.clone());
+            }
+            headers.push(HeaderEntry {
+                key: key.to_string(),
+                value,
+                enabled: true,
+                description: None,
+            });
+        }
+    }
+
+    let body = yaml_get(response, "body").and_then(|b| yaml_get(b, "content")).and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let outcome = request_store::create_sample_response(
+        conn,
+        NewSampleResponseInput {
+            request_id: request_id.to_string(),
+            name: example_name.clone(),
+            status,
+            status_text,
+            headers,
+            body,
+            content_type,
+        },
+    );
+    match outcome {
+        Ok(_) => *samples_imported += 1,
+        Err(err) => warnings.push(format!("Could not import example '{example_name}' for '{request_stem}': {err}")),
     }
 }
 
@@ -346,7 +506,7 @@ fn import_request_file(
     folder_id: Option<String>,
     requests_imported: &mut usize,
     warnings: &mut Vec<String>,
-) {
+) -> Option<String> {
     let file_stem = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let name_from_file = file_stem
         .strip_suffix(".request.yaml")
@@ -358,21 +518,21 @@ fn import_request_file(
         Ok(c) => c,
         Err(err) => {
             warnings.push(format!("Could not read '{name_from_file}': {err}"));
-            return;
+            return None;
         }
     };
     let doc: Yaml = match serde_yaml::from_str(&content) {
         Ok(d) => d,
         Err(err) => {
             warnings.push(format!("Skipped '{name_from_file}': invalid YAML ({err})"));
-            return;
+            return None;
         }
     };
 
     let kind = yaml_get(&doc, "$kind").and_then(|v| v.as_str()).unwrap_or("http-request");
     if kind != "http-request" {
         warnings.push(format!("Skipped '{name_from_file}': unsupported kind '{kind}'."));
-        return;
+        return None;
     }
 
     let name = yaml_get(&doc, "name")
@@ -450,8 +610,14 @@ fn import_request_file(
         },
     );
     match outcome {
-        Ok(_) => *requests_imported += 1,
-        Err(err) => warnings.push(format!("Could not import request '{name_from_file}': {err}")),
+        Ok(created) => {
+            *requests_imported += 1;
+            Some(created.id)
+        }
+        Err(err) => {
+            warnings.push(format!("Could not import request '{name_from_file}': {err}"));
+            None
+        }
     }
 }
 
@@ -653,6 +819,43 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].name, "Ping");
         assert_eq!(requests[0].method, "GET");
+    }
+
+    #[test]
+    fn imports_saved_examples_as_sample_responses_on_their_matching_request() {
+        let scratch = ScratchDir::new("examples");
+        let collection = scratch.0.join("collections").join("WithExamples");
+        fs::create_dir_all(&collection).unwrap();
+        fs::write(
+            collection.join("Login.request.yaml"),
+            "$kind: http-request\nurl: \"{{host}}/login\"\nmethod: POST\n",
+        )
+        .unwrap();
+
+        let examples_dir = collection.join(".resources").join("Login.resources").join("examples");
+        fs::create_dir_all(&examples_dir).unwrap();
+        fs::write(
+            examples_dir.join("Login Success.example.yaml"),
+            "$kind: http-example\n\
+             request:\n  url: \"{{host}}/login\"\n  method: POST\n\
+             response:\n  statusCode: 200\n  statusText: OK\n  headers:\n    - key: Content-Type\n      value: application/json\n  body:\n    type: json\n    content: '{\"ok\":true}'\n",
+        )
+        .unwrap();
+
+        let conn = db::open_in_memory().unwrap();
+        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap();
+
+        assert_eq!(report.requests_imported, 1);
+        assert_eq!(report.samples_imported, 1);
+
+        let projects = project_store::list_projects(&conn).unwrap();
+        let requests = request_store::list_requests(&conn, &projects[0].id).unwrap();
+        let samples = request_store::list_sample_responses(&conn, &requests[0].id).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].name, "Login Success");
+        assert_eq!(samples[0].status, 200);
+        assert_eq!(samples[0].content_type.as_deref(), Some("application/json"));
+        assert_eq!(samples[0].body.as_deref(), Some("{\"ok\":true}"));
     }
 
     #[test]

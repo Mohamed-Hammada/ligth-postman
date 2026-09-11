@@ -351,3 +351,90 @@ all are unit tests in their respective modules, not new integration-test files);
 0 errors/warnings; `npm run build` clean; every one of the 9 screens screenshotted live via
 WebView2 CDP, including the dark-theme toggle applying app-wide and the command palette
 returning a real, correctly-filtered result.
+
+---
+
+## 9. UI/UX Workflow Pass, in progress (2026-09-11)
+
+A targeted usability pass on the Workspace screen's request editor/response area, explicitly
+scoped to **refine** the existing Modernist system from §8 (ink/paper palette, zero radius,
+Archivo, single red accent, no rainbow HTTP methods) rather than replace it — the brief for this
+pass was UX/workflow fixes, not a new visual direction. In progress; this entry will be extended
+as further P1/P2/P3 items land.
+
+**Real workflow defect found and fixed**: the request editor tabs (Params/Headers/Auth/Body/…),
+the live response, saved sample responses, the code-snippet/info bottom panel, and a per-request
+history list were all stacked in a *single* vertical-scrolling column (`.main { overflow-y: auto
+}`), with the response body hard-capped at `max-height: 420px` inside that column. On any request
+with more than a few headers, the response was scrolled out of view below the editor — the
+opposite of "response gets most of the space, always visible." Fixed: `.editor-body-row` is now
+a column flex split — `.editor-pane` (request editor, independently scrollable) on top, a
+draggable `.response-pane-resize-handle` (same drag-handle pattern as the existing sidebar
+resizer, keyboard-adjustable via arrow keys, persists no wider/taller than the window), and a
+docked `.response-pane` (independently scrollable, `.body-view` now genuinely fills available
+height instead of the old fixed 420px cap) below. Sample responses stayed in the editor pane
+(they're saved artifacts of the request, not the live response).
+
+**Dead UI removed**: a second, unstyled per-request history list (`<ul class="requests">…`,
+classes `.link`/`.name`/`.url`/`.row-item` — none of which matched any other component in the
+file) sat below the response, easy to miss and duplicating data already available. Replaced with
+a proper **History** sub-tab alongside Body/Headers/Cookies/Tests in the response pane, using the
+same `.response-subtab`/list styling as the rest of the response area; the dead CSS classes were
+deleted rather than left orphaned.
+
+**Tab-strip affordances added** (explicitly requested by the brief, previously missing):
+middle-click to close a tab, and `Ctrl/⌘+Tab` / `Ctrl/⌘+Shift+Tab` / `Ctrl/⌘+W` to cycle/close
+tabs — wired through the existing per-shortcut Settings toggle system (`SHORTCUT_DEFS`), not a
+separate mechanism.
+
+**Error-UX differentiation (§section 17 of the brief)**: a user-initiated Send cancellation was
+previously indistinguishable from a real failure — both rendered in the same danger-red
+`.error-banner`. The backend already returns a typed `AppError { kind, message, hint }`
+(`kind: "Cancelled"` for this case); the frontend just wasn't using `kind` for anything beyond
+picking summary text. Fixed: a cancelled send now shows a small, neutral, self-clearing hint next
+to Send/Save instead of the alarm banner. No backend change needed — `isAppError`/`AppError.kind`
+were already exported from `src/lib/api.ts`.
+
+**Icon system replaced (`/impeccable polish` pass, same day)**: the craft floor this skill enforces
+bans "Unicode glyphs or emoji standing in for an icon system" outright — icons must be drawn, in
+one consistent stroke and weight. The app had ~90 call sites of platform emoji/symbol glyphs
+(📁🚀🕘⚙️🌐🧭📨📭✨⚡👁🔒💻🗑✕✓⚠✎⋮★☆▶▸▾▼◀⊞⊟⧉⭳⤢↑↓«» etc.) standing in for icons across the rail,
+sidebar, request tabs, response area, console, and every modal. Replaced with a single authored
+SVG icon library (35 icons, `{#snippet iconX()}` blocks near the top of the markup, 16x16 viewBox,
+one shared `stroke-width: 1.5`, square caps/joins matching the system's zero-radius geometry,
+`aria-hidden="true"` since every icon-only control already carries a `title`), sized via a `.icon
+{ width/height: 1em }` rule so every icon scales with its own context's font-size — and therefore
+with `uiScale` — instead of a fixed pixel size. Deliberately kept as plain text, not converted:
+`⌘` in keyboard-shortcut hints (a literal key-cap glyph, not a UI icon) and `</>` on the code-
+snippet toggle (a widely-recognized dev-tool text convention). `SCREENS` now carries only `{id,
+label}` (the `icon` string field was removed); a small `railScreenIcon(id)` dispatch snippet maps
+id → icon for all seven rail entries. An `iconCompass` and an `iconTheme` icon were drawn but ended up
+with no real call site (the breadcrumb icon became a folder icon instead; the theme toggle turned
+out to already be a plain-text segmented control) — deleted rather than left as dead code.
+
+**Explicitly not attempted in this pass yet** — genuine scope remaining from the same brief, not
+an oversight:
+- Params/Headers/Auth/Body compactness, inline field-level validation, loading-state and
+  empty-state review, and a responsive (`@media`) pass — none of the file's CSS contains a single
+  `@media` query today.
+- `expandedResponseView` (the full-page "expand" mode) still only has Body/Headers/Cookies
+  sub-tabs, not the new History tab or the existing Tests tab — a pre-existing inconsistency
+  (Tests was already missing there before this pass), not something this pass introduced, but not
+  yet reconciled either.
+
+**Note on concurrent work**: partway through this pass, `src/lib/api.ts` and
+`src-tauri/src/postman_compat/local_workspace_importer.rs` picked up unrelated changes from
+outside this session (a local-workspace Postman import feature), and `src/routes/+page.svelte`'s
+code-snippet/info panel was independently restructured from a bottom drawer into a `.right-sidebar`
+aside while this pass was in progress. Neither conflicted with this pass's edits — `npm run
+check`/`npm run build` stayed clean throughout — but it's recorded here since it means this
+entry's line numbers and the file's exact byte content will have moved on from what's described
+above by the time anyone reads this.
+
+**Verification for this pass so far**: `npm run check` (0 errors, 0 warnings) and `npm run build`
+(clean static bundle) after every change in this section, including after the icon sweep. **Not**
+verified with a live screenshot or a real send — unlike §6/§7/§8, this session has no connected
+browser-automation tool and no WebView2/Playwright CDP path available, so the split-pane/tab/
+error-notice/icon behavior above is verified by type-check + build + manual code re-reading only.
+Flagged here rather than silently
+claimed as "verified live" like the earlier passes were.

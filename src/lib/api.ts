@@ -211,6 +211,15 @@ export interface Environment {
   updated_at: string;
 }
 
+export interface EnvironmentWithProject {
+  id: string;
+  project_id: string;
+  project_name: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ResolvedTemplate {
   resolved: string;
   missing: string[];
@@ -441,6 +450,8 @@ export const api = {
     invoke<Environment>("create_environment", { input: { project_id: projectId, name } }),
   listEnvironments: (projectId: string) =>
     invoke<Environment[]>("list_environments", { projectId }),
+  listAllEnvironments: () =>
+    invoke<EnvironmentWithProject[]>("list_all_environments"),
   updateEnvironment: (input: { id: string; name?: string }) =>
     invoke<Environment>("update_environment", { input }),
   deleteEnvironment: (id: string) => invoke<void>("delete_environment", { id }),
@@ -530,6 +541,9 @@ export const api = {
       environmentJson,
       targetProjectId,
     }),
+
+  importLocalPostmanWorkspace: (rootPath: string) =>
+    invoke<LocalWorkspaceImportReport>("import_local_postman_workspace", { rootPath }),
 
   exportPostmanCollection: (projectId: string) =>
     invoke<string>("export_postman_collection", { projectId }),
@@ -768,6 +782,15 @@ export interface EnvironmentImportReport {
   environment_id: string;
   environment_name: string;
   variables_count: number;
+  warnings: string[];
+}
+
+export interface LocalWorkspaceImportReport {
+  projects_created: number;
+  folders_created: number;
+  requests_imported: number;
+  environments_imported: number;
+  variables_imported: number;
   warnings: string[];
 }
 

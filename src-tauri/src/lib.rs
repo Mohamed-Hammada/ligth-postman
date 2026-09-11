@@ -81,6 +81,7 @@ pub fn run() {
             commands::delete_folder,
             commands::create_environment,
             commands::list_environments,
+            commands::list_all_environments,
             commands::update_environment,
             commands::delete_environment,
             commands::create_variable,

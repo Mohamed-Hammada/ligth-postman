@@ -14,7 +14,7 @@ use serde_yaml::Value as Yaml;
 use crate::error::AppError;
 use crate::models::{
     ApiKeyLocation, Auth, FormDataPart, HeaderEntry, NewEnvironmentInput, NewFolderInput,
-    NewProjectInput, NewRequestInput, NewVariableInput, RequestBody, UrlEncodedItem,
+    NewProjectInput, NewRequestInput, NewVariableInput, QueryParam, RequestBody, UrlEncodedItem,
     VariableScope, VALID_METHODS,
 };
 use crate::store::{environment_store, folder_store, project_store, request_store, variable_store};
@@ -409,6 +409,23 @@ fn import_request_file(
         }
     }
 
+    let mut query_params = Vec::new();
+    if let Some(map) = yaml_get(&doc, "queryParams").and_then(|v| v.as_mapping()) {
+        for (k, v) in map {
+            if let Some(key) = k.as_str() {
+                if key.trim().is_empty() {
+                    continue;
+                }
+                query_params.push(QueryParam {
+                    key: key.to_string(),
+                    value: yaml_scalar_to_string(Some(v)),
+                    enabled: true,
+                    description: None,
+                });
+            }
+        }
+    }
+
     let description = yaml_get(&doc, "description").and_then(|v| v.as_str()).map(|s| s.to_string());
     let body = parse_local_body(yaml_get(&doc, "body"), &name, warnings);
     let auth = parse_local_auth(yaml_get(&doc, "auth"), &name, warnings);
@@ -423,7 +440,7 @@ fn import_request_file(
             method,
             url,
             headers,
-            query_params: vec![],
+            query_params,
             auth,
             body,
             description,
@@ -589,4 +606,118 @@ fn parse_local_scripts(scripts: Option<&Yaml>) -> (Option<String>, Option<String
     let pre = if pre_parts.is_empty() { None } else { Some(pre_parts.join("\n\n")) };
     let post = if post_parts.is_empty() { None } else { Some(post_parts.join("\n\n")) };
     (pre, post)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    struct ScratchDir(std::path::PathBuf);
+    impl ScratchDir {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("lp-local-ws-test-{label}-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn imports_a_flat_collection_with_one_request() {
+        let scratch = ScratchDir::new("flat");
+        let collections = scratch.0.join("collections").join("MyCollection");
+        fs::create_dir_all(&collections).unwrap();
+        fs::write(
+            collections.join("Ping.request.yaml"),
+            "$kind: http-request\nurl: \"{{host}}/ping\"\nmethod: GET\nheaders:\n  Accept: application/json\n",
+        )
+        .unwrap();
+
+        let conn = db::open_in_memory().unwrap();
+        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap();
+
+        assert_eq!(report.projects_created, 1);
+        assert_eq!(report.requests_imported, 1);
+        assert_eq!(report.folders_created, 0);
+
+        let projects = project_store::list_projects(&conn).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "MyCollection");
+
+        let requests = request_store::list_requests(&conn, &projects[0].id).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].name, "Ping");
+        assert_eq!(requests[0].method, "GET");
+    }
+
+    #[test]
+    fn flattens_nested_folders_with_joined_names() {
+        let scratch = ScratchDir::new("nested");
+        let nested = scratch.0.join("collections").join("Nested").join("A").join("B");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            nested.join("Deep.request.yaml"),
+            "$kind: http-request\nurl: https://example.com\nmethod: POST\n",
+        )
+        .unwrap();
+
+        let conn = db::open_in_memory().unwrap();
+        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap();
+
+        assert_eq!(report.requests_imported, 1);
+        assert_eq!(report.folders_created, 1);
+
+        let projects = project_store::list_projects(&conn).unwrap();
+        let folders = folder_store::list_folders(&conn, &projects[0].id).unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name, "A / B");
+    }
+
+    #[test]
+    fn imports_environment_values_into_a_dedicated_project() {
+        let scratch = ScratchDir::new("env");
+        let envs = scratch.0.join("environments");
+        fs::create_dir_all(&envs).unwrap();
+        fs::write(
+            envs.join("Prod.environment.yaml"),
+            "name: Prod\nvalues:\n  - key: host\n    value: https://api.example.com\n    enabled: true\n  - key: api_secret\n    value: shh\n",
+        )
+        .unwrap();
+
+        let conn = db::open_in_memory().unwrap();
+        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap();
+
+        assert_eq!(report.environments_imported, 1);
+        assert_eq!(report.variables_imported, 2);
+
+        let projects = project_store::list_projects(&conn).unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "Imported Environments");
+
+        let env_id = environment_store::list_environments(&conn, &projects[0].id).unwrap()[0].id.clone();
+        let vars = variable_store::list_variables_for_scope(&conn, VariableScope::Environment, &env_id).unwrap();
+        assert_eq!(vars.len(), 2);
+        assert!(vars.iter().any(|v| v.key == "api_secret" && v.is_secret));
+        assert!(vars.iter().any(|v| v.key == "host" && !v.is_secret));
+    }
+
+    #[test]
+    fn rejects_missing_directory() {
+        let conn = db::open_in_memory().unwrap();
+        let err = import_local_workspace(&conn, r"Z:\definitely\not\a\real\path\for\this\test").unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)));
+    }
+
+    #[test]
+    fn rejects_directory_that_is_not_a_postman_workspace() {
+        let scratch = ScratchDir::new("not-a-workspace");
+        let conn = db::open_in_memory().unwrap();
+        let err = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)));
+    }
 }

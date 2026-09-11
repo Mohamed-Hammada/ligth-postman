@@ -4,14 +4,17 @@
   import {
     api,
     describeError,
+    isAppError,
     type Auth,
     type CollectionImportReport,
     type Environment,
+    type EnvironmentWithProject,
     type EnvironmentImportReport,
     type Folder,
     type GeneratedApiDefinition,
     type FormDataPart,
     type HeaderEntry,
+    type LocalWorkspaceImportReport,
     type Project,
     type QueryParam,
     type UrlEncodedItem,
@@ -68,7 +71,27 @@
   let renamingFolderId = $state<string | null>(null);
   let renameFolderValue = $state("");
 
-  let environments = $state<Environment[]>([]);
+  // Global — every project's environment picker offers every environment from every project
+  // (not just its own), so this loads once and isn't re-scoped per selected project.
+  let allEnvironments = $state<EnvironmentWithProject[]>([]);
+  async function loadAllEnvironments() {
+    try {
+      allEnvironments = await api.listAllEnvironments();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+  // Grouped for display (the picker shows every environment from every project, so a heading
+  // per source project keeps a 77+-entry list navigable) — already ordered by the backend query.
+  let environmentsByProject = $derived.by(() => {
+    const map = new Map<string, EnvironmentWithProject[]>();
+    for (const env of allEnvironments) {
+      const list = map.get(env.project_name) ?? [];
+      list.push(env);
+      map.set(env.project_name, list);
+    }
+    return map;
+  });
   let selectedEnvironmentId = $state<string | null>(null);
   let renamingEnvironmentId = $state<string | null>(null);
   let renameEnvironmentValue = $state("");
@@ -257,7 +280,30 @@
   let curlImportError = $state("");
 
   // Import screen tab (collection / environment / cURL) — the full-page Import screen.
-  let importActiveTab = $state<"collection" | "environment" | "curl">("collection");
+  let importActiveTab = $state<"collection" | "environment" | "curl" | "localWorkspace">("collection");
+
+  // Local Postman "local files" workspace import (a directory tree, not a single JSON blob).
+  let localWorkspacePathInput = $state("");
+  let localWorkspaceImportLoading = $state(false);
+  let localWorkspaceImportError = $state("");
+  let localWorkspaceImportReport = $state<LocalWorkspaceImportReport | null>(null);
+
+  async function importLocalWorkspaceAction() {
+    if (!localWorkspacePathInput.trim()) return;
+    localWorkspaceImportLoading = true;
+    localWorkspaceImportError = "";
+    localWorkspaceImportReport = null;
+    try {
+      const report = await api.importLocalPostmanWorkspace(localWorkspacePathInput.trim());
+      localWorkspaceImportReport = report;
+      await loadProjects();
+      await loadAllEnvironments();
+    } catch (err) {
+      localWorkspaceImportError = describeError(err);
+    } finally {
+      localWorkspaceImportLoading = false;
+    }
+  }
 
   // Postman compatibility import/export (LP-0501 - LP-0507, LP-0212)
   let collectionImportText = $state("");
@@ -279,11 +325,16 @@
   let snippetTarget = $state<SnippetTarget>("windows_cmd");
   let snippet = $state("");
   let snippetError = $state("");
+  let snippetLoading = $state(false);
 
   let errorMessage = $state("");
   let loadingRequests = $state(false);
 
   let sending = $state(false);
+  // A user-initiated cancel is not a failure — it gets a neutral, self-clearing notice next to
+  // Send/Cancel instead of the red error banner every other failed send produces.
+  let sendCancelledNotice = $state("");
+  let sendCancelledNoticeTimer: ReturnType<typeof setTimeout> | null = null;
   let activeResponse = $state<ResponseMeta | null>(null);
   let activeResponseBody = $state("");
   let activeResponseTruncated = $state(false);
@@ -303,7 +354,7 @@
   });
 
   // Response area sub-tabs (Body / Headers / Cookies / Tests) — replaces the old flat stacked layout.
-  let responseSubTab = $state<"body" | "headers" | "cookies" | "tests">("body");
+  let responseSubTab = $state<"body" | "headers" | "cookies" | "tests" | "history">("body");
 
   function formatByteSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -358,26 +409,70 @@
     window.addEventListener("mouseup", onUp);
   }
 
+  // Resizable response pane (drag handle between the request editor and the docked response
+  // panel — same pattern as the sidebar handle above). Defaults to roughly 42% of the window's
+  // height so the response gets real room on first launch instead of a small fixed guess, same
+  // reasoning as adaptiveSidebarWidth.
+  function adaptiveResponsePaneHeight(): number {
+    return Math.min(560, Math.max(220, Math.round(window.innerHeight * 0.42)));
+  }
+  let responsePaneHeight = $state(320);
+  let responsePaneResizing = $state(false);
+  let responsePaneManuallyResized = false;
+
+  function startResponsePaneResize(e: MouseEvent) {
+    e.preventDefault();
+    responsePaneResizing = true;
+    responsePaneManuallyResized = true;
+    const startY = e.clientY;
+    const startHeight = responsePaneHeight;
+    const onMove = (ev: MouseEvent) => {
+      responsePaneHeight = Math.min(window.innerHeight - 220, Math.max(160, startHeight - (ev.clientY - startY)));
+    };
+    const onUp = () => {
+      responsePaneResizing = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   // Screen navigation shell — a real left-rail switcher between full-page screens. Each
   // screen reuses the exact same state/functions the old modal-based UI used; nothing here
   // introduces a second source of truth for projects/requests/environments/git/etc.
-  type ScreenId = "workspace" | "environments" | "git" | "import" | "launcher" | "history" | "settings" | "theme";
+  type ScreenId = "workspace" | "environments" | "git" | "import" | "launcher" | "history" | "settings";
   let activeScreen = $state<ScreenId>("workspace");
   // `label` stores an i18n key (see SHORTCUT_DEFS above for why) — resolve via t(s.label).
-  const SCREENS: { id: ScreenId; label: string; icon: string }[] = [
-    { id: "workspace", label: "rail.workspace", icon: "🗂️" },
-    { id: "environments", label: "rail.environments", icon: "🌐" },
-    { id: "git", label: "rail.git", icon: "⎇" },
-    { id: "import", label: "rail.import", icon: "📥" },
-    { id: "launcher", label: "rail.launcher", icon: "🚀" },
-    { id: "history", label: "rail.history", icon: "🕘" },
-    { id: "settings", label: "rail.settings", icon: "⚙️" },
-    { id: "theme", label: "rail.theme", icon: "🌓" },
+  const SCREENS: { id: ScreenId; label: string }[] = [
+    { id: "workspace", label: "rail.workspace" },
+    { id: "environments", label: "rail.environments" },
+    { id: "git", label: "rail.git" },
+    { id: "import", label: "rail.import" },
+    { id: "launcher", label: "rail.launcher" },
+    { id: "history", label: "rail.history" },
+    { id: "settings", label: "rail.settings" },
   ];
 
-  // Sidebar show/hide, for the Workspace screen's project/request explorer.
+  // Sidebar show/hide, for the Workspace screen's project/request explorer. Persisted —
+  // collapsed/expanded is a deliberate choice that should stick until the user changes it
+  // again, not reset back to a default every launch.
   let sidebarVisible = $state(true);
   let screensRailVisible = $state(true);
+  let rightSidebarVisible = $state(true);
+
+  function setSidebarVisible(v: boolean) {
+    sidebarVisible = v;
+    try { localStorage.setItem("lp-sidebar-visible", String(v)); } catch {}
+  }
+  function setScreensRailVisible(v: boolean) {
+    screensRailVisible = v;
+    try { localStorage.setItem("lp-rail-visible", String(v)); } catch {}
+  }
+  function setRightSidebarVisible(v: boolean) {
+    rightSidebarVisible = v;
+    try { localStorage.setItem("lp-right-sidebar-visible", String(v)); } catch {}
+  }
   // The full-detail response view (stat sidebar, tests, bigger body) used to be its own rail
   // screen, but it's meaningless without Workspace's request context — it's now an expand
   // mode reached from the inline response panel instead of a peer top-level destination.
@@ -516,7 +611,7 @@
   // Keyboard shortcuts — each one maps to a real, already-existing action (nothing fabricated
   // for the sake of having a shortcuts list). Individually toggleable from Settings, persisted
   // to localStorage the same way theme/auto-sync-interval already are.
-  type ShortcutId = "commandPalette" | "sendRequest" | "saveRequest" | "newRequest";
+  type ShortcutId = "commandPalette" | "sendRequest" | "saveRequest" | "newRequest" | "nextTab" | "prevTab" | "closeTab";
   // `label` stores an i18n key, not literal text — SHORTCUT_DEFS is a plain const (evaluated
   // once), so resolving the string at definition time would freeze it in whatever locale was
   // active then. Resolve it at render time instead: t(def.label).
@@ -525,12 +620,18 @@
     { id: "sendRequest", label: "shortcut.sendRequest", keys: "Ctrl/⌘ Enter" },
     { id: "saveRequest", label: "shortcut.saveRequest", keys: "Ctrl/⌘ S" },
     { id: "newRequest", label: "shortcut.newRequest", keys: "Ctrl/⌘ N" },
+    { id: "nextTab", label: "shortcut.nextTab", keys: "Ctrl/⌘ Tab" },
+    { id: "prevTab", label: "shortcut.prevTab", keys: "Ctrl/⌘ Shift Tab" },
+    { id: "closeTab", label: "shortcut.closeTab", keys: "Ctrl/⌘ W" },
   ];
   let shortcutsEnabled = $state<Record<ShortcutId, boolean>>({
     commandPalette: true,
     sendRequest: true,
     saveRequest: true,
     newRequest: true,
+    nextTab: true,
+    prevTab: true,
+    closeTab: true,
   });
   function setShortcutEnabled(id: ShortcutId, enabled: boolean) {
     shortcutsEnabled = { ...shortcutsEnabled, [id]: enabled };
@@ -981,12 +1082,28 @@
   async function copyAsCurl() {
     if (!selectedRequest) return;
     snippetError = "";
+    snippetLoading = true;
     try {
       snippet = await api.generateCurlSnippet(selectedRequest.id, selectedEnvironmentId, snippetMode, snippetTarget);
     } catch (err) {
       snippetError = describeError(err);
+    } finally {
+      snippetLoading = false;
     }
   }
+
+  // Regenerates automatically — the Code Snippet panel has no "Generate" button; it just always
+  // shows the snippet for whatever's currently selected (target/mode/request/environment).
+  $effect(() => {
+    const panel = rightPanel;
+    const req = selectedRequest;
+    const target = snippetTarget;
+    const mode = snippetMode;
+    const envId = selectedEnvironmentId;
+    if (panel === "code" && req) {
+      copyAsCurl();
+    }
+  });
 
   async function copySnippetToClipboard() {
     if (!snippet) return;
@@ -1054,6 +1171,7 @@
 
   onMount(() => {
     loadProjects();
+    loadAllEnvironments();
     loadAiSettings();
     api.isAiConfigured().then((configured) => (aiConfigured = configured));
     refreshConsoleEvents();
@@ -1089,13 +1207,21 @@
         if (parsed.field === "name" || parsed.field === "method" || parsed.field === "updated") requestSortField = parsed.field;
         if (parsed.dir === "asc" || parsed.dir === "desc") requestSortDir = parsed.dir;
       }
+      const savedSidebarVisible = localStorage.getItem("lp-sidebar-visible");
+      if (savedSidebarVisible === "true" || savedSidebarVisible === "false") sidebarVisible = savedSidebarVisible === "true";
+      const savedRailVisible = localStorage.getItem("lp-rail-visible");
+      if (savedRailVisible === "true" || savedRailVisible === "false") screensRailVisible = savedRailVisible === "true";
+      const savedRightSidebarVisible = localStorage.getItem("lp-right-sidebar-visible");
+      if (savedRightSidebarVisible === "true" || savedRightSidebarVisible === "false") rightSidebarVisible = savedRightSidebarVisible === "true";
     } catch {
       // ignore — settings just stay at their defaults
     }
 
     sidebarWidth = adaptiveSidebarWidth();
+    responsePaneHeight = adaptiveResponsePaneHeight();
     const onWindowResize = () => {
       if (!sidebarManuallyResized) sidebarWidth = adaptiveSidebarWidth();
+      if (!responsePaneManuallyResized) responsePaneHeight = adaptiveResponsePaneHeight();
     };
     window.addEventListener("resize", onWindowResize);
 
@@ -1120,6 +1246,17 @@
         if (selectedProjectId) {
           e.preventDefault();
           quickCreateRequest(selectedProjectId);
+        }
+      } else if (key === "tab" && shortcutsEnabled.nextTab && !e.shiftKey) {
+        e.preventDefault();
+        cycleTab(1);
+      } else if (key === "tab" && shortcutsEnabled.prevTab && e.shiftKey) {
+        e.preventDefault();
+        cycleTab(-1);
+      } else if (key === "w" && shortcutsEnabled.closeTab) {
+        if (selectedRequest) {
+          e.preventDefault();
+          closeTab(selectedRequest.id);
         }
       }
     };
@@ -1244,6 +1381,16 @@
       );
     }
     return tabDrafts.has(tabId);
+  }
+
+  // Ctrl/Cmd+Tab / Ctrl/Cmd+Shift+Tab — cycles through open tabs in their current order,
+  // wrapping around at either end. A no-op with 0-1 tabs open.
+  function cycleTab(direction: 1 | -1) {
+    if (openTabs.length < 2 || !selectedRequest) return;
+    const idx = openTabs.findIndex((t) => t.id === selectedRequest!.id);
+    if (idx === -1) return;
+    const nextIdx = (idx + direction + openTabs.length) % openTabs.length;
+    openRequest(openTabs[nextIdx].id);
   }
 
   function closeTab(id: string) {
@@ -1625,12 +1772,11 @@
     try {
       requests = await api.listRequests(id);
       folders = await api.listFolders(id);
-      environments = await api.listEnvironments(id);
       // Auto-select the project's preferred environment, if it set one and that environment
       // still exists (it may have been deleted since — the backend already clears the
       // reference then, but the frontend's stale `projects` entry might not have refreshed yet).
       const defaultEnvId = projects.find((p) => p.id === id)?.default_environment_id;
-      if (defaultEnvId && environments.some((e) => e.id === defaultEnvId)) {
+      if (defaultEnvId && allEnvironments.some((e) => e.id === defaultEnvId)) {
         selectedEnvironmentId = defaultEnvId;
       }
       await loadVariables();
@@ -1667,7 +1813,7 @@
     if (!selectedProjectId) return;
     try {
       const env = await api.createEnvironment(selectedProjectId, "New Environment");
-      environments = [...environments, env];
+      await loadAllEnvironments();
       selectedEnvironmentId = env.id;
       await loadVariables();
       startRenameEnvironment(env);
@@ -1676,7 +1822,7 @@
     }
   }
 
-  function startRenameEnvironment(env: Environment) {
+  function startRenameEnvironment(env: Environment | EnvironmentWithProject) {
     renamingEnvironmentId = env.id;
     renameEnvironmentValue = env.name;
   }
@@ -1687,8 +1833,8 @@
     renamingEnvironmentId = null;
     if (!id || !value) return;
     try {
-      const updated = await api.updateEnvironment({ id, name: value });
-      environments = environments.map((e) => (e.id === updated.id ? updated : e));
+      await api.updateEnvironment({ id, name: value });
+      await loadAllEnvironments();
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -1697,7 +1843,7 @@
   async function deleteEnvironmentAction(id: string) {
     try {
       await api.deleteEnvironment(id);
-      environments = environments.filter((e) => e.id !== id);
+      await loadAllEnvironments();
       if (selectedEnvironmentId === id) {
         selectedEnvironmentId = null;
         await loadVariables();
@@ -1858,7 +2004,13 @@
       activeResponseTruncated = body.truncated;
       responseHistory = await api.listResponseSummaries(requestId);
     } catch (err) {
-      errorMessage = describeError(err);
+      if (isAppError(err) && err.kind === "Cancelled") {
+        if (sendCancelledNoticeTimer) clearTimeout(sendCancelledNoticeTimer);
+        sendCancelledNotice = describeError(err);
+        sendCancelledNoticeTimer = setTimeout(() => (sendCancelledNotice = ""), 2500);
+      } else {
+        errorMessage = describeError(err);
+      }
     } finally {
       sending = false;
       await refreshConsoleEvents();
@@ -1911,6 +2063,7 @@
     try {
       await api.deleteProject(id);
       projects = projects.filter((p) => p.id !== id);
+      await loadAllEnvironments(); // deleting a project cascades its environments too
       if (selectedProjectId === id) {
         selectedProjectId = null;
         requests = [];
@@ -2191,7 +2344,7 @@
     try {
       const report = await api.importPostmanEnvironment(environmentImportText.trim(), selectedProjectId);
       environmentImportReport = report;
-      environments = await api.listEnvironments(selectedProjectId);
+      await loadAllEnvironments();
       selectedEnvironmentId = report.environment_id;
       await loadVariables();
       environmentImportText = "";
@@ -2206,7 +2359,7 @@
     if (!selectedEnvironmentId) return;
     try {
       const json = await api.exportPostmanEnvironment(selectedEnvironmentId);
-      const env = environments.find((e) => e.id === selectedEnvironmentId);
+      const env = allEnvironments.find((e) => e.id === selectedEnvironmentId);
       const safeName = (env?.name || "environment").replace(/[^a-z0-9_-]/gi, "_");
       downloadFile(json, `${safeName}.postman_environment.json`, "application/json");
       exportFeedback = "Exported Postman Environment!";
@@ -2810,6 +2963,56 @@
 </script>
 
 
+<!-- Icon library — one consistent stroke system (1.6px, square caps/joins, 16x16) replacing the
+     platform-emoji glyphs the app used to lean on. Filled shapes are noted per-icon. Sized via
+     `.icon { width/height: 1em }` so every call site scales with its own font-size (and with
+     `uiScale`, since that's how the rest of the app's rem-based sizing already scales). -->
+{#snippet iconClose()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M4 4l8 8M12 4l-8 8"/></svg>{/snippet}
+{#snippet iconCheck()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M3.5 8.5l3 3 6-7"/></svg>{/snippet}
+{#snippet iconCheckCircle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5.2 8.2l2 2 3.6-4.4"/></svg>{/snippet}
+{#snippet iconXCircle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M6 6l4 4M10 6l-4 4"/></svg>{/snippet}
+{#snippet iconTrash()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3 5h10M6 5V3.6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1V5"/><path d="M5.1 5l.7 8a1 1 0 0 0 1 .9h2.4a1 1 0 0 0 1-.9l.7-8"/><path d="M6.6 7.3v5M9.4 7.3v5"/></svg>{/snippet}
+{#snippet iconEdit()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M10.4 3l2.6 2.6-7.4 7.4H3v-2.6z"/><path d="M9 4.4L11.6 7"/></svg>{/snippet}
+{#snippet iconWarning()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M8 2.3L14.2 13H1.8Z"/><path d="M8 6.3v3.2"/><circle cx="8" cy="11.3" r="0.55" fill="currentColor" stroke="none"/></svg>{/snippet}
+{#snippet iconInfo()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 7.3v4"/><circle cx="8" cy="4.9" r="0.55" fill="currentColor" stroke="none"/></svg>{/snippet}
+{#snippet iconMoreVertical()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="3.7" r="1.15" fill="currentColor"/><circle cx="8" cy="8" r="1.15" fill="currentColor"/><circle cx="8" cy="12.3" r="1.15" fill="currentColor"/></svg>{/snippet}
+{#snippet iconMenu()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>{/snippet}
+{#snippet iconFolder()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 4.5h4l1.2 1.5H14v6.5H2Z"/></svg>{/snippet}
+{#snippet iconFolderOpen()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 4.8h4l1.2 1.5H14L12.7 12.5H3.3Z"/></svg>{/snippet}
+{#snippet iconGlobe()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2.1 2.1 2.1 9.9 0 12M8 2c-2.1 2.1-2.1 9.9 0 12"/></svg>{/snippet}
+{#snippet iconImport()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M8 2.2v7.3M5 6.8L8 9.8l3-3"/><path d="M2.5 10.3v2.2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2.2"/></svg>{/snippet}
+{#snippet iconEye()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.4 8S4 3.6 8 3.6 14.6 8 14.6 8 12 12.4 8 12.4 1.4 8 1.4 8Z"/><circle cx="8" cy="8" r="2"/></svg>{/snippet}
+{#snippet iconLock()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="3.3" y="7" width="9.4" height="6.3"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>{/snippet}
+{#snippet iconGitBranch()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4.5" cy="3.6" r="1.3"/><circle cx="4.5" cy="12.4" r="1.3"/><circle cx="11.5" cy="7.6" r="1.3"/><path d="M4.5 4.9v6.2M4.5 8.2C4.5 5.9 6.6 5 10.2 4.7"/></svg>{/snippet}
+{#snippet iconMonitor()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2" y="3" width="12" height="8"/><path d="M6 13.3h4M8 11v2.3"/></svg>{/snippet}
+{#snippet iconGrid()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.3" y="2.3" width="4.7" height="4.7"/><rect x="9" y="2.3" width="4.7" height="4.7"/><rect x="2.3" y="9" width="4.7" height="4.7"/><rect x="9" y="9" width="4.7" height="4.7"/></svg>{/snippet}
+{#snippet iconLayout()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2" y="2.3" width="12" height="3.2"/><rect x="2" y="7" width="12" height="6.7"/></svg>{/snippet}
+{#snippet iconClock()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.6V8l2.8 1.8"/></svg>{/snippet}
+{#snippet iconSettings()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.1"/><path d="M8 1.6v2.1M8 12.3v2.1M14.4 8h-2.1M3.7 8H1.6M12.6 3.4l-1.5 1.5M4.9 11.1l-1.5 1.5M12.6 12.6l-1.5-1.5M4.9 4.9L3.4 3.4"/></svg>{/snippet}
+{#snippet iconSparkle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M8 1.4c.45 2.85 1.85 4.25 4.6 4.6-2.75.45-4.15 1.85-4.6 4.6-.45-2.75-1.85-4.15-4.6-4.6C6.15 5.65 7.55 4.25 8 1.4Z"/></svg>{/snippet}
+{#snippet iconInboxEmpty()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 9.3 4.4 3h7.2L14 9.3"/><path d="M2 9.3v3.4h12V9.3h-3.1a2.2 2.2 0 0 1-4.4 0H2Z"/></svg>{/snippet}
+{#snippet iconFileText()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M4 2h5.4L12 4.6V14H4Z"/><path d="M9.4 2v2.6H12"/><path d="M6 8.2h4M6 10.6h4"/></svg>{/snippet}
+{#snippet iconStar(filled: boolean)}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill={filled ? "currentColor" : "none"} stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2.1l1.8 3.7 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6Z"/></svg>{/snippet}
+{#snippet iconChevronRight()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M6 3.3 11 8l-5 4.7"/></svg>{/snippet}
+{#snippet iconChevronLeft()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M10 3.3 5 8l5 4.7"/></svg>{/snippet}
+{#snippet iconChevronDown()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3.3 6 8 11l4.7-5"/></svg>{/snippet}
+{#snippet iconExpandAll()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.4" y="2.4" width="11.2" height="11.2"/><path d="M8 5v6M5 8h6"/></svg>{/snippet}
+{#snippet iconCollapseAll()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.4" y="2.4" width="11.2" height="11.2"/><path d="M5 8h6"/></svg>{/snippet}
+{#snippet iconCopy()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="5.5" y="5.5" width="8" height="8"/><path d="M10.5 5.5V3H3v8h2.5"/></svg>{/snippet}
+{#snippet iconExpandDiagonal()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M9.5 2.5h4v4M13.5 2.5 8.8 7.2"/><path d="M6.5 13.5h-4v-4M2.5 13.5 7.2 8.8"/></svg>{/snippet}
+{#snippet iconArrowUp()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M8 12.5V4M4.3 7.7 8 4l3.7 3.7"/></svg>{/snippet}
+{#snippet iconArrowDown()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M8 3.5V12M4.3 8.3 8 12l3.7-3.7"/></svg>{/snippet}
+{#snippet railScreenIcon(id: string)}
+  {#if id === "workspace"}{@render iconLayout()}
+  {:else if id === "environments"}{@render iconGlobe()}
+  {:else if id === "git"}{@render iconGitBranch()}
+  {:else if id === "import"}{@render iconImport()}
+  {:else if id === "launcher"}{@render iconGrid()}
+  {:else if id === "history"}{@render iconClock()}
+  {:else if id === "settings"}{@render iconSettings()}
+  {/if}
+{/snippet}
+
 <div class="app-shell" data-theme={themeMode === "dark" ? "dark" : "light"}>
   <nav class="screens-rail" class:collapsed={!screensRailVisible}>
     <div class="rail-brand">
@@ -2818,8 +3021,8 @@
         type="button"
         class="icon-btn"
         title={screensRailVisible ? t("rail.hide") : t("rail.show")}
-        onclick={() => (screensRailVisible = !screensRailVisible)}
-      >☰</button>
+        onclick={() => setScreensRailVisible(!screensRailVisible)}
+      >{@render iconMenu()}</button>
     </div>
     <div class="rail-screens">
       {#each SCREENS as s (s.id)}
@@ -2830,7 +3033,7 @@
           title={t(s.label)}
           onclick={() => (activeScreen = s.id)}
         >
-          <span class="rail-screen-icon">{s.icon}</span>
+          <span class="rail-screen-icon">{@render railScreenIcon(s.id)}</span>
           {#if screensRailVisible}<span class="rail-screen-label">{t(s.label)}</span>{/if}
         </button>
       {/each}
@@ -2898,8 +3101,8 @@
         {#if renamingRequestId === req.id && req.id !== selectedRequest?.id}
           <form class="inline-form" onsubmit={submitRenameRequest}>
             <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
-            <button type="submit" title={t("sidebar.save")}>✓</button>
-            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>✕</button>
+            <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>{@render iconClose()}</button>
           </form>
         {:else}
           <button
@@ -2907,13 +3110,13 @@
             class="tree-expand-btn"
             title={expandedTreeRequestIds.has(req.id) ? t("sidebar.collapseSamples") : t("sidebar.expandSamples")}
             onclick={() => toggleTreeRequestExpanded(req.id)}
-          >{expandedTreeRequestIds.has(req.id) ? "▾" : "▸"}</button>
+          >{#if expandedTreeRequestIds.has(req.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</button>
           <button type="button" class="request-link" onclick={() => openRequest(req.id)} ondblclick={() => startRenameRequest(req.id, req.name)}>
             <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
             <span class="request-name">{req.name}</span>
             {#if sampleCount}<span class="tab-badge">{sampleCount}</span>{/if}
           </button>
-          <button class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteRequest(req.id)}>🗑</button>
+          <button class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteRequest(req.id)}>{@render iconTrash()}</button>
         {/if}
       </div>
       {#if expandedTreeRequestIds.has(req.id)}
@@ -2923,8 +3126,8 @@
               {#if renamingSampleResponseId === sr.id}
                 <form class="inline-form" onsubmit={(e) => { e.preventDefault(); submitRenameSampleResponse(req.id); }}>
                   <input bind:value={renameSampleResponseValue} use:focusOnMount onblur={() => submitRenameSampleResponse(req.id)} />
-                  <button type="submit" title={t("sidebar.save")}>✓</button>
-                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingSampleResponseId = null)}>✕</button>
+                  <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingSampleResponseId = null)}>{@render iconClose()}</button>
                 </form>
               {:else}
                 <button
@@ -2937,8 +3140,8 @@
                   <span class="status-chip" class:status-ok={sr.status < 400} class:status-err={sr.status >= 400}>{sr.status}</span>
                   <span class="sample-tree-name">{sr.name}</span>
                 </button>
-                <button class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameSampleResponse(sr)}>✎</button>
-                <button class="icon-btn icon-btn-ghost" title={t("sample.delete")} onclick={() => deleteSampleResponseAction(req.id, sr.id)}>🗑</button>
+                <button class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameSampleResponse(sr)}>{@render iconEdit()}</button>
+                <button class="icon-btn icon-btn-ghost" title={t("sample.delete")} onclick={() => deleteSampleResponseAction(req.id, sr.id)}>{@render iconTrash()}</button>
               {/if}
             </li>
           {:else}
@@ -3067,7 +3270,7 @@
   <div class="app">
   <header class="topbar">
     <div class="topbar-left">
-      <span class="brand">⚡ {t("topbar.brand")}</span>
+      <span class="brand">{t("topbar.brand")}</span>
     </div>
     <div class="topbar-center">
       {#if selectedProjectId}
@@ -3089,8 +3292,12 @@
           >
             <option value="__new__">{t("topbar.newEnvironment")}</option>
             <option value="__none__">{t("topbar.noEnvironment")}</option>
-            {#each environments as env (env.id)}
-              <option value={env.id}>{env.name}</option>
+            {#each environmentsByProject as [projectName, envs] (projectName)}
+              <optgroup label={projectName}>
+                {#each envs as env (env.id)}
+                  <option value={env.id}>{env.name}</option>
+                {/each}
+              </optgroup>
             {/each}
           </select>
           {#if selectedProjectId}
@@ -3102,14 +3309,14 @@
               title={isDefault ? t("topbar.unsetDefaultEnv") : t("topbar.setDefaultEnv")}
               onclick={toggleDefaultEnvironment}
             >
-              {isDefault ? "★" : "☆"}
+              {#if isDefault}{@render iconStar(true)}{:else}{@render iconStar(false)}{/if}
             </button>
           {/if}
           {#if renamingEnvironmentId}
             <form class="inline-form" onsubmit={submitRenameEnvironment}>
               <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
-              <button type="submit" title={t("sidebar.save")}>✓</button>
-              <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>✕</button>
+              <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+              <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>{@render iconClose()}</button>
             </form>
           {/if}
           <button
@@ -3118,7 +3325,7 @@
             title={t("topbar.manageVariables")}
             onclick={() => { loadVariables(); activeScreen = "environments"; }}
           >
-            👁
+            {@render iconEye()}
           </button>
           {#if selectedEnvironmentId}
             <button
@@ -3127,7 +3334,7 @@
               title={t("topbar.exportEnvironment")}
               onclick={exportPostmanEnvironmentAction}
             >
-              ⤓
+              {@render iconImport()}
             </button>
           {/if}
         </div>
@@ -3144,10 +3351,10 @@
         title={aiConfigured ? t("topbar.askAiTitle") : t("topbar.setupAiTitle")}
         onclick={() => (showAiPanel = true)}
       >
-        ✨ {aiConfigured ? t("topbar.askAi") : t("topbar.setupAi")}
+        {@render iconSparkle()} {aiConfigured ? t("topbar.askAi") : t("topbar.setupAi")}
       </button>
       <button type="button" class="btn-ghost" title={t("topbar.importTitle")} onclick={() => { importActiveTab = "collection"; collectionImportReport = null; collectionImportError = ""; activeScreen = "import"; }}>
-        📥 {t("topbar.import")}
+        {@render iconImport()} {t("topbar.import")}
       </button>
     </div>
   </header>
@@ -3158,7 +3365,7 @@
   {#if errorMessage}
     <div class="error-banner">
       {errorMessage}
-      <button type="button" class="dismiss-btn" title={t("error.dismiss")} onclick={() => (errorMessage = "")}>✕</button>
+      <button type="button" class="dismiss-btn" title={t("error.dismiss")} onclick={() => (errorMessage = "")}>{@render iconClose()}</button>
     </div>
   {/if}
 
@@ -3179,9 +3386,9 @@
               collectionImportError = "";
               activeScreen = "import";
             }}
-          >📥</button>
+          >{@render iconImport()}</button>
           <button type="button" class="icon-btn" title={t("sidebar.newProject")} onclick={quickCreateProject}>+</button>
-          <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => (sidebarVisible = false)}>«</button>
+          <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => setSidebarVisible(false)}>{@render iconChevronLeft()}</button>
         </div>
       </div>
 
@@ -3201,7 +3408,7 @@
             class="icon-btn"
             title={t("sidebar.sortOptions")}
             onclick={() => (projectSortMenuOpen = !projectSortMenuOpen)}
-          >⋮</button>
+          >{@render iconMoreVertical()}</button>
           {#if projectSortMenuOpen}
             <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (projectSortMenuOpen = false)}></button>
             <div class="dropdown-menu">
@@ -3214,7 +3421,7 @@
                 >
                   <span>{t(f.label)}</span>
                   {#if projectSortField === f.field}
-                    <span class="sort-dir-indicator">{projectSortDir === "asc" ? "↑" : "↓"}</span>
+                    <span class="sort-dir-indicator">{#if projectSortDir === "asc"}{@render iconArrowUp()}{:else}{@render iconArrowDown()}{/if}</span>
                   {/if}
                 </button>
               {/each}
@@ -3230,12 +3437,12 @@
               {#if renamingProjectId === project.id}
                 <form class="inline-form" onsubmit={submitRenameProject}>
                   <input bind:value={renameProjectValue} use:focusOnMount onblur={submitRenameProject} />
-                  <button type="submit" title={t("sidebar.save")}>✓</button>
-                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingProjectId = null)}>✕</button>
+                  <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingProjectId = null)}>{@render iconClose()}</button>
                 </form>
               {:else}
                 <button type="button" class="project-link" onclick={() => selectProject(project.id)} ondblclick={() => startRenameProject(project)}>
-                  <span class="folder-icon">{project.id === selectedProjectId ? "📂" : "📁"}</span>
+                  <span class="folder-icon">{#if project.id === selectedProjectId}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
                   <span class="project-name">{project.name}</span>
                 </button>
                 <div class="project-row-actions" class:force-visible={openProjectMenuId === project.id}>
@@ -3246,7 +3453,7 @@
                       class="icon-btn"
                       title={t("sidebar.moreActions")}
                       onclick={() => (openProjectMenuId = openProjectMenuId === project.id ? null : project.id)}
-                    >⋮</button>
+                    >{@render iconMoreVertical()}</button>
                     {#if openProjectMenuId === project.id}
                       <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (openProjectMenuId = null)}></button>
                       <div class="dropdown-menu">
@@ -3319,7 +3526,7 @@
                       class="icon-btn"
                       title={expandedFolderIds.size < folders.length ? t("sidebar.expandAllFolders") : t("sidebar.collapseAllFolders")}
                       onclick={toggleExpandAllFolders}
-                    >{expandedFolderIds.size < folders.length ? "⊞" : "⊟"}</button>
+                    >{#if expandedFolderIds.size < folders.length}{@render iconExpandAll()}{:else}{@render iconCollapseAll()}{/if}</button>
                   {/if}
                   <div class="menu-wrap">
                     <button
@@ -3327,7 +3534,7 @@
                       class="icon-btn"
                       title={t("sidebar.sortOptions")}
                       onclick={() => (requestSortMenuOpen = !requestSortMenuOpen)}
-                    >⋮</button>
+                    >{@render iconMoreVertical()}</button>
                     {#if requestSortMenuOpen}
                       <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (requestSortMenuOpen = false)}></button>
                       <div class="dropdown-menu">
@@ -3340,7 +3547,7 @@
                           >
                             <span>{t(f.label)}</span>
                             {#if requestSortField === f.field}
-                              <span class="sort-dir-indicator">{requestSortDir === "asc" ? "↑" : "↓"}</span>
+                              <span class="sort-dir-indicator">{#if requestSortDir === "asc"}{@render iconArrowUp()}{:else}{@render iconArrowDown()}{/if}</span>
                             {/if}
                           </button>
                         {/each}
@@ -3362,9 +3569,9 @@
 
                   {#if totalRequestPages > 1}
                     <div class="request-pagination">
-                      <button type="button" title={t("sidebar.prevPage")} disabled={requestPage === 0} onclick={() => (requestPage = Math.max(0, requestPage - 1))}>◀</button>
+                      <button type="button" title={t("sidebar.prevPage")} disabled={requestPage === 0} onclick={() => (requestPage = Math.max(0, requestPage - 1))}>{@render iconChevronLeft()}</button>
                       <span>{requestPage + 1} / {totalRequestPages}</span>
-                      <button type="button" title={t("sidebar.nextPage")} disabled={requestPage >= totalRequestPages - 1} onclick={() => (requestPage = Math.min(totalRequestPages - 1, requestPage + 1))}>▶</button>
+                      <button type="button" title={t("sidebar.nextPage")} disabled={requestPage >= totalRequestPages - 1} onclick={() => (requestPage = Math.min(totalRequestPages - 1, requestPage + 1))}>{@render iconChevronRight()}</button>
                     </div>
                   {/if}
                 {:else}
@@ -3374,18 +3581,18 @@
                         {#if renamingFolderId === folder.id}
                           <form class="inline-form" onsubmit={submitRenameFolder}>
                             <input bind:value={renameFolderValue} use:focusOnMount onblur={submitRenameFolder} />
-                            <button type="submit" title={t("sidebar.save")}>✓</button>
-                            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingFolderId = null)}>✕</button>
+                            <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                            <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingFolderId = null)}>{@render iconClose()}</button>
                           </form>
                         {:else}
                           <button type="button" class="folder-link" onclick={() => toggleFolderExpanded(folder.id)} ondblclick={() => startRenameFolder(folder)}>
-                            <span class="folder-icon">{expandedFolderIds.has(folder.id) ? "📂" : "📁"}</span>
+                            <span class="folder-icon">{#if expandedFolderIds.has(folder.id)}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
                             <span class="project-name">{folder.name}</span>
                           </button>
                           <div class="project-row-actions">
                             <button class="icon-btn" title={t("sidebar.addRequest")} onclick={() => quickCreateRequest(project.id, folder.id)}>+</button>
-                            <button class="icon-btn" title={t("sidebar.rename")} onclick={() => startRenameFolder(folder)}>✎</button>
-                            <button class="icon-btn" title={t("sidebar.deleteFolder")} onclick={() => deleteFolderAction(folder.id)}>🗑</button>
+                            <button class="icon-btn" title={t("sidebar.rename")} onclick={() => startRenameFolder(folder)}>{@render iconEdit()}</button>
+                            <button class="icon-btn" title={t("sidebar.deleteFolder")} onclick={() => deleteFolderAction(folder.id)}>{@render iconTrash()}</button>
                           </div>
                         {/if}
                       </div>
@@ -3438,18 +3645,18 @@
       tabindex="0"
     ></div>
     {:else}
-    <button type="button" class="sidebar-expand-btn" title={t("sidebar.show")} onclick={() => (sidebarVisible = true)}>»</button>
+    <button type="button" class="sidebar-expand-btn" title={t("sidebar.show")} onclick={() => setSidebarVisible(true)}>{@render iconChevronRight()}</button>
     {/if}
 
     <main class="main">
       {#if !selectedProjectId}
         <div class="empty-state">
-          <div class="empty-icon">📁</div>
+          <div class="empty-icon">{@render iconFolder()}</div>
           <p>{t("workspace.selectProject")}</p>
         </div>
       {:else if !selectedRequest}
         <div class="empty-state">
-          <div class="empty-icon">📨</div>
+          <div class="empty-icon">{@render iconFileText()}</div>
           <p>{t("request.selectPrompt")}</p>
         </div>
       {:else}
@@ -3462,6 +3669,12 @@
                     type="button"
                     class="tab-pill-btn"
                     onclick={() => openRequest(tab.id)}
+                    onmousedown={(e) => {
+                      if (e.button === 1) {
+                        e.preventDefault();
+                        closeTab(tab.id);
+                      }
+                    }}
                   >
                     <span class="tab-method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
                     <span class="tab-title">{tab.name}</span>
@@ -3478,7 +3691,7 @@
                       closeTab(tab.id);
                     }}
                   >
-                    ✕
+                    {@render iconClose()}
                   </button>
                 </div>
               {/each}
@@ -3486,14 +3699,14 @@
           {/if}
 
           <div class="breadcrumb-row">
-            <span class="breadcrumb-icon">🧭</span>
+            <span class="breadcrumb-icon">{@render iconFolder()}</span>
             <span class="breadcrumb-path">{projects.find((p) => p.id === selectedProjectId)?.name ?? ""}</span>
             <span class="breadcrumb-sep">›</span>
             {#if renamingRequestId === selectedRequest.id}
               <form class="inline-form" onsubmit={submitRenameRequest}>
                 <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
-                <button type="submit" title={t("sidebar.save")}>✓</button>
-                <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>✕</button>
+                <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>{@render iconClose()}</button>
               </form>
             {:else}
               <button
@@ -3502,7 +3715,7 @@
                 title={t("breadcrumb.renameHint")}
                 onclick={() => startRenameRequest(selectedRequest!.id, selectedRequest!.name)}
               >
-                {selectedRequest.name} <span class="breadcrumb-edit-hint">✎</span>
+                {selectedRequest.name} <span class="breadcrumb-edit-hint">{@render iconEdit()}</span>
               </button>
             {/if}
           </div>
@@ -3575,8 +3788,11 @@
               {#if curlDetectedFeedback}
                 <span class="hint">{curlDetectedFeedback}</span>
               {/if}
+              {#if sendCancelledNotice}
+                <span class="hint">{sendCancelledNotice}</span>
+              {/if}
               <div class="response-stat-spacer"></div>
-              <button type="button" class="icon-btn" title={t("request.deleteRequest")} onclick={() => deleteRequest(selectedRequest!.id)}>🗑</button>
+              <button type="button" class="icon-btn" title={t("request.deleteRequest")} onclick={() => deleteRequest(selectedRequest!.id)}>{@render iconTrash()}</button>
             </div>
           </form>
 
@@ -3615,7 +3831,7 @@
 
           {#if requestDiagnostics?.all_missing?.length}
             <div class="warn-banner missing-vars-banner">
-              ⚠️ {t("request.unresolvedVariables")}
+              {@render iconWarning()} {t("request.unresolvedVariables")}
               {#each requestDiagnostics.all_missing as varName (varName)}
                 <span
                   class="missing-var-chip"
@@ -3634,7 +3850,7 @@
             <button type="button" class="editor-tab" class:active={activeEditorTab === "params"} onclick={() => (activeEditorTab = "params")}>
               {t("tab.params")}
               {#if requestDiagnostics?.query_params_missing?.length}
-                <span class="tab-badge-warn" title={t("tab.missingInParams", { list: requestDiagnostics.query_params_missing.join(', ') })}>⚠ {requestDiagnostics.query_params_missing.length}</span>
+                <span class="tab-badge-warn" title={t("tab.missingInParams", { list: requestDiagnostics.query_params_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.query_params_missing.length}</span>
               {:else if withoutEmptyKeyRows(editQueryParams).length}
                 <span class="tab-badge">{withoutEmptyKeyRows(editQueryParams).length}</span>
               {/if}
@@ -3642,7 +3858,7 @@
             <button type="button" class="editor-tab" class:active={activeEditorTab === "headers"} onclick={() => (activeEditorTab = "headers")}>
               {t("tab.headers")}
               {#if requestDiagnostics?.headers_missing?.length}
-                <span class="tab-badge-warn" title={t("tab.missingInHeaders", { list: requestDiagnostics.headers_missing.join(', ') })}>⚠ {requestDiagnostics.headers_missing.length}</span>
+                <span class="tab-badge-warn" title={t("tab.missingInHeaders", { list: requestDiagnostics.headers_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.headers_missing.length}</span>
               {:else if withoutEmptyKeyRows(editHeaders).length}
                 <span class="tab-badge">{withoutEmptyKeyRows(editHeaders).length}</span>
               {/if}
@@ -3650,7 +3866,7 @@
             <button type="button" class="editor-tab" class:active={activeEditorTab === "auth"} onclick={() => (activeEditorTab = "auth")}>
               {t("tab.auth")}
               {#if requestDiagnostics?.auth_missing?.length}
-                <span class="tab-badge-warn" title={t("tab.missingInAuth", { list: requestDiagnostics.auth_missing.join(', ') })}>⚠ {requestDiagnostics.auth_missing.length}</span>
+                <span class="tab-badge-warn" title={t("tab.missingInAuth", { list: requestDiagnostics.auth_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.auth_missing.length}</span>
               {:else if editAuthType !== "none"}
                 <span class="tab-dot">•</span>
               {/if}
@@ -3658,7 +3874,7 @@
             <button type="button" class="editor-tab" class:active={activeEditorTab === "body"} onclick={() => (activeEditorTab = "body")}>
               {t("tab.body")}
               {#if requestDiagnostics?.body_missing?.length}
-                <span class="tab-badge-warn" title={t("tab.missingInBody", { list: requestDiagnostics.body_missing.join(', ') })}>⚠ {requestDiagnostics.body_missing.length}</span>
+                <span class="tab-badge-warn" title={t("tab.missingInBody", { list: requestDiagnostics.body_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.body_missing.length}</span>
               {:else if editBody}
                 <span class="tab-dot">•</span>
               {/if}
@@ -3675,7 +3891,7 @@
           </div>
 
           <div class="editor-body-row">
-          <div class="editor-main-col">
+          <div class="editor-pane">
           <div class="tab-content">
             {#if activeEditorTab === "params"}
               <div class="params-table">
@@ -3685,7 +3901,7 @@
                     <input placeholder={t("params.key")} bind:value={param.key} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
                     <input placeholder={t("params.value")} bind:value={param.value} oninput={() => { growQueryParams(); scheduleAutoSave(); }} />
                     {#if i < editQueryParams.length - 1 || param.key.trim()}
-                      <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeQueryParam(i); scheduleAutoSave(); }}>🗑</button>
+                      <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeQueryParam(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
                     {/if}
                   </div>
                 {/each}
@@ -3700,7 +3916,7 @@
                     <input placeholder={t("params.value")} bind:value={header.value} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
                     <input placeholder={t("headers.description")} bind:value={header.description} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
                     {#if i < editHeaders.length - 1 || header.key.trim()}
-                      <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeHeader(i); scheduleAutoSave(); }}>🗑</button>
+                      <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeHeader(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
                     {/if}
                   </div>
                 {/each}
@@ -3782,7 +3998,7 @@
                           <input type="checkbox" bind:checked={item.is_file} onchange={scheduleAutoSave} /> {t("body.file")}
                         </label>
                         {#if i < editFormDataItems.length - 1 || item.key.trim()}
-                          <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeFormDataItem(i); scheduleAutoSave(); }}>🗑</button>
+                          <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeFormDataItem(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
                         {/if}
                       </div>
                     {/each}
@@ -3795,7 +4011,7 @@
                         <input placeholder={t("params.key")} bind:value={item.key} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
                         <input placeholder={t("params.value")} bind:value={item.value} oninput={() => { growUrlEncodedItems(); scheduleAutoSave(); }} />
                         {#if i < editUrlEncodedItems.length - 1 || item.key.trim()}
-                          <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeUrlEncodedItem(i); scheduleAutoSave(); }}>🗑</button>
+                          <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeUrlEncodedItem(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
                         {/if}
                       </div>
                     {/each}
@@ -3960,6 +4176,67 @@
             {/if}
           </div>
 
+          <div class="sample-responses-section">
+            <div class="field-header-row">
+              <h3>{t("sample.title", { count: sampleResponses.length })}</h3>
+              <button
+                type="button"
+                class="btn-ghost btn-xs"
+                disabled={generatingSample}
+                onclick={generateSampleResponseWithAiAction}
+                title={t("sample.generateTitle")}
+              >
+                {generatingSample ? t("scripts.generating") : t("sample.generate")}
+              </button>
+            </div>
+            {#if sampleFeedback}
+              <p class="action-feedback-inline">{sampleFeedback}</p>
+            {/if}
+            {#if sampleResponses.length}
+              <div class="sample-responses-list">
+                {#each sampleResponses as sr (sr.id)}
+                  <details class="sample-response-card">
+                    <summary class="sample-response-summary">
+                      <span class="badge badge-sample">{t("sample.badge")}</span>
+                      <strong class:status-ok={sr.status < 400} class:status-err={sr.status >= 400}>
+                        {sr.status}
+                      </strong>
+                      <span class="sample-name">{sr.name}</span>
+                      <span class="hint">{new Date(sr.created_at).toLocaleTimeString()}</span>
+                      <button
+                        type="button"
+                        class="btn-delete-icon"
+                        onclick={(e) => { e.stopPropagation(); deleteSampleResponseAction(sr.request_id, sr.id); }}
+                        title={t("sample.delete")}
+                      >{@render iconClose()}</button>
+                    </summary>
+                    <pre class="body-view">{sr.body ?? ""}</pre>
+                  </details>
+                {/each}
+              </div>
+            {/if}
+          </div>
+          </div>
+
+          <div
+            class="response-pane-resize-handle"
+            class:resizing={responsePaneResizing}
+            onmousedown={startResponsePaneResize}
+            onkeydown={(e) => {
+              responsePaneManuallyResized = true;
+              if (e.key === "ArrowUp") responsePaneHeight = Math.min(window.innerHeight - 220, responsePaneHeight + 16);
+              else if (e.key === "ArrowDown") responsePaneHeight = Math.max(160, responsePaneHeight - 16);
+            }}
+            role="slider"
+            aria-orientation="horizontal"
+            aria-label={t("response.resizeHandle")}
+            aria-valuenow={responsePaneHeight}
+            aria-valuemin={160}
+            aria-valuemax={900}
+            tabindex="0"
+          ></div>
+
+          <div class="response-pane" style="height: {responsePaneHeight}px">
           {#if sending}
             <div class="response-loading">
               <span class="spinner" aria-hidden="true"></span>
@@ -3977,9 +4254,9 @@
                 {#if copyFeedback}
                   <span class="hint">{copyFeedback}</span>
                 {/if}
-                <button type="button" class="icon-btn" title={t("response.copyTitle")} onclick={copyResponseBody}>⧉</button>
-                <button type="button" class="icon-btn" title={t("response.downloadTitle")} onclick={downloadResponseBody}>⭳</button>
-                <button type="button" class="icon-btn" title={t("response.expand")} onclick={() => (responseExpanded = true)}>⤢</button>
+                <button type="button" class="icon-btn" title={t("response.copyTitle")} onclick={copyResponseBody}>{@render iconCopy()}</button>
+                <button type="button" class="icon-btn" title={t("response.downloadTitle")} onclick={downloadResponseBody}>{@render iconImport()}</button>
+                <button type="button" class="icon-btn" title={t("response.expand")} onclick={() => (responseExpanded = true)}>{@render iconExpandDiagonal()}</button>
               </div>
 
               <div class="response-subtabs">
@@ -3999,6 +4276,10 @@
                       {activeResponseTests.filter((test) => test.passed).length}/{activeResponseTests.length}
                     </span>
                   {/if}
+                </button>
+                <button type="button" class="response-subtab" class:active={responseSubTab === "history"} onclick={() => (responseSubTab = "history")}>
+                  {t("response.history")}
+                  {#if responseHistory.length}<span class="tab-badge">{responseHistory.length}</span>{/if}
                 </button>
 
                 {#if responseSubTab === "body"}
@@ -4048,7 +4329,7 @@
                     <ul class="test-results-list">
                       {#each activeResponseTests as test, i (i)}
                         <li class="test-result-row" class:test-pass={test.passed} class:test-fail={!test.passed}>
-                          <span class="test-result-icon">{test.passed ? "✓" : "✗"}</span>
+                          <span class="test-result-icon">{#if test.passed}{@render iconCheck()}{:else}{@render iconClose()}{/if}</span>
                           <span class="test-result-name">{test.name}</span>
                           {#if !test.passed && test.error}<span class="test-result-error">{test.error}</span>{/if}
                         </li>
@@ -4057,62 +4338,61 @@
                   {:else}
                     <p class="empty">{t("response.testsHintFull")}</p>
                   {/if}
+                {:else if responseSubTab === "history"}
+                  {#if responseHistory.length}
+                    <ul class="response-history-list">
+                      {#each responseHistory as r (r.id)}
+                        <li>
+                          <button type="button" class="response-history-row" onclick={() => openHistoryResponse(r.id)}>
+                            <span class="status-chip" class:status-ok={r.status < 400} class:status-err={r.status >= 400}>{r.status}</span>
+                            <span class="response-history-duration">{r.duration_ms} ms</span>
+                            <span class="response-history-time">{new Date(r.created_at).toLocaleString()}</span>
+                          </button>
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else}
+                    <p class="empty">{t("history.empty")}</p>
+                  {/if}
                 {/if}
               </div>
             </div>
           {:else}
             <div class="response-empty-state">
-              <div class="empty-icon">📭</div>
+              <div class="empty-icon">{@render iconInboxEmpty()}</div>
               <p>{t("response.sendEmpty")}</p>
             </div>
           {/if}
+          </div>
+          </div>
+        </section>
+      {/if}
+    </main>
 
-          <div class="sample-responses-section">
-            <div class="field-header-row">
-              <h3>{t("sample.title", { count: sampleResponses.length })}</h3>
-              <button
-                type="button"
-                class="btn-ghost btn-xs"
-                disabled={generatingSample}
-                onclick={generateSampleResponseWithAiAction}
-                title={t("sample.generateTitle")}
-              >
-                {generatingSample ? t("scripts.generating") : t("sample.generate")}
-              </button>
-            </div>
-            {#if sampleFeedback}
-              <p class="action-feedback-inline">{sampleFeedback}</p>
-            {/if}
-            {#if sampleResponses.length}
-              <div class="sample-responses-list">
-                {#each sampleResponses as sr (sr.id)}
-                  <details class="sample-response-card">
-                    <summary class="sample-response-summary">
-                      <span class="badge badge-sample">{t("sample.badge")}</span>
-                      <strong class:status-ok={sr.status < 400} class:status-err={sr.status >= 400}>
-                        {sr.status}
-                      </strong>
-                      <span class="sample-name">{sr.name}</span>
-                      <span class="hint">{new Date(sr.created_at).toLocaleTimeString()}</span>
-                      <button
-                        type="button"
-                        class="btn-delete-icon"
-                        onclick={(e) => { e.stopPropagation(); deleteSampleResponseAction(sr.request_id, sr.id); }}
-                        title={t("sample.delete")}
-                      >✕</button>
-                    </summary>
-                    <pre class="body-view">{sr.body ?? ""}</pre>
-                  </details>
-                {/each}
-              </div>
-            {/if}
-          </div>
-          </div>
+    {#if activeScreen === "workspace" && !responseExpanded && selectedProjectId}
+      {#if rightSidebarVisible}
+        <aside class="right-sidebar">
+          <div class="right-sidebar-header">
+            <button
+              type="button"
+              class="right-sidebar-tab"
+              class:active={rightPanel === "code"}
+              onclick={() => (rightPanel = rightPanel === "code" ? null : "code")}
+            >&lt;/&gt; {t("bottom.codeSnippet")}</button>
+            <button
+              type="button"
+              class="right-sidebar-tab"
+              class:active={rightPanel === "info"}
+              onclick={() => (rightPanel = rightPanel === "info" ? null : "info")}
+            >{@render iconInfo()} {t("bottom.info")}</button>
+            <div class="response-stat-spacer"></div>
+            <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => setRightSidebarVisible(false)}>{@render iconChevronRight()}</button>
           </div>
 
-          {#if rightPanel === "code"}
+          {#if !selectedRequest}
+            <p class="screen-empty-inline">{t("request.selectPrompt")}</p>
+          {:else if rightPanel === "code"}
             <div class="bottom-panel">
-              <h3 class="right-panel-title">{t("bottom.codeSnippet")}</h3>
               <div class="params-row">
                 <select bind:value={snippetTarget}>
                   <option value="windows_cmd">{t("bottom.targetWindowsCmd")}</option>
@@ -4125,21 +4405,20 @@
                   <option value="placeholder">{t("bottom.placeholderSafe")}</option>
                   <option value="resolved">{t("bottom.resolvedReal")}</option>
                 </select>
-                <button type="button" class="btn-primary" onclick={copyAsCurl}>{t("bottom.generateSnippet")}</button>
                 {#if snippet}
                   <button type="button" onclick={copySnippetToClipboard}>{t("bottom.copyClipboard")}</button>
                 {/if}
               </div>
               {#if snippetError}
                 <p class="error">{snippetError}</p>
-              {/if}
-              {#if snippet}
+              {:else if snippetLoading}
+                <p class="hint">{t("bottom.generatingSnippet")}</p>
+              {:else if snippet}
                 <pre class="body-view bottom-panel-code">{snippet}</pre>
               {/if}
             </div>
-          {:else if rightPanel === "info" && selectedRequest}
+          {:else if rightPanel === "info"}
             <div class="bottom-panel">
-              <h3 class="right-panel-title">{t("bottom.requestInfo")}</h3>
               <dl class="info-list info-list-grid">
                 <dt>{t("bottom.id")}</dt>
                 <dd>{selectedRequest.id}</dd>
@@ -4155,42 +4434,14 @@
                 <dd>{selectedRequest.query_params.length}</dd>
               </dl>
             </div>
-          {/if}
-
-          <div class="bottom-bar">
-            <button
-              type="button"
-              class="bottom-bar-tab"
-              class:active={rightPanel === "code"}
-              onclick={() => (rightPanel = rightPanel === "code" ? null : "code")}
-            >&lt;/&gt; {t("bottom.codeSnippet")}</button>
-            <button
-              type="button"
-              class="bottom-bar-tab"
-              class:active={rightPanel === "info"}
-              onclick={() => (rightPanel = rightPanel === "info" ? null : "info")}
-            >ⓘ {t("bottom.info")}</button>
-          </div>
-
-          <h2>{t("history.title")}</h2>
-          {#if responseHistory.length}
-            <ul class="requests">
-              {#each responseHistory as r (r.id)}
-                <li class="row-item">
-                  <button class="link" onclick={() => openHistoryResponse(r.id)}>
-                    <span class="method">{r.status}</span>
-                    <span class="name">{r.duration_ms} ms</span>
-                    <span class="url">{new Date(r.created_at).toLocaleString()}</span>
-                  </button>
-                </li>
-              {/each}
-            </ul>
           {:else}
-            <p class="empty">{t("history.empty")}</p>
+            <p class="screen-empty-inline">{t("bottom.pickPanel")}</p>
           {/if}
-        </section>
+        </aside>
+      {:else}
+        <button type="button" class="sidebar-expand-btn" title={t("sidebar.show")} onclick={() => setRightSidebarVisible(true)}>{@render iconChevronLeft()}</button>
       {/if}
-    </main>
+    {/if}
   </div>
 
   {#if showConsole}
@@ -4226,7 +4477,7 @@
           <button type="button" class="console-btn" onclick={clearConsole} title={t("console.clearTitle")}>{t("console.clear")}</button>
           <button type="button" class="console-btn" onclick={copyConsoleLog} title={t("console.copyTitle")}>{t("console.copy")}</button>
           <button type="button" class="console-btn" onclick={exportConsoleJson} title={t("console.exportJsonTitle")}>{t("console.exportJson")}</button>
-          <button type="button" class="console-close-btn" onclick={() => (showConsole = false)} title={t("console.closeTitle")}>✕</button>
+          <button type="button" class="console-close-btn" onclick={() => (showConsole = false)} title={t("console.closeTitle")}>{@render iconClose()}</button>
         </div>
       </div>
 
@@ -4244,7 +4495,7 @@
                   tabindex="0"
                   onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") toggleEventExpanded(evt.id); }}
                 >
-                  <span class="evt-expander">{expandedEventIds.has(evt.id) ? "▼" : "▶"}</span>
+                  <span class="evt-expander">{#if expandedEventIds.has(evt.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</span>
                   <span class="evt-time">{formatConsoleTime(evt.timestamp)}</span>
                   <span class="evt-level level-{evt.level}">{evt.level.toUpperCase()}</span>
                   <span class="evt-type">{evt.event_type}</span>
@@ -4281,10 +4532,10 @@
       >
         <span>{t("console.title")}</span>
         {#if consoleErrorCount > 0}
-          <span class="status-badge-error">✖ {consoleErrorCount}</span>
+          <span class="status-badge-error">{@render iconXCircle()} {consoleErrorCount}</span>
         {/if}
         {#if consoleWarnCount > 0}
-          <span class="status-badge-warn">⚠ {consoleWarnCount}</span>
+          <span class="status-badge-warn">{@render iconWarning()} {consoleWarnCount}</span>
         {/if}
       </button>
     </div>
@@ -4300,7 +4551,7 @@
             if (gitRepoPathInput) refreshGitStatus();
           }}
         >
-          <span class="git-icon">⎇</span>
+          <span class="git-icon">{@render iconGitBranch()}</span>
           {#if !gitSettings?.repo_path}
             <span>{t("footer.gitNotConfigured")}</span>
           {:else if gitStatusLoading}
@@ -4309,8 +4560,8 @@
             <span class="git-alert">{t("footer.gitConflict", { count: gitStatus.conflict_files.length })}</span>
           {:else if gitStatus}
             <span>{t("footer.gitBranchStatus", { branch: gitStatus.branch, status: gitStatus.status_kind })}</span>
-            {#if gitStatus.ahead > 0}<span class="git-ahead">↑{gitStatus.ahead}</span>{/if}
-            {#if gitStatus.behind > 0}<span class="git-behind">↓{gitStatus.behind}</span>{/if}
+            {#if gitStatus.ahead > 0}<span class="git-ahead">{@render iconArrowUp()}{gitStatus.ahead}</span>{/if}
+            {#if gitStatus.behind > 0}<span class="git-behind">{@render iconArrowDown()}{gitStatus.behind}</span>{/if}
           {:else}
             <span>{t("footer.gitLabel", { branch: gitBranchInput })}</span>
           {/if}
@@ -4318,7 +4569,7 @@
         <span class="status-info">{t("footer.project", { name: projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId })}</span>
       {/if}
       {#if selectedEnvironmentId}
-        <span class="status-info">{t("footer.env", { name: environments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId })}</span>
+        <span class="status-info">{t("footer.env", { name: allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId })}</span>
       {/if}
     </div>
   </footer>
@@ -4339,7 +4590,7 @@
             <h3>{t("ai.title")}</h3>
             <span class="modal-sub">{t("ai.subtitle")}</span>
           </div>
-          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showAiPanel = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showAiPanel = false)}>{@render iconClose()}</button>
         </div>
 
         <div class="modal-tabs">
@@ -4493,7 +4744,7 @@
                           <span class="method method-{ep.method.toLowerCase()}">{ep.method}</span>
                           <code class="ep-path">{ep.path}</code>
                           {#if ep.auth_hint}
-                            <span class="badge badge-auth" title={t("ai.authDetectedTitle")}>🔒 {ep.auth_hint}</span>
+                            <span class="badge badge-auth" title={t("ai.authDetectedTitle")}>{@render iconLock()} {ep.auth_hint}</span>
                           {/if}
                         </div>
                         <div class="ep-meta">
@@ -4583,12 +4834,12 @@
               {/if}
               {#if aiTestFeedback}
                 <div class="action-alert success">
-                  <span>✅ {aiTestFeedback}</span>
+                  <span>{@render iconCheckCircle()} {aiTestFeedback}</span>
                 </div>
               {/if}
               {#if aiTestError}
                 <div class="action-alert danger">
-                  <span>❌ {aiTestError}</span>
+                  <span>{@render iconXCircle()} {aiTestError}</span>
                 </div>
               {/if}
             </div>
@@ -4614,7 +4865,7 @@
       <div class="modal-container">
         <div class="modal-header">
           <h3>{t("diff.title")}</h3>
-          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showDiffModal = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showDiffModal = false)}>{@render iconClose()}</button>
         </div>
         <div class="modal-body">
           {#if !gitDiffContent.trim()}
@@ -4642,7 +4893,7 @@
       <div class="modal-container">
         <div class="modal-header">
           <h3>{t("diffHistory.title")}</h3>
-          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showHistoryModal = false)}>✕</button>
+          <button type="button" class="modal-close-btn" title={t("common.close")} onclick={() => (showHistoryModal = false)}>{@render iconClose()}</button>
         </div>
         <div class="modal-body">
           {#if gitHistory.length === 0}
@@ -4694,27 +4945,30 @@
           >
             {t("env.noEnvironment")}
           </button>
-          {#each environments as env (env.id)}
-            {#if renamingEnvironmentId === env.id}
-              <form class="inline-form env-screen-rename-form" onsubmit={submitRenameEnvironment}>
-                <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
-                <button type="submit" title={t("sidebar.save")}>✓</button>
-                <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>✕</button>
-              </form>
-            {:else}
-              <div class="env-screen-item-row" class:active={selectedEnvironmentId === env.id}>
-                <button
-                  type="button"
-                  class="env-screen-item"
-                  onclick={() => { selectedEnvironmentId = env.id; loadVariables(); }}
-                  ondblclick={() => startRenameEnvironment(env)}
-                >
-                  {env.name}
-                </button>
-                <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameEnvironment(env)}>✎</button>
-                <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteEnvironmentAction(env.id)}>🗑</button>
-              </div>
-            {/if}
+          {#each environmentsByProject as [projectName, envs] (projectName)}
+            <div class="env-screen-group-label">{projectName}</div>
+            {#each envs as env (env.id)}
+              {#if renamingEnvironmentId === env.id}
+                <form class="inline-form env-screen-rename-form" onsubmit={submitRenameEnvironment}>
+                  <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
+                  <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>{@render iconClose()}</button>
+                </form>
+              {:else}
+                <div class="env-screen-item-row" class:active={selectedEnvironmentId === env.id}>
+                  <button
+                    type="button"
+                    class="env-screen-item"
+                    onclick={() => { selectedEnvironmentId = env.id; loadVariables(); }}
+                    ondblclick={() => startRenameEnvironment(env)}
+                  >
+                    {env.name}
+                  </button>
+                  <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameEnvironment(env)}>{@render iconEdit()}</button>
+                  <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteEnvironmentAction(env.id)}>{@render iconTrash()}</button>
+                </div>
+              {/if}
+            {/each}
           {/each}
         </div>
       </aside>
@@ -4722,7 +4976,7 @@
       <section class="screen-page">
         <div class="screen-page-header">
           <span class="screen-kicker">{t("env.editing")}</span>
-          <h1 class="screen-title">{selectedEnvironmentId ? (environments.find((e) => e.id === selectedEnvironmentId)?.name ?? t("env.fallbackName")) : t("env.globalAll")}</h1>
+          <h1 class="screen-title">{selectedEnvironmentId ? (allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? t("env.fallbackName")) : t("env.globalAll")}</h1>
         </div>
 
         <div class="screen-page-body">
@@ -4739,12 +4993,12 @@
                 {#if v.is_secret}
                   <span class="badge">{t("env.secretBadge")}</span>
                   {#if !revealedSecrets[v.id]}
-                    <button type="button" class="icon-btn" title={t("env.reveal")} onclick={() => revealSecret(v.id)}>👁</button>
+                    <button type="button" class="icon-btn" title={t("env.reveal")} onclick={() => revealSecret(v.id)}>{@render iconEye()}</button>
                   {/if}
                 {/if}
-                <button type="button" class="icon-btn" title={v.is_local ? t("env.makeShared") : t("env.makeLocalOnly")} onclick={() => toggleVariableLocal(v)}>{v.is_local ? "💻" : "🌐"}</button>
-                <button type="button" class="icon-btn" title={t("env.toggleSecret")} onclick={() => toggleVariableSecret(v)}>🔒</button>
-                <button type="button" class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteVariable(v.id)}>🗑</button>
+                <button type="button" class="icon-btn" title={v.is_local ? t("env.makeShared") : t("env.makeLocalOnly")} onclick={() => toggleVariableLocal(v)}>{#if v.is_local}{@render iconMonitor()}{:else}{@render iconGlobe()}{/if}</button>
+                <button type="button" class="icon-btn" title={t("env.toggleSecret")} onclick={() => toggleVariableSecret(v)}>{@render iconLock()}</button>
+                <button type="button" class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteVariable(v.id)}>{@render iconTrash()}</button>
               </div>
             {/each}
             <div
@@ -4788,12 +5042,12 @@
                   {#if v.is_secret}
                     <span class="badge">{t("env.secretBadge")}</span>
                     {#if !revealedSecrets[v.id]}
-                      <button type="button" class="icon-btn" title={t("env.reveal")} onclick={() => revealSecret(v.id)}>👁</button>
+                      <button type="button" class="icon-btn" title={t("env.reveal")} onclick={() => revealSecret(v.id)}>{@render iconEye()}</button>
                     {/if}
                   {/if}
-                  <button type="button" class="icon-btn" title={v.is_local ? t("env.makeShared") : t("env.makeLocalOnly")} onclick={() => toggleVariableLocal(v)}>{v.is_local ? "💻" : "🌐"}</button>
-                  <button type="button" class="icon-btn" title={t("env.toggleSecret")} onclick={() => toggleVariableSecret(v)}>🔒</button>
-                  <button type="button" class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteVariable(v.id)}>🗑</button>
+                  <button type="button" class="icon-btn" title={v.is_local ? t("env.makeShared") : t("env.makeLocalOnly")} onclick={() => toggleVariableLocal(v)}>{#if v.is_local}{@render iconMonitor()}{:else}{@render iconGlobe()}{/if}</button>
+                  <button type="button" class="icon-btn" title={t("env.toggleSecret")} onclick={() => toggleVariableSecret(v)}>{@render iconLock()}</button>
+                  <button type="button" class="icon-btn" title={t("sidebar.delete")} onclick={() => deleteVariable(v.id)}>{@render iconTrash()}</button>
                 </div>
               {/each}
               <div
@@ -5016,7 +5270,7 @@
                   {#each gitStatus.conflict_files as file}
                     <div class="conflict-item-card">
                       <div class="conflict-item-header">
-                        <span class="conflict-filename">📄 {file}</span>
+                        <span class="conflict-filename">{@render iconFileText()} {file}</span>
                         <div class="conflict-choices">
                           <button
                             type="button"
@@ -5201,6 +5455,7 @@
       <button type="button" class="modal-tab-btn" class:active={importActiveTab === "collection"} onclick={() => (importActiveTab = "collection")}>{t("import.tabCollection")}</button>
       <button type="button" class="modal-tab-btn" class:active={importActiveTab === "environment"} onclick={() => (importActiveTab = "environment")}>{t("import.tabEnvironment")}</button>
       <button type="button" class="modal-tab-btn" class:active={importActiveTab === "curl"} onclick={() => (importActiveTab = "curl")}>{t("import.tabCurl")}</button>
+      <button type="button" class="modal-tab-btn" class:active={importActiveTab === "localWorkspace"} onclick={() => (importActiveTab = "localWorkspace")}>{t("import.tabLocalWorkspace")}</button>
     </div>
 
     <div class="screen-page-body">
@@ -5304,6 +5559,46 @@
             </div>
           </form>
         {/if}
+      {:else if importActiveTab === "localWorkspace"}
+        <p class="hint">{t("import.localWorkspaceHint")}</p>
+        <input
+          type="text"
+          placeholder={t("import.localWorkspacePathPlaceholder")}
+          bind:value={localWorkspacePathInput}
+          class="url-input"
+        />
+
+        {#if localWorkspaceImportError}<p class="error">{localWorkspaceImportError}</p>{/if}
+
+        {#if localWorkspaceImportReport}
+          <div class="import-report-card">
+            <h4>{t("import.complete")}</h4>
+            <p>{t("import.localWorkspaceProjects", { count: localWorkspaceImportReport.projects_created })}</p>
+            <p>{t("import.localWorkspaceFolders", { count: localWorkspaceImportReport.folders_created })}</p>
+            <p>{t("import.requests", { count: localWorkspaceImportReport.requests_imported })}</p>
+            <p>{t("import.localWorkspaceEnvironments", { count: localWorkspaceImportReport.environments_imported })}</p>
+            <p>{t("import.variables", { count: localWorkspaceImportReport.variables_imported })}</p>
+            {#if localWorkspaceImportReport.warnings.length > 0}
+              <div class="warnings-box">
+                <h5>{t("import.compatNotes")}</h5>
+                <ul>
+                  {#each localWorkspaceImportReport.warnings as warn}<li>{warn}</li>{/each}
+                </ul>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="params-row">
+          <button
+            type="button"
+            class="btn-primary"
+            disabled={!localWorkspacePathInput.trim() || localWorkspaceImportLoading}
+            onclick={importLocalWorkspaceAction}
+          >
+            {localWorkspaceImportLoading ? t("import.importing") : t("import.importLocalWorkspace")}
+          </button>
+        </div>
       {/if}
     </div>
   </section>
@@ -5424,6 +5719,64 @@
       </div>
     </div>
 
+    <div class="settings-screen-block">
+      <p class="screen-subtitle">{t("theme.subtitle")}</p>
+      <div class="theme-compare">
+        <button type="button" class="theme-compare-col" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>
+          <div class="theme-compare-header">
+            <span class="screen-kicker">{t("settings.light")}</span>
+            {#if themeMode === "light"}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
+          </div>
+          <div class="theme-swatch" data-theme="light">
+            <div class="theme-swatch-topbar">
+              <span>{t("rail.brand")}</span>
+              <span class="theme-swatch-sync">SYNC</span>
+            </div>
+            <div class="theme-swatch-body">
+              <div class="theme-swatch-side">
+                <div class="screen-kicker">Explorer</div>
+                <div>List charges</div>
+                <div>Create charge</div>
+                <div class="theme-swatch-active">Refund charge</div>
+              </div>
+              <div class="theme-swatch-main">
+                <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
+                <div class="hr"></div>
+                <div class="theme-swatch-status">200 OK</div>
+                <div class="screen-empty-inline">214 ms · 1.2 KB</div>
+              </div>
+            </div>
+          </div>
+        </button>
+        <button type="button" class="theme-compare-col" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>
+          <div class="theme-compare-header">
+            <span class="screen-kicker">{t("settings.dark")}</span>
+            {#if themeMode === "dark"}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
+          </div>
+          <div class="theme-swatch" data-theme="dark">
+            <div class="theme-swatch-topbar">
+              <span>{t("rail.brand")}</span>
+              <span class="theme-swatch-sync">SYNC</span>
+            </div>
+            <div class="theme-swatch-body">
+              <div class="theme-swatch-side">
+                <div class="screen-kicker">Explorer</div>
+                <div>List charges</div>
+                <div>Create charge</div>
+                <div class="theme-swatch-active">Refund charge</div>
+              </div>
+              <div class="theme-swatch-main">
+                <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
+                <div class="hr"></div>
+                <div class="theme-swatch-status">200 OK</div>
+                <div class="screen-empty-inline">214 ms · 1.2 KB</div>
+              </div>
+            </div>
+          </div>
+        </button>
+      </div>
+    </div>
+
     <div class="settings-screen-row">
       <div>
         <div class="settings-screen-row-label">{t("settings.uiScale")}</div>
@@ -5517,68 +5870,6 @@
         </div>
       </div>
     {/if}
-  </section>
-{:else if activeScreen === "theme"}
-  <section class="screen-page">
-    <div class="screen-page-header">
-      <span class="screen-kicker">{t("settings.appearance")}</span>
-      <h1 class="screen-title">{t("theme.title")}</h1>
-      <p class="screen-subtitle">{t("theme.subtitle")} {t("theme.youAreOn", { mode: themeMode === "dark" ? t("settings.dark") : t("settings.light") })}</p>
-    </div>
-    <div class="theme-compare">
-      <button type="button" class="theme-compare-col" class:active={themeMode === "light"} onclick={() => setThemeMode("light")}>
-        <div class="theme-compare-header">
-          <span class="screen-kicker">{t("settings.light")} — {t("settings.scaleDefault")}</span>
-          {#if themeMode === "light"}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
-        </div>
-        <div class="theme-swatch" data-theme="light">
-          <div class="theme-swatch-topbar">
-            <span>{t("rail.brand")}</span>
-            <span class="theme-swatch-sync">SYNC</span>
-          </div>
-          <div class="theme-swatch-body">
-            <div class="theme-swatch-side">
-              <div class="screen-kicker">Explorer</div>
-              <div>List charges</div>
-              <div>Create charge</div>
-              <div class="theme-swatch-active">Refund charge</div>
-            </div>
-            <div class="theme-swatch-main">
-              <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
-              <div class="hr"></div>
-              <div class="theme-swatch-status">200 OK</div>
-              <div class="screen-empty-inline">214 ms · 1.2 KB</div>
-            </div>
-          </div>
-        </div>
-      </button>
-      <button type="button" class="theme-compare-col" class:active={themeMode === "dark"} onclick={() => setThemeMode("dark")}>
-        <div class="theme-compare-header">
-          <span class="screen-kicker">{t("settings.dark")}</span>
-          {#if themeMode === "dark"}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
-        </div>
-        <div class="theme-swatch" data-theme="dark">
-          <div class="theme-swatch-topbar">
-            <span>{t("rail.brand")}</span>
-            <span class="theme-swatch-sync">SYNC</span>
-          </div>
-          <div class="theme-swatch-body">
-            <div class="theme-swatch-side">
-              <div class="screen-kicker">Explorer</div>
-              <div>List charges</div>
-              <div>Create charge</div>
-              <div class="theme-swatch-active">Refund charge</div>
-            </div>
-            <div class="theme-swatch-main">
-              <div class="theme-swatch-path">POST /v1/charges/:id/refund</div>
-              <div class="hr"></div>
-              <div class="theme-swatch-status">200 OK</div>
-              <div class="screen-empty-inline">214 ms · 1.2 KB</div>
-            </div>
-          </div>
-        </div>
-      </button>
-    </div>
   </section>
 {/if}
   </div>
@@ -5787,6 +6078,15 @@
 
   * {
     box-sizing: border-box;
+  }
+
+  /* Icon library sizing — every icon scales with its own context's font-size (and therefore
+     with `uiScale`, same as the rest of the app's rem-based sizing) instead of a fixed px size. */
+  .icon {
+    width: 1em;
+    height: 1em;
+    flex: none;
+    vertical-align: -0.125em;
   }
 
   .app-shell {
@@ -6290,6 +6590,11 @@
     margin-bottom: 2px;
   }
 
+  .settings-screen-block {
+    padding: var(--space-4) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+  }
+
   .settings-screen-row-value {
     font-family: var(--font-heading);
     font-weight: 800;
@@ -6310,14 +6615,17 @@
   }
 
   .seg {
-    display: inline-flex;
+    display: flex;
+    width: 100%;
     overflow: hidden;
     border: 1px solid var(--color-border-strong);
   }
 
   .seg-opt {
     display: inline-flex;
+    flex: 1;
     align-items: center;
+    justify-content: center;
     gap: 6px;
     padding: 7px 12px;
     font-size: 0.75rem;
@@ -7791,62 +8099,145 @@
     padding: 0.8rem 0.9rem;
   }
 
+  /* Request editor (top) and docked response (bottom), stacked with a draggable divider —
+     each scrolls independently instead of the old single-column layout where the response
+     was just one more thing you scrolled past below a potentially long params/headers list. */
   .editor-body-row {
     display: flex;
+    flex-direction: column;
     flex: 1;
     min-height: 0;
     overflow: hidden;
   }
 
-  .editor-main-col {
-    flex: 1;
-    min-width: 0;
+  .editor-pane {
+    flex: 1 1 auto;
+    min-height: 80px;
     overflow-y: auto;
   }
 
-  .bottom-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.25rem;
+  .response-pane-resize-handle {
     flex: none;
-    padding: 0.3rem 0.6rem;
-    border-top: 1px solid var(--color-border);
-    background: var(--color-bg-secondary);
+    height: 7px;
+    margin: -3px 0;
+    background: transparent;
+    cursor: row-resize;
+    position: relative;
+    z-index: 1;
   }
 
-  .bottom-bar-tab {
+  .response-pane-resize-handle::before {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: var(--color-border);
+  }
+
+  .response-pane-resize-handle:hover::before,
+  .response-pane-resize-handle.resizing::before {
+    top: 2px;
+    height: 3px;
+    background: var(--color-accent);
+  }
+
+  .response-pane-resize-handle:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  .response-pane {
+    flex: none;
+    min-height: 160px;
+    max-height: calc(100% - 80px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--color-bg);
+  }
+
+  .response-pane .response-loading,
+  .response-pane .response-empty-state {
+    flex: 1;
+  }
+
+  .response-pane .response {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .response-pane .response-subtab-content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .response-pane .body-view {
+    height: 100%;
+    max-height: none;
+  }
+
+  /* Docked to the right edge of the whole window (sibling of <main>, not nested in the
+     scrollable response pane) — stays visible regardless of which editor tab is open or how
+     far the request/response area is scrolled. Mirrors the left project sidebar's treatment. */
+  .right-sidebar {
+    width: 340px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    border-left: 2px solid var(--color-border-strong);
+    background: var(--color-bg);
+    overflow: hidden;
+  }
+
+  .right-sidebar-header {
+    display: flex;
+    align-items: center;
+    gap: 0.15rem;
+    flex: none;
+    padding: var(--space-2) var(--space-2);
+    border-bottom: 2px solid var(--color-border-strong);
+  }
+
+  .right-sidebar-tab {
     display: flex;
     align-items: center;
     gap: 0.3rem;
-    padding: 0.3rem 0.6rem;
+    padding: 0.35rem 0.6rem;
     border: none;
     background: transparent;
     color: var(--color-text-secondary);
     font-size: 0.78rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
+    white-space: nowrap;
   }
 
-  .bottom-bar-tab:hover {
+  .right-sidebar-tab:hover {
     background: var(--color-bg-hover);
     color: var(--color-text);
   }
 
-  .bottom-bar-tab.active {
+  .right-sidebar-tab.active {
     background: var(--color-bg-hover);
     color: var(--color-accent);
+    font-weight: 700;
   }
 
-  /* Its own scroll area, generously tall (not the old 280px-wide sidebar sliver) — a code
-     snippet or the info list gets real room to breathe when opened. */
   .bottom-panel {
-    flex: none;
-    height: 45vh;
-    min-height: 260px;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
-    padding: var(--space-4) var(--space-6);
-    border-top: 2px solid var(--color-border-strong);
+    padding: var(--space-4);
     background: var(--color-panel-bg);
+  }
+
+  .bottom-panel .params-row {
+    flex-wrap: wrap;
   }
 
   .bottom-panel-code {
@@ -7856,16 +8247,6 @@
   .info-list-grid {
     grid-template-columns: max-content 1fr;
     column-gap: var(--space-4);
-    max-width: 480px;
-  }
-
-  .right-panel-title {
-    font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--color-text-tertiary);
-    margin: 0 0 0.6rem;
-    font-weight: 700;
   }
 
   .info-list {
@@ -7893,7 +8274,6 @@
   /* Defensive default: any bare heading dropped into the detail/response area (e.g. new
      feature sections not yet given their own class) inherits the same muted label style
      as the rest of the system instead of a jarring browser-default heading. */
-  .detail h2,
   .detail h3 {
     font-size: 0.78rem;
     text-transform: uppercase;
@@ -8203,36 +8583,35 @@
     margin: 0;
   }
 
-  .requests {
+  .response-history-list {
     list-style: none;
-    margin: 0.3rem 0;
+    margin: 0;
     padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
   }
 
-  .row-item {
+  .response-history-row {
+    width: 100%;
     display: flex;
     align-items: center;
-  }
-
-  .link {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
+    gap: 0.6rem;
     background: none;
     border: none;
     text-align: left;
-    padding: 0.25rem 0.1rem;
+    padding: 0.35rem 0.2rem;
     color: var(--color-text);
     font-size: 0.78rem;
+    cursor: pointer;
   }
 
-  .link:hover {
+  .response-history-row:hover {
     background: var(--color-bg-hover);
   }
 
-  .name { font-weight: 500; }
-  .url { color: var(--color-text-tertiary); }
+  .response-history-duration { font-weight: 500; }
+  .response-history-time { color: var(--color-text-tertiary); }
 
   /* ---------- Console drawer ---------- */
   .console-drawer {

@@ -24,7 +24,6 @@ const en: Dict = {
   "rail.launcher": "Launcher",
   "rail.history": "History",
   "rail.settings": "Settings",
-  "rail.theme": "Light / dark",
   "rail.budget": "Resource budget",
   "rail.loading": "Loading…",
   "rail.tabsOpen": "{count} tabs open",
@@ -222,6 +221,8 @@ const en: Dict = {
   "response.noTestsRan": "No tests ran for this request.",
   "response.testsHintFull": "No tests ran for this request. Add assertions in the Scripts tab to see pass/fail results here.",
   "response.sendEmpty": "Send the request to see the response here.",
+  "response.history": "History",
+  "response.resizeHandle": "Resize response panel",
   "response.pass": "PASS",
   "response.fail": "FAIL",
 
@@ -243,6 +244,7 @@ const en: Dict = {
   // Bottom bar (code snippet / info)
   "bottom.codeSnippet": "Code Snippet",
   "bottom.info": "Info",
+  "bottom.pickPanel": "Pick Code Snippet or Info above.",
   "bottom.target": "Target",
   "bottom.targetWindowsCmd": "cURL (Windows CMD)",
   "bottom.targetPowershell": "cURL (PowerShell)",
@@ -252,7 +254,7 @@ const en: Dict = {
   "bottom.mode": "Mode",
   "bottom.placeholderSafe": "Placeholder (safe)",
   "bottom.resolvedReal": "Resolved (real values)",
-  "bottom.generateSnippet": "Generate Snippet",
+  "bottom.generatingSnippet": "Generating…",
   "bottom.copyClipboard": "Copy to clipboard",
   "bottom.requestInfo": "Request Info",
   "bottom.id": "ID",
@@ -379,6 +381,13 @@ const en: Dict = {
   "import.tabCollection": "Postman Collection",
   "import.tabEnvironment": "Postman Environment",
   "import.tabCurl": "cURL Command",
+  "import.tabLocalWorkspace": "Local Postman Workspace",
+  "import.localWorkspaceHint": "Import Postman's local-files workspace format — a folder with 'collections' and 'environments' subfolders (Postman's newer on-disk sync format, not a single exported .json file). Each collection becomes its own project; nested Postman folders are flattened into single-level folders named e.g. 'Parent / Child'; all environments are imported into one dedicated 'Imported Environments' project.",
+  "import.localWorkspacePathPlaceholder": "e.g. C:/Users/you/Postman or /home/you/postman",
+  "import.localWorkspaceProjects": "Projects created: {count}",
+  "import.localWorkspaceFolders": "Folders created: {count}",
+  "import.localWorkspaceEnvironments": "Environments imported: {count}",
+  "import.importLocalWorkspace": "Import Workspace",
   "import.collectionHint": "Upload or paste Postman Collection v2.0 or v2.1 JSON.",
   "import.chooseJsonFile": "Choose JSON file",
   "import.pasteCollectionPlaceholder": "Or paste Postman Collection JSON here...",
@@ -469,10 +478,8 @@ const en: Dict = {
   "settings.consoleEvents": "Console events",
   "settings.uptime": "Uptime",
 
-  // Theme screen
-  "theme.title": "Light and dark, side by side",
+  // Theme preview (inside Settings)
   "theme.subtitle": "Same structure, same 2px rules, same single accent. Dark inverts the ground and lifts the accent one ramp step so it stays legible on ink.",
-  "theme.youAreOn": "You're currently on {mode}.",
   "theme.active": "Active",
 
   // Shortcuts (labels shown in Settings)
@@ -480,6 +487,9 @@ const en: Dict = {
   "shortcut.sendRequest": "Send the current request",
   "shortcut.saveRequest": "Save the current request immediately",
   "shortcut.newRequest": "New request in the current project",
+  "shortcut.nextTab": "Switch to the next open tab",
+  "shortcut.prevTab": "Switch to the previous open tab",
+  "shortcut.closeTab": "Close the current tab",
 
   // Command palette
   "palette.placeholder": "Search projects and requests…",
@@ -597,7 +607,6 @@ const ar: Dict = {
   "rail.launcher": "المُشغّل",
   "rail.history": "السجل",
   "rail.settings": "الإعدادات",
-  "rail.theme": "فاتح / داكن",
   "rail.budget": "استهلاك الموارد",
   "rail.loading": "جارٍ التحميل…",
   "rail.tabsOpen": "{count} علامة تبويب مفتوحة",
@@ -782,6 +791,8 @@ const ar: Dict = {
   "response.noTestsRan": "لم يتم تشغيل أي اختبارات لهذا الطلب.",
   "response.testsHintFull": "لم يتم تشغيل أي اختبارات لهذا الطلب. أضف تأكيدات في تبويب السكربتات لرؤية نتائج النجاح/الفشل هنا.",
   "response.sendEmpty": "أرسل الطلب لترى الاستجابة هنا.",
+  "response.history": "السجل",
+  "response.resizeHandle": "تغيير حجم لوحة الاستجابة",
   "response.pass": "نجح",
   "response.fail": "فشل",
 
@@ -800,6 +811,7 @@ const ar: Dict = {
 
   "bottom.codeSnippet": "مقتطف الشيفرة",
   "bottom.info": "معلومات",
+  "bottom.pickPanel": "اختر مقتطف الشيفرة أو المعلومات أعلاه.",
   "bottom.target": "الهدف",
   "bottom.targetWindowsCmd": "cURL (Windows CMD)",
   "bottom.targetPowershell": "cURL (PowerShell)",
@@ -809,7 +821,7 @@ const ar: Dict = {
   "bottom.mode": "الوضع",
   "bottom.placeholderSafe": "نائب (آمن)",
   "bottom.resolvedReal": "محلول (قيم حقيقية)",
-  "bottom.generateSnippet": "توليد المقتطف",
+  "bottom.generatingSnippet": "جارٍ التوليد…",
   "bottom.copyClipboard": "نسخ إلى الحافظة",
   "bottom.requestInfo": "معلومات الطلب",
   "bottom.id": "المعرّف",
@@ -933,6 +945,13 @@ const ar: Dict = {
   "import.tabCollection": "مجموعة بوستمان",
   "import.tabEnvironment": "بيئة بوستمان",
   "import.tabCurl": "أمر cURL",
+  "import.tabLocalWorkspace": "مساحة عمل بوستمان المحلية",
+  "import.localWorkspaceHint": "استيراد صيغة مساحة العمل المحلية لبوستمان — مجلد يحتوي على مجلدين فرعيين 'collections' و 'environments' (صيغة المزامنة المحلية الأحدث في بوستمان، وليست ملف .json واحد مُصدَّر). كل مجموعة تصبح مشروعًا مستقلًا؛ مجلدات بوستمان المتداخلة تُدمج في مجلدات بمستوى واحد باسم مثل 'الأب / الابن'؛ جميع البيئات تُستورد إلى مشروع واحد مخصص باسم 'البيئات المستوردة'.",
+  "import.localWorkspacePathPlaceholder": "مثال: C:/Users/you/Postman أو /home/you/postman",
+  "import.localWorkspaceProjects": "المشاريع المُنشأة: {count}",
+  "import.localWorkspaceFolders": "المجلدات المُنشأة: {count}",
+  "import.localWorkspaceEnvironments": "البيئات المستوردة: {count}",
+  "import.importLocalWorkspace": "استيراد مساحة العمل",
   "import.collectionHint": "حمّل أو الصق JSON لمجموعة بوستمان الإصدار 2.0 أو 2.1.",
   "import.chooseJsonFile": "اختر ملف JSON",
   "import.pasteCollectionPlaceholder": "أو الصق JSON لمجموعة بوستمان هنا...",
@@ -1020,15 +1039,16 @@ const ar: Dict = {
   "settings.consoleEvents": "أحداث وحدة التحكم",
   "settings.uptime": "مدة التشغيل",
 
-  "theme.title": "الفاتح والداكن، جنبًا إلى جنب",
   "theme.subtitle": "نفس البنية، نفس قواعد الـ2 بكسل، نفس لون التمييز الواحد. الوضع الداكن يعكس الخلفية ويرفع لون التمييز درجة واحدة ليبقى واضحًا على الحبر.",
-  "theme.youAreOn": "أنت حاليًا على الوضع {mode}.",
   "theme.active": "نشط",
 
   "shortcut.commandPalette": "فتح لوحة الأوامر",
   "shortcut.sendRequest": "إرسال الطلب الحالي",
   "shortcut.saveRequest": "حفظ الطلب الحالي فورًا",
   "shortcut.newRequest": "طلب جديد في المشروع الحالي",
+  "shortcut.nextTab": "الانتقال إلى التبويب المفتوح التالي",
+  "shortcut.prevTab": "الانتقال إلى التبويب المفتوح السابق",
+  "shortcut.closeTab": "إغلاق التبويب الحالي",
 
   "palette.placeholder": "بحث في المشاريع والطلبات…",
   "palette.goTo": "الانتقال إلى",

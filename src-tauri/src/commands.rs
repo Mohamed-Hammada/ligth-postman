@@ -177,6 +177,14 @@ pub fn list_environments(
 }
 
 #[tauri::command]
+pub fn list_all_environments(
+    state: State<AppState>,
+) -> Result<Vec<crate::models::EnvironmentWithProject>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    environment_store::list_all_environments(&conn)
+}
+
+#[tauri::command]
 pub fn update_environment(
     state: State<AppState>,
     input: UpdateEnvironmentInput,

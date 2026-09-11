@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::models::{Environment, NewEnvironmentInput, UpdateEnvironmentInput};
+use crate::models::{Environment, EnvironmentWithProject, NewEnvironmentInput, UpdateEnvironmentInput};
 
 pub fn create_environment(
     conn: &Connection,
@@ -43,6 +43,31 @@ pub fn list_environments(conn: &Connection, project_id: &str) -> Result<Vec<Envi
          WHERE project_id = ?1 ORDER BY name ASC",
     )?;
     let rows = stmt.query_map(params![project_id], row_to_environment)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// Every environment in every project — environment selection is global (the picker in the
+/// topbar and the Environments screen lets you pick any of these regardless of which project
+/// is currently open), so the UI needs the full set, not just the current project's own rows.
+pub fn list_all_environments(conn: &Connection) -> Result<Vec<EnvironmentWithProject>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.project_id, p.name, e.name, e.created_at, e.updated_at
+         FROM environments e
+         JOIN projects p ON p.id = e.project_id
+         ORDER BY p.name ASC, e.name ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let created_at: String = row.get(4)?;
+        let updated_at: String = row.get(5)?;
+        Ok(EnvironmentWithProject {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            project_name: row.get(2)?,
+            name: row.get(3)?,
+            created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
+            updated_at: updated_at.parse().unwrap_or_else(|_| Utc::now()),
+        })
+    })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
@@ -184,6 +209,20 @@ mod tests {
 
         let fetched = get_environment(&conn, &dev.id).unwrap();
         assert_eq!(fetched.name, "Development");
+    }
+
+    #[test]
+    fn list_all_environments_spans_every_project_with_project_name_attached() {
+        let conn = db::open_in_memory().unwrap();
+        let project_a = project_store::create_project(&conn, NewProjectInput { name: "Alpha".into() }).unwrap();
+        let project_b = project_store::create_project(&conn, NewProjectInput { name: "Beta".into() }).unwrap();
+        create_environment(&conn, NewEnvironmentInput { project_id: project_a.id.clone(), name: "Prod".into() }).unwrap();
+        create_environment(&conn, NewEnvironmentInput { project_id: project_b.id.clone(), name: "Dev".into() }).unwrap();
+
+        let all = list_all_environments(&conn).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|e| e.name == "Prod" && e.project_name == "Alpha"));
+        assert!(all.iter().any(|e| e.name == "Dev" && e.project_name == "Beta"));
     }
 
     #[test]

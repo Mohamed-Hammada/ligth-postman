@@ -343,6 +343,19 @@ pub struct Environment {
     pub updated_at: DateTime<Utc>,
 }
 
+/// An environment plus the name of the project it happens to be stored under. Environment
+/// selection is global (any project can select any environment — see `list_all_environments`);
+/// `project_name` here is just display context in that picker, not an access restriction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentWithProject {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewEnvironmentInput {
     pub project_id: String,

@@ -1762,6 +1762,22 @@
 
   // Only ever loads request *metadata* for the selected project — bodies/headers
   // stay on disk until a specific request tab is opened (README §4/§20).
+  // Clicking the already-open project again closes it (collapses its request list back) instead
+  // of just reselecting the same project — a real toggle, not a no-op re-fetch.
+  function toggleProjectSelection(id: string) {
+    if (selectedProjectId === id) {
+      selectedProjectId = null;
+      selectedRequest = null;
+      selectedEnvironmentId = null;
+      openTabs = [];
+      tabDrafts.clear();
+      requests = [];
+      folders = [];
+    } else {
+      selectProject(id);
+    }
+  }
+
   async function selectProject(id: string) {
     selectedProjectId = id;
     selectedRequest = null;
@@ -2037,6 +2053,28 @@
     } catch (err) {
       errorMessage = describeError(err);
     }
+  }
+
+  // Clicking a saved sample response in the tree used to just open its parent request (showing
+  // whatever that request's last *real* response was, if any) — this actually loads the sample's
+  // own captured status/headers/body into the response viewer, same as clicking a history entry.
+  async function openSampleResponse(requestId: string, sr: SampleResponse) {
+    await openRequest(requestId);
+    activeResponse = {
+      id: sr.id,
+      request_id: sr.request_id,
+      status: sr.status,
+      status_text: sr.status_text,
+      duration_ms: 0,
+      body_size: (sr.body ?? "").length,
+      created_at: sr.created_at,
+      headers: sr.headers,
+      content_type: sr.content_type,
+      cookies: [],
+    };
+    activeResponseBody = sr.body ?? "";
+    activeResponseTruncated = false;
+    responseSubTab = "body";
   }
 
   function startRenameProject(project: Project) {
@@ -3134,7 +3172,7 @@
                   type="button"
                   class="sample-tree-link"
                   title={t("sample.badge")}
-                  onclick={() => openRequest(req.id)}
+                  onclick={() => openSampleResponse(req.id, sr)}
                   ondblclick={() => startRenameSampleResponse(sr)}
                 >
                   <span class="status-chip" class:status-ok={sr.status < 400} class:status-err={sr.status >= 400}>{sr.status}</span>
@@ -3441,7 +3479,7 @@
                   <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingProjectId = null)}>{@render iconClose()}</button>
                 </form>
               {:else}
-                <button type="button" class="project-link" onclick={() => selectProject(project.id)} ondblclick={() => startRenameProject(project)}>
+                <button type="button" class="project-link" onclick={() => toggleProjectSelection(project.id)} ondblclick={() => startRenameProject(project)}>
                   <span class="folder-icon">{#if project.id === selectedProjectId}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
                   <span class="project-name">{project.name}</span>
                 </button>
@@ -3585,6 +3623,12 @@
                             <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingFolderId = null)}>{@render iconClose()}</button>
                           </form>
                         {:else}
+                          <button
+                            type="button"
+                            class="tree-expand-btn"
+                            title={expandedFolderIds.has(folder.id) ? t("sidebar.collapseFolder") : t("sidebar.expandFolder")}
+                            onclick={() => toggleFolderExpanded(folder.id)}
+                          >{#if expandedFolderIds.has(folder.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</button>
                           <button type="button" class="folder-link" onclick={() => toggleFolderExpanded(folder.id)} ondblclick={() => startRenameFolder(folder)}>
                             <span class="folder-icon">{#if expandedFolderIds.has(folder.id)}{@render iconFolderOpen()}{:else}{@render iconFolder()}{/if}</span>
                             <span class="project-name">{folder.name}</span>

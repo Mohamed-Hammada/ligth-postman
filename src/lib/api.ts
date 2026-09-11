@@ -278,8 +278,10 @@ export interface SampleResponse {
   request_id: string;
   name: string;
   status: number;
+  status_text: string;
   headers: HeaderEntry[];
   body?: string | null;
+  content_type?: string | null;
   created_at: string;
 }
 

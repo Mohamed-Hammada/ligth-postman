@@ -141,6 +141,10 @@ impl ConsoleBuffer {
         let buf = self.events.lock().expect("console mutex poisoned");
         buf.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl Default for ConsoleBuffer {

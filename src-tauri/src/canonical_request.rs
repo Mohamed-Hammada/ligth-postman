@@ -47,8 +47,10 @@ pub struct RequestDiagnostics {
 pub fn diagnose(request: &RequestFull, chain: &ScopeChain) -> RequestDiagnostics {
     let check = |template: &str| resolver::resolve_template(template, chain).missing;
 
-    let mut diag = RequestDiagnostics::default();
-    diag.url_missing = check(&request.url);
+    let mut diag = RequestDiagnostics {
+        url_missing: check(&request.url),
+        ..Default::default()
+    };
 
     for h in request.headers.iter().filter(|h| h.enabled) {
         diag.headers_missing.extend(check(&h.key));

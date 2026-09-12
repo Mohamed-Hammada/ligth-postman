@@ -41,6 +41,12 @@ pub struct CancellationToken {
     cancelled: AtomicBool,
 }
 
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CancellationToken {
     pub fn new() -> Self {
         Self {
@@ -157,7 +163,7 @@ impl BackgroundJobManager {
     pub fn list_jobs(&self) -> Vec<JobSummary> {
         let lock = self.jobs.lock().expect("jobs mutex poisoned");
         let mut list: Vec<JobSummary> = lock.values().map(|j| j.summary.clone()).collect();
-        list.sort_by(|a, b| b.priority.cmp(&a.priority));
+        list.sort_by_key(|j| std::cmp::Reverse(j.priority));
         list
     }
 }

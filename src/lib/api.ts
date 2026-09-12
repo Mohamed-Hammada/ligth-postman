@@ -101,7 +101,18 @@ export interface RequestSummary {
   name: string;
   method: string;
   url: string;
+  created_at: string;
   updated_at: string;
+}
+
+export interface RequestSearchResult {
+  id: string;
+  project_id: string;
+  project_name: string;
+  folder_id: string | null;
+  name: string;
+  method: string;
+  url: string;
 }
 
 export interface Folder {
@@ -360,6 +371,7 @@ export interface ParsedCurlRequest {
   query_params: QueryParam[];
   auth: Auth;
   body: string | null;
+  settings: RequestSettings;
 }
 
 export interface RequestDiagnostics {
@@ -408,7 +420,7 @@ export interface SystemDiagnostics {
 }
 
 export type SnippetMode = "placeholder" | "resolved";
-export type SnippetTarget = "bash" | "powershell" | "windows_cmd" | "python" | "javascript";
+export type SnippetTarget = "bash" | "power_shell" | "windows_cmd" | "python_requests" | "java_script_fetch";
 
 /** Structured output from the AI generation command — preview before "Add to Project". */
 export interface GeneratedApiDefinition {
@@ -475,6 +487,8 @@ export const api = {
     invoke<RequestFull>("create_request", { input }),
   listRequests: (projectId: string) =>
     invoke<RequestSummary[]>("list_requests", { projectId }),
+  searchRequestsInWorkspace: (workspaceId: string, query: string) =>
+    invoke<RequestSearchResult[]>("search_requests_in_workspace", { workspaceId, query }),
   getRequest: (id: string) => invoke<RequestFull>("get_request", { id }),
   updateRequest: (input: UpdateRequestInput) =>
     invoke<RequestFull>("update_request", { input }),
@@ -569,10 +583,11 @@ export const api = {
   ) =>
     invoke<string>("generate_curl_snippet", { requestId, environmentId, mode, target }),
 
-  importPostmanCollection: (collectionJson: string, targetProjectId?: string | null) =>
+  importPostmanCollection: (collectionJson: string, targetProjectId: string | null | undefined, workspaceId: string) =>
     invoke<CollectionImportReport>("import_postman_collection", {
       collectionJson,
       targetProjectId: targetProjectId ?? null,
+      workspaceId,
     }),
 
   importPostmanEnvironment: (environmentJson: string, targetProjectId: string) =>
@@ -581,8 +596,8 @@ export const api = {
       targetProjectId,
     }),
 
-  importLocalPostmanWorkspace: (rootPath: string) =>
-    invoke<LocalWorkspaceImportReport>("import_local_postman_workspace", { rootPath }),
+  importLocalPostmanWorkspace: (rootPath: string, workspaceId: string) =>
+    invoke<LocalWorkspaceImportReport>("import_local_postman_workspace", { rootPath, workspaceId }),
 
   exportPostmanCollection: (projectId: string) =>
     invoke<string>("export_postman_collection", { projectId }),
@@ -609,10 +624,11 @@ export const api = {
       includeSecrets: includeSecrets ?? false,
     }),
 
-  importProjectFile: (fileContent: string, targetProjectId?: string | null) =>
+  importProjectFile: (fileContent: string, targetProjectId: string | null | undefined, workspaceId: string) =>
     invoke<Project>("import_project_file", {
       fileContent,
       targetProjectId: targetProjectId ?? null,
+      workspaceId,
     }),
 
   saveProjectToRepo: (
@@ -628,11 +644,13 @@ export const api = {
 
   loadProjectFromRepo: (
     directory: string,
-    targetProjectId?: string | null,
+    targetProjectId: string | null | undefined,
+    workspaceId: string,
   ) =>
     invoke<Project>("load_project_from_repo", {
       directory,
       targetProjectId: targetProjectId ?? null,
+      workspaceId,
     }),
 
   getGitStatus: (directory: string) =>
@@ -688,6 +706,29 @@ export const api = {
 
   saveProjectGitSettings: (settings: ProjectGitSettings) =>
     invoke<void>("save_project_git_settings", { settings }),
+
+  saveWorkspaceToRepo: (
+    workspaceId: string,
+    directory: string,
+    includeSecrets?: boolean,
+  ) =>
+    invoke<string[]>("save_workspace_to_repo", {
+      workspaceId,
+      directory,
+      includeSecrets: includeSecrets ?? false,
+    }),
+
+  loadWorkspaceFromRepo: (workspaceId: string, directory: string) =>
+    invoke<WorkspaceImportReport>("load_workspace_from_repo", { workspaceId, directory }),
+
+  getWorkspaceGitSettings: (workspaceId: string) =>
+    invoke<WorkspaceGitSettings | null>("get_workspace_git_settings", { workspaceId }),
+
+  saveWorkspaceGitSettings: (settings: WorkspaceGitSettings) =>
+    invoke<void>("save_workspace_git_settings", { settings }),
+
+  findLegacyGitSettingsForWorkspace: (workspaceId: string) =>
+    invoke<LegacyGitSettingsCandidate[]>("find_legacy_git_settings_for_workspace", { workspaceId }),
 
   verifyGitHubToken: (token: string) =>
     invoke<GitHubUser>("verify_github_token", { token }),
@@ -787,6 +828,31 @@ export interface ProjectGitSettings {
   last_sync_at?: string | null;
 }
 
+/** Same shape as ProjectGitSettings, keyed by workspace — one repo covers every project in it. */
+export interface WorkspaceGitSettings {
+  workspace_id: string;
+  repo_path?: string | null;
+  remote_url?: string | null;
+  branch: string;
+  auto_sync: boolean;
+  github_token?: string | null;
+  last_sync_at?: string | null;
+}
+
+export interface WorkspaceImportReport {
+  updated_projects: Project[];
+  created_projects: Project[];
+  warnings: string[];
+}
+
+/** A leftover per-project git config found in a workspace with no settings of its own yet —
+ * offered to the user to adopt, never applied automatically. */
+export interface LegacyGitSettingsCandidate {
+  project_id: string;
+  project_name: string;
+  settings: ProjectGitSettings;
+}
+
 export interface GitHubUser {
   login: string;
   id: number;
@@ -834,7 +900,10 @@ export interface LocalWorkspaceImportReport {
   warnings: string[];
 }
 
+export type AiProviderKind = "anthropic" | "openai" | "google" | "custom";
+
 export interface AiSettings {
+  provider: AiProviderKind;
   api_key?: string | null;
   model: string;
   base_url?: string | null;
@@ -842,6 +911,7 @@ export interface AiSettings {
 }
 
 export interface UpdateAiSettingsInput {
+  provider?: AiProviderKind | null;
   api_key?: string | null;
   model?: string | null;
   base_url?: string | null;

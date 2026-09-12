@@ -220,6 +220,25 @@ const MIGRATIONS: &[(i64, &str)] = &[
         ALTER TABLE projects ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';
         CREATE INDEX idx_projects_workspace_id ON projects(workspace_id);",
     ),
+    (
+        16,
+        // Git sync moves from per-project to per-workspace (one shared repo holds every project
+        // in the workspace, each in its own `projects/<slug>/light-postman.json`) — see
+        // project_file::{export_workspace_to_repo, import_workspace_from_repo}. The old
+        // `project_git_settings` table is deliberately left in place, unused, rather than
+        // migrated or dropped: with multiple projects per workspace there's no single correct
+        // repo/remote to promote automatically, so this ships as a one-time reconfiguration
+        // instead of a guessed, possibly-wrong migration.
+        "CREATE TABLE workspace_git_settings (
+            workspace_id TEXT PRIMARY KEY,
+            repo_path TEXT,
+            remote_url TEXT,
+            branch TEXT NOT NULL DEFAULT 'main',
+            auto_sync INTEGER NOT NULL DEFAULT 0,
+            github_token TEXT,
+            last_sync_at TEXT
+        );",
+    ),
 ];
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {

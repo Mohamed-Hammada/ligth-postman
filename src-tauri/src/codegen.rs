@@ -29,20 +29,15 @@ pub enum SnippetMode {
 }
 
 /// Target shell or tool syntax for the generated snippet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnippetTarget {
+    #[default]
     Bash,
     PowerShell,
     WindowsCmd,
     PythonRequests,
     JavaScriptFetch,
-}
-
-impl Default for SnippetTarget {
-    fn default() -> Self {
-        SnippetTarget::Bash
-    }
 }
 
 pub fn generate_snippet(

@@ -105,19 +105,14 @@ pub enum ApiKeyLocation {
 /// would be exactly the placeholder behavior this pack forbids. Add it when Collections exist.
 /// Every field is stored as the raw template — `{{token}}` is resolved at send/codegen time
 /// by `canonical_request::build`, same as headers/body/query params.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Auth {
+    #[default]
     None,
     Bearer { token: String },
     Basic { username: String, password: String },
     ApiKey { key: String, value: String, location: ApiKeyLocation },
-}
-
-impl Default for Auth {
-    fn default() -> Self {
-        Auth::None
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,7 +302,23 @@ pub struct RequestSummary {
     pub name: String,
     pub method: String,
     pub url: String,
+    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A cross-project match for the command palette's workspace-wide search (LP-1404) — carries
+/// `project_name` since results span every project in the workspace, not just the one currently
+/// open, so the UI can show which project each hit belongs to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestSearchResult {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    pub name: String,
+    pub method: String,
+    pub url: String,
 }
 
 /// Fully hydrated request — only fetched when a tab is actually activated (README §4/§5).

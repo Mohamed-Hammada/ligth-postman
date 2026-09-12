@@ -29,7 +29,6 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_log::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir().expect("resolve app data dir");
@@ -43,8 +42,8 @@ pub fn run() {
                 .build()
                 .expect("build reqwest client");
 
-            let ai_provider = ai::ClaudeProvider::from_env(http_client.clone());
-            log::info!("AI provider configured: {}", ai_provider.is_some());
+            let ai_configured_at_startup = ai::provider_from_db_or_env(http_client.clone(), &conn).is_some();
+            log::info!("AI provider configured: {ai_configured_at_startup}");
 
             let job_manager = std::sync::Arc::new(background_jobs::BackgroundJobManager::default());
             let start_time = std::time::Instant::now();
@@ -54,7 +53,6 @@ pub fn run() {
                 http_client,
                 response_body_dir: data_dir.join("response_bodies"),
                 cancel_signals: Mutex::new(HashMap::new()),
-                ai_provider,
                 console: std::sync::Arc::new(console::ConsoleBuffer::default()),
                 job_manager,
                 start_time,
@@ -76,6 +74,7 @@ pub fn run() {
             commands::delete_workspace,
             commands::create_request,
             commands::list_requests,
+            commands::search_requests_in_workspace,
             commands::get_request,
             commands::update_request,
             commands::delete_request,
@@ -135,6 +134,11 @@ pub fn run() {
             commands::import_project_file,
             commands::save_project_to_repo,
             commands::load_project_from_repo,
+            commands::save_workspace_to_repo,
+            commands::load_workspace_from_repo,
+            commands::get_workspace_git_settings,
+            commands::save_workspace_git_settings,
+            commands::find_legacy_git_settings_for_workspace,
             commands::get_git_status,
             commands::git_init_repository,
             commands::git_commit_changes,

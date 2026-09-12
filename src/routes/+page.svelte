@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { translate, RTL_LOCALES, type Locale } from "$lib/i18n";
   import {
     api,
@@ -22,6 +22,7 @@
     type RequestDiagnostics,
     type RequestSettings,
     type RequestSummary,
+    type RequestSearchResult,
     type ResolvedTemplate,
     type ResponseMeta,
     type ResponseSummary,
@@ -32,10 +33,13 @@
     type ConsoleLevel,
     type GitStatus,
     type GitCommit,
-    type ProjectGitSettings,
+    type WorkspaceGitSettings,
+    type LegacyGitSettingsCandidate,
+    type WorkspaceImportReport,
     type GitHubUser,
     type GitHubRepoInfo,
     type AiSettings,
+    type AiProviderKind,
     type DiscoveredEndpoint,
     type GeneratedTestsAndDocs,
     type SampleResponse,
@@ -100,6 +104,7 @@
     openTabs = [];
     tabDrafts.clear();
     await loadProjects();
+    await loadGitSettings();
   }
   let renamingWorkspaceId = $state<string | null>(null);
   let renameWorkspaceValue = $state("");
@@ -139,6 +144,7 @@
       openTabs = [];
       tabDrafts.clear();
       await loadProjects();
+      await loadGitSettings();
       startRenameWorkspace(workspace);
       workspacePickerOpen = true;
     } catch (err) {
@@ -316,6 +322,122 @@
   let editUrlEncodedItems = $state<UrlEncodedItem[]>([]);
   let editBinaryFilePath = $state("");
 
+  // Raw-body content type (LP-0113) — not stored separately: it's read from/written to the
+  // Content-Type header itself, same as Postman's own raw-type picker under the hood, so
+  // switching it doesn't need a new backend column.
+  const RAW_CONTENT_TYPES: { id: string; mime: string; label: string }[] = [
+    { id: "text", mime: "text/plain", label: "body.rawTypeText" },
+    { id: "javascript", mime: "application/javascript", label: "body.rawTypeJavascript" },
+    { id: "json", mime: "application/json", label: "body.rawTypeJson" },
+    { id: "html", mime: "text/html", label: "body.rawTypeHtml" },
+    { id: "xml", mime: "application/xml", label: "body.rawTypeXml" },
+  ];
+  let rawContentType = $derived.by(() => {
+    const header = editHeaders.find((h) => h.key.trim().toLowerCase() === "content-type" && h.enabled);
+    const value = header?.value.trim().toLowerCase() ?? "";
+    return RAW_CONTENT_TYPES.find((t) => value.startsWith(t.mime))?.id ?? "text";
+  });
+  function setRawContentType(id: string) {
+    const type = RAW_CONTENT_TYPES.find((t) => t.id === id);
+    if (!type) return;
+    const idx = editHeaders.findIndex((h) => h.key.trim().toLowerCase() === "content-type");
+    if (idx >= 0) {
+      editHeaders[idx] = { ...editHeaders[idx], value: type.mime, enabled: true };
+      editHeaders = [...editHeaders];
+    } else {
+      editHeaders = withTrailingEmptyRow(
+        [
+          ...editHeaders.filter((h) => h.key.trim() !== ""),
+          { key: "Content-Type", value: type.mime, enabled: true, description: "" },
+        ],
+        () => ({ key: "", value: "", enabled: true, description: "" }),
+      );
+    }
+    scheduleAutoSave();
+  }
+
+  let bodyPrettifyFeedback = $state("");
+
+  /** Simple tag-indenter shared by XML and HTML — inserts a newline between adjacent tags, then
+   * indents each line by nesting depth (closing tags dedent before printing, opening tags indent
+   * after). Not a full formatter (doesn't special-case comments/CDATA/`<pre>` content), but that
+   * matches what "Prettify" buttons in most lightweight tools actually do — good enough for
+   * skimming an API body without reformatting its content in a surprising way. */
+  const HTML_VOID_TAGS = new Set([
+    "br", "hr", "img", "input", "meta", "link", "area", "base", "col", "embed", "source", "track", "wbr",
+  ]);
+
+  function indentTags(input: string): string {
+    // Break only at tag-to-tag boundaries (a ">" immediately followed by a "<") — mixed content
+    // like `<p>Hello <b>world</b>` stays on one line, same as text nodes should.
+    const withBreaks = input.replace(/>\s*</g, ">\n<").trim();
+    let depth = 0;
+    const tagRe = /<(\/?)([a-zA-Z][\w:-]*)\b[^>]*?(\/?)>/g;
+    return withBreaks
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => {
+        const trimmed = line.trim();
+        const startsWithClosing = /^<\//.test(trimmed);
+        // A "line" here can carry more than one tag (an opening tag plus a fully inline pair,
+        // e.g. the `<b>world</b>` above) — net depth change for the line is opens minus closes
+        // minus void/self-closing tags, not just a guess from how the line starts or ends.
+        let netDepthChange = 0;
+        let match: RegExpExecArray | null;
+        tagRe.lastIndex = 0;
+        while ((match = tagRe.exec(trimmed))) {
+          const isClosing = match[1] === "/";
+          const isSelfClosing = match[3] === "/" || HTML_VOID_TAGS.has(match[2].toLowerCase());
+          if (isClosing) netDepthChange -= 1;
+          else if (!isSelfClosing) netDepthChange += 1;
+        }
+        const printDepth = startsWithClosing ? Math.max(depth - 1, 0) : depth;
+        const indented = "  ".repeat(printDepth) + trimmed;
+        depth = Math.max(depth + netDepthChange, 0);
+        return indented;
+      })
+      .join("\n");
+  }
+
+  function isWellFormedXml(input: string): boolean {
+    try {
+      const doc = new DOMParser().parseFromString(input, "application/xml");
+      return doc.getElementsByTagName("parsererror").length === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  function prettifyBody() {
+    if (rawContentType === "json") {
+      try {
+        editBody = JSON.stringify(JSON.parse(editBody), null, 2);
+        bodyPrettifyFeedback = "";
+        scheduleAutoSave();
+      } catch {
+        bodyPrettifyFeedback = t("body.prettifyInvalidJson");
+        setTimeout(() => (bodyPrettifyFeedback = ""), 2500);
+      }
+      return;
+    }
+    if (rawContentType === "xml") {
+      if (!isWellFormedXml(editBody)) {
+        bodyPrettifyFeedback = t("body.prettifyInvalidXml");
+        setTimeout(() => (bodyPrettifyFeedback = ""), 2500);
+        return;
+      }
+      editBody = indentTags(editBody);
+      bodyPrettifyFeedback = "";
+      scheduleAutoSave();
+      return;
+    }
+    if (rawContentType === "html") {
+      editBody = indentTags(editBody);
+      bodyPrettifyFeedback = "";
+      scheduleAutoSave();
+    }
+  }
+
   /** Reads the stored `body` string into the editor's per-type state. Mirrors the shapes Rust's
    * `RequestBody` (tagged `type`) and the frontend's own GraphQL editor (untagged
    * `{query, variables}`) can produce — anything else is treated as plain "raw" text, which
@@ -422,15 +544,16 @@
   let localWorkspaceImportReport = $state<LocalWorkspaceImportReport | null>(null);
 
   async function importLocalWorkspaceAction() {
-    if (!localWorkspacePathInput.trim()) return;
+    if (!localWorkspacePathInput.trim() || !activeWorkspaceId) return;
     localWorkspaceImportLoading = true;
     localWorkspaceImportError = "";
     localWorkspaceImportReport = null;
     try {
-      const report = await api.importLocalPostmanWorkspace(localWorkspacePathInput.trim());
+      const report = await api.importLocalPostmanWorkspace(localWorkspacePathInput.trim(), activeWorkspaceId);
       localWorkspaceImportReport = report;
       await loadProjects();
       await loadAllEnvironments();
+      await syncNewProjectIntoWorkspaceRepo();
     } catch (err) {
       localWorkspaceImportError = describeError(err);
     } finally {
@@ -474,7 +597,16 @@
   let responseHistory = $state<ResponseSummary[]>([]);
 
   // Response Pretty / Raw viewer (LP-0403)
-  let responseViewMode = $state<"pretty" | "raw">("pretty");
+  let responseViewMode = $state<"pretty" | "raw" | "preview">("pretty");
+  // Preview is only offered for responses that actually look like a renderable HTML document —
+  // Content-Type wins when present, a doctype/html-tag sniff covers servers that mislabel it.
+  let responseBodyIsHtml = $derived.by(() => {
+    if (!activeResponseBody) return false;
+    const contentType = activeResponse?.headers?.find((h) => h.key.toLowerCase() === "content-type")?.value.toLowerCase() ?? "";
+    if (contentType.includes("text/html")) return true;
+    if (contentType) return false;
+    return /^\s*<(!doctype html|html)/i.test(activeResponseBody);
+  });
   let prettyResponseBody = $derived.by(() => {
     if (!activeResponseBody) return "";
     if (responseViewMode === "raw") return activeResponseBody;
@@ -590,6 +722,17 @@
   let responsePaneHeight = $state(320);
   let responsePaneResizing = $state(false);
   let responsePaneManuallyResized = false;
+  // Minimized down to a thin status bar (not the same as a small resized height — collapse
+  // remembers the full height underneath and restores it exactly on expand).
+  let responsePaneCollapsed = $state(false);
+  function setResponsePaneCollapsed(value: boolean) {
+    responsePaneCollapsed = value;
+    try {
+      localStorage.setItem("lp-response-pane-collapsed", String(value));
+    } catch {
+      // collapsed state just won't persist across restarts
+    }
+  }
 
   function startResponsePaneResize(e: MouseEvent) {
     e.preventDefault();
@@ -757,6 +900,178 @@
     );
   }
 
+  // Main surface-color (background/panel) presets — a level beyond just the accent, but
+  // deliberately scoped to the light/dark Softline pair only: terminal and blueprint are
+  // complete, fixed aesthetic packages the same way method colors are fixed, not something a
+  // tint knob should reach into. Each preset is a hand-picked full set (not derived at runtime
+  // from one hex) so contrast against the theme's own unchanged text color stays safe — every
+  // value sits at roughly the same lightness as the token it replaces, only the hue shifts.
+  const SURFACE_TINTS: {
+    id: string;
+    light: { bg: string; bgSecondary: string; bgTertiary: string; panelBg: string; sidebarBg: string; border: string };
+    dark: { bg: string; bgSecondary: string; bgTertiary: string; panelBg: string; sidebarBg: string; border: string };
+  }[] = [
+    {
+      id: "coolGray",
+      light: { bg: "#eef1f4", bgSecondary: "#f7f9fb", bgTertiary: "#e4e9ee", panelBg: "#f7f9fb", sidebarBg: "#f7f9fb", border: "#dbe2e8" },
+      dark: { bg: "#14171c", bgSecondary: "#1b1f26", bgTertiary: "#232830", panelBg: "#1b1f26", sidebarBg: "#14171c", border: "#2c323b" },
+    },
+    {
+      id: "warmSand",
+      light: { bg: "#faf3e8", bgSecondary: "#fffaf1", bgTertiary: "#f3e6d0", panelBg: "#fffaf1", sidebarBg: "#fffaf1", border: "#ecdcc0" },
+      dark: { bg: "#211a10", bgSecondary: "#2b2116", bgTertiary: "#35291b", panelBg: "#2b2116", sidebarBg: "#211a10", border: "#453626" },
+    },
+    {
+      id: "rose",
+      light: { bg: "#fdf1f0", bgSecondary: "#fff8f7", bgTertiary: "#fbe3e1", panelBg: "#fff8f7", sidebarBg: "#fff8f7", border: "#f2d4d1" },
+      dark: { bg: "#201314", bgSecondary: "#2b1a1c", bgTertiary: "#362124", panelBg: "#2b1a1c", sidebarBg: "#201314", border: "#45282b" },
+    },
+    {
+      id: "sage",
+      light: { bg: "#f1f6ee", bgSecondary: "#f9fcf7", bgTertiary: "#e5edde", panelBg: "#f9fcf7", sidebarBg: "#f9fcf7", border: "#d7e4cd" },
+      dark: { bg: "#161c13", bgSecondary: "#1e261a", bgTertiary: "#26301b", panelBg: "#1e261a", sidebarBg: "#161c13", border: "#34412c" },
+    },
+  ];
+  let surfaceTint = $state<string | null>(null);
+  function setSurfaceTint(id: string | null) {
+    surfaceTint = id;
+    try {
+      if (id) localStorage.setItem("lp-surface-tint", id);
+      else localStorage.removeItem("lp-surface-tint");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  let surfaceTintAvailable = $derived(themeMode === "light" || themeMode === "dark");
+  function isCustomSurfaceTint(id: string | null): id is string {
+    return !!id && id.startsWith("#");
+  }
+  /** A custom color has no hand-picked full set, so the rest of the surfaces are derived from
+   * it via color-mix — following the same lighten/darken direction the built-in light and dark
+   * tokens already use for their own secondary/tertiary steps (dark surfaces get lighter as they
+   * layer up; light surfaces get a touch darker/more tinted), rather than one formula for both. */
+  function customSurfaceStyleOverride(hex: string, mode: "light" | "dark"): string {
+    if (mode === "dark") {
+      return (
+        `--color-bg: ${hex}; --color-bg-secondary: color-mix(in srgb, ${hex} 85%, white); ` +
+        `--color-bg-tertiary: color-mix(in srgb, ${hex} 75%, white); --color-panel-bg: color-mix(in srgb, ${hex} 85%, white); ` +
+        `--color-sidebar-bg: ${hex}; --color-border: color-mix(in srgb, ${hex} 60%, white);`
+      );
+    }
+    return (
+      `--color-bg: ${hex}; --color-bg-secondary: color-mix(in srgb, ${hex} 90%, white); ` +
+      `--color-bg-tertiary: color-mix(in srgb, ${hex} 85%, black); --color-panel-bg: color-mix(in srgb, ${hex} 90%, white); ` +
+      `--color-sidebar-bg: color-mix(in srgb, ${hex} 90%, white); --color-border: color-mix(in srgb, ${hex} 70%, black);`
+    );
+  }
+  function surfaceStyleOverride(id: string | null, mode: ThemeMode): string {
+    if (!id || (mode !== "light" && mode !== "dark")) return "";
+    if (isCustomSurfaceTint(id)) return customSurfaceStyleOverride(id, mode);
+    const tint = SURFACE_TINTS.find((t) => t.id === id);
+    if (!tint) return "";
+    const v = mode === "dark" ? tint.dark : tint.light;
+    return (
+      `--color-bg: ${v.bg}; --color-bg-secondary: ${v.bgSecondary}; --color-bg-tertiary: ${v.bgTertiary}; ` +
+      `--color-panel-bg: ${v.panelBg}; --color-sidebar-bg: ${v.sidebarBg}; --color-border: ${v.border};`
+    );
+  }
+
+  // Advanced appearance (LP-1405): font family and text color, one layer further than the
+  // accent/tint controls above — same override-on-top-of-the-active-theme approach, same
+  // localStorage persistence, same "empty = theme's own default, untouched" convention.
+  const THEME_FONT_OPTIONS: { id: string; label: string; family: string }[] = [
+    { id: "newsreader", label: "Newsreader", family: '"Newsreader", Georgia, serif' },
+    { id: "work-sans", label: "Work Sans", family: '"Work Sans", system-ui, sans-serif' },
+    { id: "space-grotesk", label: "Space Grotesk", family: '"Space Grotesk", system-ui, sans-serif' },
+    { id: "jetbrains-mono", label: "JetBrains Mono", family: '"JetBrains Mono", ui-monospace, monospace' },
+    { id: "space-mono", label: "Space Mono", family: '"Space Mono", ui-monospace, monospace' },
+  ];
+  let headingFontOverride = $state<string | null>(null);
+  let bodyFontOverride = $state<string | null>(null);
+  function setHeadingFontOverride(id: string | null) {
+    headingFontOverride = id;
+    try {
+      if (id) localStorage.setItem("lp-heading-font", id);
+      else localStorage.removeItem("lp-heading-font");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  function setBodyFontOverride(id: string | null) {
+    bodyFontOverride = id;
+    try {
+      if (id) localStorage.setItem("lp-body-font", id);
+      else localStorage.removeItem("lp-body-font");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  function fontStyleOverride(headingId: string | null, bodyId: string | null): string {
+    const heading = THEME_FONT_OPTIONS.find((f) => f.id === headingId);
+    const body = THEME_FONT_OPTIONS.find((f) => f.id === bodyId);
+    let css = "";
+    if (heading) css += `--font-heading: ${heading.family}; `;
+    if (body) css += `--font-sans: ${body.family}; `;
+    return css;
+  }
+
+  let textColorOverride = $state<string | null>(null);
+  function setTextColorOverride(hex: string | null) {
+    textColorOverride = hex;
+    try {
+      if (hex) localStorage.setItem("lp-text-color", hex);
+      else localStorage.removeItem("lp-text-color");
+    } catch {
+      // localStorage can throw in a locked-down webview profile — choice just won't persist.
+    }
+  }
+  /** Secondary/tertiary text steps are derived by mixing toward transparent (not toward a fixed
+   * black/white) — the same trick `--color-bg-hover` already uses elsewhere in this file — so
+   * they dim consistently against whatever background (including a custom surface tint) the
+   * text actually sits on, rather than assuming a light or dark ground. */
+  function textColorStyleOverride(hex: string | null): string {
+    if (!hex) return "";
+    return (
+      `--color-text: ${hex}; ` +
+      `--color-text-secondary: color-mix(in srgb, ${hex} 75%, transparent); ` +
+      `--color-text-tertiary: color-mix(in srgb, ${hex} 55%, transparent);`
+    );
+  }
+  /** Live WCAG contrast readout for the custom text-color picker — reuses the exact relative
+   * luminance formula `contrastTextFor` above already implements, just returning the ratio
+   * instead of picking a side, so the UI can warn before the user saves an unreadable color. */
+  function contrastRatio(hexA: string, hexB: string): number | null {
+    const parse = (h: string) => {
+      const m = /^#?([0-9a-f]{6})$/i.exec(h.trim());
+      if (!m) return null;
+      const n = parseInt(m[1], 16);
+      const lin = (v: number) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * lin(((n >> 16) & 255) / 255) + 0.7152 * lin(((n >> 8) & 255) / 255) + 0.0722 * lin((n & 255) / 255);
+    };
+    const la = parse(hexA);
+    const lb = parse(hexB);
+    if (la === null || lb === null) return null;
+    const [hi, lo] = la > lb ? [la, lb] : [lb, la];
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  /** The background the custom text color would actually sit on right now — reads the live
+   * computed value rather than re-deriving it from theme/tint state, since a tint can itself be
+   * a hand-picked preset or an arbitrary custom color. */
+  function currentComputedBg(): string | null {
+    const shell = document.querySelector(".app-shell");
+    if (!shell) return null;
+    const v = getComputedStyle(shell).getPropertyValue("--color-bg").trim();
+    return /^#[0-9a-f]{6}$/i.test(v) ? v : null;
+  }
+  let textColorContrastWarning = $derived.by(() => {
+    if (!textColorOverride) return "";
+    const bg = currentComputedBg();
+    if (!bg) return "";
+    const ratio = contrastRatio(textColorOverride, bg);
+    if (ratio === null || ratio >= 4.5) return "";
+    return t("settings.textColorLowContrast", { ratio: ratio.toFixed(1) });
+  });
+
   // i18n: locale drives both the string dictionary (t()) and the document's real text
   // direction — Arabic runs right-to-left, and dir="rtl" on <html> is what makes flexbox's
   // "row" axis (used throughout this stylesheet) actually mirror instead of just the text.
@@ -899,6 +1214,32 @@
   $effect(() => {
     if (paletteOpen) paletteInputEl?.focus();
   });
+  // Cross-project search (LP-1404): the palette's own project/request loop below only ever
+  // covers the CURRENTLY open project, since that's all `requests` holds — everything else in
+  // the workspace has to come from the backend. Debounced so switching-workspace-wide search
+  // doesn't fire a query per keystroke; a token guards against a slow, stale response overwriting
+  // a newer one that already landed.
+  let paletteCrossProjectResults = $state<RequestSearchResult[]>([]);
+  let paletteCrossProjectToken = 0;
+  $effect(() => {
+    const q = paletteQuery.trim();
+    if (!paletteOpen || q.length < 2 || !activeWorkspaceId) {
+      paletteCrossProjectResults = [];
+      return;
+    }
+    const token = ++paletteCrossProjectToken;
+    const workspaceId = activeWorkspaceId;
+    const timer = setTimeout(async () => {
+      try {
+        const results = await api.searchRequestsInWorkspace(workspaceId, q);
+        if (token === paletteCrossProjectToken) paletteCrossProjectResults = results;
+      } catch {
+        // The palette's in-project results still work regardless — this is a pure enhancement.
+      }
+    }, 150);
+    return () => clearTimeout(timer);
+  });
+
   type PaletteItem = { kind: "project" | "request"; label: string; method?: string; hint: string; onSelect: () => void };
   let paletteItems = $derived.by((): PaletteItem[] => {
     const q = paletteQuery.trim().toLowerCase();
@@ -917,9 +1258,11 @@
         });
       }
     }
+    const localRequestIds = new Set<string>();
     if (selectedProjectId) {
       for (const r of requests) {
         if (!q || r.name.toLowerCase().includes(q) || r.url.toLowerCase().includes(q)) {
+          localRequestIds.add(r.id);
           items.push({
             kind: "request",
             label: r.name,
@@ -933,6 +1276,21 @@
           });
         }
       }
+    }
+    for (const r of paletteCrossProjectResults) {
+      if (localRequestIds.has(r.id)) continue; // already listed above, from the active project
+      items.push({
+        kind: "request",
+        label: r.name,
+        method: r.method,
+        hint: `${r.project_name} — ${r.url}`,
+        onSelect: async () => {
+          await selectProject(r.project_id);
+          openRequest(r.id);
+          activeScreen = "workspace";
+          closePalette();
+        },
+      });
     }
     return items.slice(0, 30);
   });
@@ -949,11 +1307,44 @@
   let aiIncludeExistingRequests = $state(true);
   let aiIncludeVariables = $state(true);
 
-  // AI Settings (LP-0803)
+  // AI Settings (LP-0803, LP-0822 — multi-provider)
   let aiSettings = $state<AiSettings | null>(null);
+  let aiProviderInput = $state<AiProviderKind>("anthropic");
   let aiApiKeyInput = $state("");
-  let aiModelInput = $state("claude-3-5-sonnet-20241022");
+  let aiModelInput = $state("claude-sonnet-5");
   let aiBaseUrlInput = $state("");
+
+  const AI_PROVIDERS: { id: AiProviderKind; labelKey: string }[] = [
+    { id: "anthropic", labelKey: "ai.providerAnthropic" },
+    { id: "openai", labelKey: "ai.providerOpenAi" },
+    { id: "google", labelKey: "ai.providerGoogle" },
+    { id: "custom", labelKey: "ai.providerCustom" },
+  ];
+
+  // Suggestions only — the model field is free text, never a locked list, so a new model
+  // release never requires an app update to become selectable.
+  const AI_MODEL_SUGGESTIONS: Record<AiProviderKind, string[]> = {
+    anthropic: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+    openai: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+    google: ["gemini-1.5-pro", "gemini-1.5-flash"],
+    custom: [],
+  };
+
+  const AI_API_KEY_PLACEHOLDER: Record<AiProviderKind, string> = {
+    anthropic: "sk-ant-api03-...",
+    openai: "sk-...",
+    google: "AIza...",
+    custom: "",
+  };
+
+  function aiProviderDefaultModel(provider: AiProviderKind): string {
+    return AI_MODEL_SUGGESTIONS[provider][0] ?? "";
+  }
+
+  function onAiProviderChange() {
+    aiModelInput = aiProviderDefaultModel(aiProviderInput);
+    aiBaseUrlInput = "";
+  }
   let aiShowKey = $state(false);
   let aiTesting = $state(false);
   let aiTestFeedback = $state("");
@@ -1044,7 +1435,7 @@
   // Advanced sort: projects list + requests/folders within a project. Persisted so the chosen
   // order survives a reload, same as the other small UI prefs (uiScale, locale, theme).
   type ProjectSortField = "name" | "created" | "updated";
-  type RequestSortField = "name" | "method" | "updated";
+  type RequestSortField = "name" | "method" | "created" | "updated";
   type SortDir = "asc" | "desc";
   let projectSortField = $state<ProjectSortField>("name");
   let projectSortDir = $state<SortDir>("asc");
@@ -1086,6 +1477,7 @@
   const REQUEST_SORT_FIELDS: { field: RequestSortField; label: string }[] = [
     { field: "name", label: "sidebar.sortByName" },
     { field: "method", label: "sidebar.sortByMethod" },
+    { field: "created", label: "sidebar.sortByCreated" },
     { field: "updated", label: "sidebar.sortByUpdated" },
   ];
   let projectSortMenuOpen = $state(false);
@@ -1107,6 +1499,7 @@
     return [...list].sort((a, b) => {
       if (requestSortField === "name") return a.name.localeCompare(b.name) * dir;
       if (requestSortField === "method") return a.method.localeCompare(b.method) * dir;
+      if (requestSortField === "created") return a.created_at.localeCompare(b.created_at) * dir;
       return a.updated_at.localeCompare(b.updated_at) * dir;
     });
   }
@@ -1223,12 +1616,71 @@
     consoleEvents.filter((e) => e.level === "warn").length,
   );
 
+  // Structured Developer Console detail rendering (LP-1402) — every field rendered below is a
+  // real field execution.rs's c.log(...) calls actually attach to that event_type (see
+  // execution.rs's request_start/response_received/cookie_injected/request_error/test_assertion
+  // sites); anything not recognized still falls through to the raw-JSON view further down so no
+  // detail is ever silently dropped.
+  let rawDetailsVisible = $state<Set<string>>(new Set());
+  function toggleRawDetails(id: string) {
+    const next = new Set(rawDetailsVisible);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    rawDetailsVisible = next;
+  }
+
+  interface DetailHeaderRow {
+    key: string;
+    value: string;
+    enabled?: boolean;
+  }
+  function asHeaderRows(value: unknown): DetailHeaderRow[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((h): h is Record<string, unknown> => typeof h === "object" && h !== null)
+      .map((h) => ({
+        key: typeof h.key === "string" ? h.key : "",
+        value: typeof h.value === "string" ? h.value : "",
+        enabled: typeof h.enabled === "boolean" ? h.enabled : undefined,
+      }));
+  }
+
+  interface DetailCookieRow {
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    http_only: boolean;
+    secure: boolean;
+  }
+  function asCookieRows(value: unknown): DetailCookieRow[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter((c): c is Record<string, unknown> => typeof c === "object" && c !== null)
+      .map((c) => ({
+        name: typeof c.name === "string" ? c.name : "",
+        value: typeof c.value === "string" ? c.value : "",
+        domain: typeof c.domain === "string" ? c.domain : "",
+        path: typeof c.path === "string" ? c.path : "",
+        http_only: Boolean(c.http_only),
+        secure: Boolean(c.secure),
+      }));
+  }
+
+  function detailStr(details: Record<string, unknown> | null | undefined, field: string): string | null {
+    const v = details?.[field];
+    return v === undefined || v === null ? null : String(v);
+  }
+
   // Git & Collaboration state (LP-0701 - LP-0713)
   let showDiffModal = $state(false);
   let showHistoryModal = $state(false);
   let gitActiveTab = $state<"sync" | "conflicts" | "github" | "projectfile">("sync");
 
-  let gitSettings = $state<ProjectGitSettings | null>(null);
+  let gitSettings = $state<WorkspaceGitSettings | null>(null);
+  // Leftover per-project git configs (from before Git sync was workspace-level), offered as
+  // options when this workspace has no settings of its own yet — never applied automatically.
+  let legacyGitCandidates = $state<LegacyGitSettingsCandidate[]>([]);
   let gitStatus = $state<GitStatus | null>(null);
   let gitHistory = $state<GitCommit[]>([]);
   let gitDiffContent = $state("");
@@ -1298,6 +1750,16 @@
         editUrlEncodedItems = withTrailingEmptyRow(parsedBody.urlEncodedItems, () => ({ key: "", value: "", enabled: true }));
         editBinaryFilePath = parsedBody.binaryFilePath;
         editDescription = selectedRequest.description ?? "";
+
+        // A request with a body someone actually filled in opens straight to Body — better
+        // than always landing on Params and making the user go find it every time.
+        const bodyHasContent =
+          (parsedBody.bodyType === "raw" && parsedBody.rawBody.trim().length > 0) ||
+          (parsedBody.bodyType === "graphql" && parsedBody.graphqlQuery.trim().length > 0) ||
+          (parsedBody.bodyType === "form-data" && parsedBody.formDataItems.some((i) => i.key.trim())) ||
+          (parsedBody.bodyType === "x-www-form-urlencoded" && parsedBody.urlEncodedItems.some((i) => i.key.trim())) ||
+          (parsedBody.bodyType === "binary" && parsedBody.binaryFilePath.trim().length > 0);
+        activeEditorTab = bodyHasContent ? "body" : "params";
 
         const auth = selectedRequest.auth;
         editAuthType = auth.type;
@@ -1443,7 +1905,7 @@
   }
 
   onMount(() => {
-    loadWorkspaces().then(loadProjects);
+    loadWorkspaces().then(() => Promise.all([loadProjects(), loadGitSettings()]));
     loadAllEnvironments();
     loadAiSettings();
     api.isAiConfigured().then((configured) => (aiConfigured = configured)).catch((err) => console.error("Failed to check AI configuration", err));
@@ -1454,6 +1916,18 @@
       if (saved === "dark" || saved === "light" || saved === "terminal" || saved === "blueprint") themeMode = saved;
       const savedAccent = localStorage.getItem("lp-accent-color");
       if (savedAccent && /^#[0-9a-f]{6}$/i.test(savedAccent)) accentColor = savedAccent;
+      const savedTint = localStorage.getItem("lp-surface-tint");
+      if (savedTint && (SURFACE_TINTS.some((t) => t.id === savedTint) || /^#[0-9a-f]{6}$/i.test(savedTint))) {
+        surfaceTint = savedTint;
+      }
+      const savedHeadingFont = localStorage.getItem("lp-heading-font");
+      if (savedHeadingFont && THEME_FONT_OPTIONS.some((f) => f.id === savedHeadingFont)) headingFontOverride = savedHeadingFont;
+      const savedBodyFont = localStorage.getItem("lp-body-font");
+      if (savedBodyFont && THEME_FONT_OPTIONS.some((f) => f.id === savedBodyFont)) bodyFontOverride = savedBodyFont;
+      const savedTextColor = localStorage.getItem("lp-text-color");
+      if (savedTextColor && /^#[0-9a-f]{6}$/i.test(savedTextColor)) textColorOverride = savedTextColor;
+      const savedCollapsed = localStorage.getItem("lp-response-pane-collapsed");
+      if (savedCollapsed === "true" || savedCollapsed === "false") responsePaneCollapsed = savedCollapsed === "true";
       const savedInterval = localStorage.getItem("lp-auto-sync-interval-ms");
       if (savedInterval && Number(savedInterval) > 0) autoSyncIntervalMs = Number(savedInterval);
       const savedShortcuts = localStorage.getItem("lp-shortcuts-enabled");
@@ -1479,7 +1953,7 @@
       const savedRequestSort = localStorage.getItem("lp-request-sort");
       if (savedRequestSort) {
         const parsed = JSON.parse(savedRequestSort);
-        if (parsed.field === "name" || parsed.field === "method" || parsed.field === "updated") requestSortField = parsed.field;
+        if (parsed.field === "name" || parsed.field === "method" || parsed.field === "created" || parsed.field === "updated") requestSortField = parsed.field;
         if (parsed.dir === "asc" || parsed.dir === "desc") requestSortDir = parsed.dir;
       }
       const savedSidebarVisible = localStorage.getItem("lp-sidebar-visible");
@@ -1668,7 +2142,7 @@
     openRequest(openTabs[nextIdx].id);
   }
 
-  function closeTab(id: string) {
+  async function closeTab(id: string) {
     tabDrafts.delete(id);
     const idx = openTabs.findIndex((t) => t.id === id);
     if (idx === -1) return;
@@ -1680,6 +2154,9 @@
         const nextTab = openTabs[Math.max(0, idx - 1)];
         openRequest(nextTab.id);
       } else {
+        // Same flush openRequest does — closing the last tab must not silently drop a pending
+        // debounced edit (see openRequest's comment for the full failure mode).
+        await saveRequest();
         selectedRequest = null;
         activeResponse = null;
         activeResponseBody = "";
@@ -1780,8 +2257,9 @@
       const s = await api.getAiSettings();
       aiSettings = s;
       aiConfigured = s.is_configured;
+      aiProviderInput = s.provider;
       aiApiKeyInput = s.api_key ?? "";
-      aiModelInput = s.model || "claude-3-5-sonnet-20241022";
+      aiModelInput = s.model || aiProviderDefaultModel(s.provider);
       aiBaseUrlInput = s.base_url ?? "";
     } catch (err) {
       console.error("Failed to load AI settings", err);
@@ -1792,14 +2270,19 @@
     aiTestError = "";
     aiTestFeedback = "";
     aiSettingsFeedback = "";
+    if (aiProviderInput === "custom" && !aiBaseUrlInput.trim()) {
+      aiTestError = t("ai.customRequiresBaseUrl");
+      return;
+    }
     try {
       await api.saveAiSettings({
+        provider: aiProviderInput,
         api_key: aiApiKeyInput.trim() || null,
         model: aiModelInput.trim() || null,
         base_url: aiBaseUrlInput.trim() || null,
       });
       await loadAiSettings();
-      aiSettingsFeedback = "AI settings saved successfully!";
+      aiSettingsFeedback = t("ai.settingsSaved");
       setTimeout(() => (aiSettingsFeedback = ""), 3000);
     } catch (err) {
       aiTestError = describeError(err);
@@ -2004,7 +2487,7 @@
         body: aiPreview.body,
       });
       requests = [
-        { id: request.id, project_id: request.project_id, folder_id: request.folder_id, name: request.name, method: request.method, url: request.url, updated_at: request.updated_at },
+        { id: request.id, project_id: request.project_id, folder_id: request.folder_id, name: request.name, method: request.method, url: request.url, created_at: request.created_at, updated_at: request.updated_at },
         ...requests,
       ];
       openTabs = [
@@ -2025,6 +2508,19 @@
   // "+" with no upfront text field: create with a placeholder name, then drop straight into
   // the same inline-rename UI used for renaming an existing project, so the user types the
   // real name in place instead of in a separate form first.
+  // Best-effort, silent: if this workspace already has a git repo configured, a newly created
+  // (or imported) project should show up in it without the user having to remember to hit
+  // "Save" — same repo-wide write `saveWorkspaceToRepoAction` uses, just not user-triggered.
+  // Failures are logged, not surfaced — the project itself was still created successfully.
+  async function syncNewProjectIntoWorkspaceRepo() {
+    if (!activeWorkspaceId || !gitSettings?.repo_path) return;
+    try {
+      await api.saveWorkspaceToRepo(activeWorkspaceId, gitSettings.repo_path, false);
+    } catch (err) {
+      console.error("Failed to add the new project to the workspace's git repo:", err);
+    }
+  }
+
   async function quickCreateProject() {
     if (!activeWorkspaceId) return;
     try {
@@ -2032,6 +2528,7 @@
       projects = [project, ...projects];
       await selectProject(project.id);
       startRenameProject(project);
+      await syncNewProjectIntoWorkspaceRepo();
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -2041,8 +2538,11 @@
   // stay on disk until a specific request tab is opened (README §4/§20).
   // Clicking the already-open project again closes it (collapses its request list back) instead
   // of just reselecting the same project — a real toggle, not a no-op re-fetch.
-  function toggleProjectSelection(id: string) {
+  async function toggleProjectSelection(id: string) {
     if (selectedProjectId === id) {
+      // Same flush as openRequest/closeTab — collapsing the project must not silently drop a
+      // pending debounced edit on whatever request was open.
+      await saveRequest();
       selectedProjectId = null;
       selectedRequest = null;
       selectedEnvironmentId = null;
@@ -2050,17 +2550,25 @@
       tabDrafts.clear();
       requests = [];
       folders = [];
+      setRightSidebarVisible(false);
+      rightPanel = null;
     } else {
       selectProject(id);
     }
   }
 
   async function selectProject(id: string) {
+    await saveRequest();
     selectedProjectId = id;
     selectedRequest = null;
     selectedEnvironmentId = null;
     openTabs = [];
     tabDrafts.clear();
+    // The Code Snippet panel is generated from whatever request was open — with none open
+    // anymore (fresh project, no tabs yet), it has nothing to show, so close it rather than
+    // leaving an empty panel visible until the user notices and closes it themselves.
+    setRightSidebarVisible(false);
+    rightPanel = null;
     loadingRequests = true;
     try {
       requests = await api.listRequests(id);
@@ -2073,7 +2581,6 @@
         selectedEnvironmentId = defaultEnvId;
       }
       await loadVariables();
-      await loadGitSettings(id);
       await loadSourceAssociation(id);
     } catch (err) {
       errorMessage = describeError(err);
@@ -2175,6 +2682,7 @@
           name: request.name,
           method: request.method,
           url: request.url,
+          created_at: request.created_at,
           updated_at: request.updated_at,
         },
         ...requests,
@@ -2255,6 +2763,12 @@
   // Hydrate the full request only when the user actually opens it.
   async function openRequest(id: string) {
     if (selectedRequest?.id === id) return;
+    // Flush any pending debounced autosave (scheduleAutoSave's 700ms timer) against the request
+    // we're LEAVING before switching — otherwise that timer still fires later, but by then
+    // selectedRequest/edit* fields point at the NEW request, so the stale save silently diffs
+    // against the wrong request and does nothing. This is what made curl-paste-then-switch (and
+    // any other quick edit-then-switch) look like it never saved.
+    await saveRequest();
     saveCurrentDraft();
 
     // Ensure tab exists in openTabs (LP-0407)
@@ -2448,6 +2962,15 @@
       editFormDataItems = withTrailingEmptyRow(parsedBody.formDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
       editUrlEncodedItems = withTrailingEmptyRow(parsedBody.urlEncodedItems, () => ({ key: "", value: "", enabled: true }));
       editBinaryFilePath = parsedBody.binaryFilePath;
+      // Only apply the two settings curl's own flags (-k, -x) can actually express — leave
+      // timeout/redirects/HTTP-version alone, since curl parsing has no information about them
+      // and resetting them would silently discard whatever the user already had configured.
+      if (parsed.settings.verify_ssl !== undefined && parsed.settings.verify_ssl !== null) {
+        editVerifySsl = parsed.settings.verify_ssl;
+      }
+      if (parsed.settings.proxy_url) {
+        editProxyUrl = parsed.settings.proxy_url;
+      }
       curlDetectedFeedback = "Detected a curl command — filled in method, headers, auth, and body.";
       scheduleAutoSave();
     } catch (err) {
@@ -2540,7 +3063,7 @@
       tabDrafts.delete(updated.id);
       requests = requests.map((r) =>
         r.id === updated.id
-          ? { id: updated.id, project_id: updated.project_id, folder_id: updated.folder_id, name: updated.name, method: updated.method, url: updated.url, updated_at: updated.updated_at }
+          ? { id: updated.id, project_id: updated.project_id, folder_id: updated.folder_id, name: updated.name, method: updated.method, url: updated.url, created_at: updated.created_at, updated_at: updated.updated_at }
           : r,
       );
       autoSaveStatus = "saved";
@@ -2574,6 +3097,7 @@
         query_params: parsed.query_params,
         auth: parsed.auth,
         body: parsed.body,
+        settings: parsed.settings,
       });
       requests = [
         {
@@ -2583,6 +3107,7 @@
           name: request.name,
           method: request.method,
           url: request.url,
+          created_at: request.created_at,
           updated_at: request.updated_at,
         },
         ...requests,
@@ -2611,13 +3136,13 @@
   }
 
   async function importPostmanCollectionAction() {
-    if (!collectionImportText.trim()) return;
+    if (!collectionImportText.trim() || !activeWorkspaceId) return;
     collectionImportLoading = true;
     collectionImportError = "";
     collectionImportReport = null;
     try {
       const targetId = collectionImportTarget === "current" ? selectedProjectId : null;
-      const report = await api.importPostmanCollection(collectionImportText.trim(), targetId);
+      const report = await api.importPostmanCollection(collectionImportText.trim(), targetId, activeWorkspaceId);
       collectionImportReport = report;
       await loadProjects();
       if (!selectedProjectId || collectionImportTarget === "new") {
@@ -2626,6 +3151,7 @@
         await selectProject(selectedProjectId);
       }
       collectionImportText = "";
+      await syncNewProjectIntoWorkspaceRepo();
     } catch (err) {
       collectionImportError = describeError(err);
     } finally {
@@ -2867,8 +3393,47 @@
   // nested inside the URL bar gets clipped, since the bar also needs overflow-x clipping for
   // long URLs and CSS doesn't allow "clip X, don't clip Y" (a non-"visible" axis paired with
   // "visible" silently becomes "auto", which still clips).
+  //
+  // Extended (LP-1201) to work for ALREADY-resolved variables too, not just missing ones — same
+  // popover, same position/hide logic, just prefilled with the live value and wired to update
+  // instead of create. Only searches the two scopes the request-editing surface already knows
+  // about (environment, then global) — the same scopes addMissingVariable can create into, so
+  // this doesn't reach further than what was already editable elsewhere.
   let missingVarHover = $state<{ name: string; top: number; left: number } | null>(null);
   let missingVarHoverHideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function findResolvedVariable(name: string): VariableView | undefined {
+    return (
+      environmentVariables.find((v) => v.key === name) ??
+      projectVariables.find((v) => v.key === name)
+    );
+  }
+
+  function showVarPopover(name: string, target: HTMLElement) {
+    if (missingVarDrafts[name] === undefined) {
+      const resolved = findResolvedVariable(name);
+      if (resolved) missingVarDrafts[name] = resolved.value;
+    }
+    showMissingVarPopover(name, target);
+  }
+
+  async function saveVariableFromPopover(name: string) {
+    const resolved = findResolvedVariable(name);
+    if (!resolved) {
+      await addMissingVariable(name);
+      return;
+    }
+    const value = missingVarDrafts[name] ?? "";
+    try {
+      await api.updateVariable({ id: resolved.id, value });
+      missingVarHover = null;
+      await loadVariables();
+      await refreshDiagnostics();
+      await refreshUrlPreview();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
 
   function showMissingVarPopover(name: string, target: HTMLElement) {
     if (missingVarHoverHideTimer) {
@@ -2892,6 +3457,255 @@
       clearTimeout(missingVarHoverHideTimer);
       missingVarHoverHideTimer = null;
     }
+  }
+
+  // Inline autocomplete (LP-1401) for two contexts that share one floating dropdown:
+  // "var" mode suggests {{variable}} names while inside an unclosed {{ in any text field,
+  // "pm" mode suggests pm.*/console.* API members while typing in a pre/post-request script
+  // textarea. Attached generically via oninput/onkeydown so no per-field wiring is needed beyond
+  // passing a `setValue` closure that writes back into that field's own bound state.
+  interface AutocompleteItem {
+    insertText: string;
+    label: string;
+    detail?: string;
+  }
+  interface AutocompleteState {
+    mode: "var" | "pm" | "header";
+    items: AutocompleteItem[];
+    activeIndex: number;
+    top: number;
+    left: number;
+    targetEl: HTMLInputElement | HTMLTextAreaElement;
+    replaceStart: number;
+    replaceEnd: number;
+    setValue: (value: string) => void;
+  }
+  let autocomplete = $state<AutocompleteState | null>(null);
+
+  // Mirrors the textarea/input's text into an offscreen div with identical font metrics so we can
+  // read where a given character index actually lands on screen — there is no DOM API that maps a
+  // string index to pixel coordinates directly, so the standard workaround is to lay out the same
+  // text a second time and measure it.
+  const CARET_MIRROR_PROPERTIES = [
+    "boxSizing", "width", "height", "overflowX", "overflowY",
+    "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "borderStyle",
+    "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+    "fontStyle", "fontVariant", "fontWeight", "fontStretch", "fontSize", "fontFamily",
+    "lineHeight", "textAlign", "textTransform", "textIndent", "letterSpacing", "wordSpacing",
+    "tabSize", "whiteSpace", "wordBreak",
+  ] as const;
+
+  function caretScreenPosition(el: HTMLInputElement | HTMLTextAreaElement, index: number): { top: number; left: number; height: number } {
+    const isInput = el.tagName === "INPUT";
+    const style = getComputedStyle(el);
+    const div = document.createElement("div");
+    const divStyle = div.style as CSSStyleDeclaration & Record<string, string>;
+    const computedStyle = style as CSSStyleDeclaration & Record<string, string>;
+    for (const prop of CARET_MIRROR_PROPERTIES) {
+      divStyle[prop] = computedStyle[prop];
+    }
+    div.style.position = "absolute";
+    div.style.visibility = "hidden";
+    div.style.whiteSpace = isInput ? "pre" : "pre-wrap";
+    div.style.wordWrap = "break-word";
+    document.body.appendChild(div);
+    const before = el.value.slice(0, index);
+    div.textContent = isInput ? before.replace(/ /g, " ") : before;
+    const marker = document.createElement("span");
+    marker.textContent = el.value.slice(index) || ".";
+    div.appendChild(marker);
+    const rect = el.getBoundingClientRect();
+    const lineHeight = parseInt(style.lineHeight, 10) || 18;
+    const top = rect.top + marker.offsetTop - el.scrollTop;
+    const left = rect.left + marker.offsetLeft - el.scrollLeft;
+    document.body.removeChild(div);
+    return { top, left, height: lineHeight };
+  }
+
+  function variableAutocompleteQuery(text: string, caret: number): { query: string; start: number } | null {
+    const upto = text.slice(0, caret);
+    const openIdx = upto.lastIndexOf("{{");
+    if (openIdx === -1) return null;
+    const closeIdx = upto.indexOf("}}", openIdx);
+    if (closeIdx !== -1) return null;
+    const inner = upto.slice(openIdx + 2);
+    if (/[{}\s]/.test(inner)) return null;
+    return { query: inner, start: openIdx + 2 };
+  }
+
+  function variableSuggestionItems(query: string): AutocompleteItem[] {
+    const q = query.toLowerCase();
+    const seen = new Set<string>();
+    const items: AutocompleteItem[] = [];
+    for (const v of environmentVariables) {
+      if (seen.has(v.key) || (q && !v.key.toLowerCase().includes(q))) continue;
+      seen.add(v.key);
+      items.push({ insertText: v.key, label: v.key, detail: t("var.scopeEnvironment") });
+    }
+    for (const v of projectVariables) {
+      if (seen.has(v.key) || (q && !v.key.toLowerCase().includes(q))) continue;
+      seen.add(v.key);
+      items.push({ insertText: v.key, label: v.key, detail: t("var.scopeGlobal") });
+    }
+    return items.slice(0, 20);
+  }
+
+  function scriptAutocompleteQuery(text: string, caret: number): { query: string; start: number } | null {
+    const upto = text.slice(0, caret);
+    const match = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.exec(upto);
+    if (!match) return null;
+    const word = match[0];
+    if (word.length < 2) return null;
+    if (!word.startsWith("pm") && !word.startsWith("console") && !"pm".startsWith(word) && !"console".startsWith(word)) {
+      return null;
+    }
+    return { query: word, start: caret - word.length };
+  }
+
+  function pmApiSuggestions(includeResponse: boolean): AutocompleteItem[] {
+    const base: { insertText: string; label: string; detailKey: string }[] = [
+      { insertText: "pm.environment.get(", label: "pm.environment.get(key)", detailKey: "autocomplete.pmEnvGet" },
+      { insertText: "pm.environment.set(", label: "pm.environment.set(key, value)", detailKey: "autocomplete.pmEnvSet" },
+      { insertText: "pm.environment.unset(", label: "pm.environment.unset(key)", detailKey: "autocomplete.pmEnvUnset" },
+      { insertText: "pm.environment.has(", label: "pm.environment.has(key)", detailKey: "autocomplete.pmEnvHas" },
+      { insertText: "pm.variables.get(", label: "pm.variables.get(key)", detailKey: "autocomplete.pmVarGet" },
+      { insertText: "pm.variables.set(", label: "pm.variables.set(key, value)", detailKey: "autocomplete.pmVarSet" },
+      { insertText: "pm.test(", label: "pm.test(name, fn)", detailKey: "autocomplete.pmTest" },
+      { insertText: "console.log(", label: "console.log(...)", detailKey: "autocomplete.consoleLog" },
+      { insertText: "console.info(", label: "console.info(...)", detailKey: "autocomplete.consoleInfo" },
+      { insertText: "console.warn(", label: "console.warn(...)", detailKey: "autocomplete.consoleWarn" },
+      { insertText: "console.error(", label: "console.error(...)", detailKey: "autocomplete.consoleError" },
+    ];
+    const responseOnly: { insertText: string; label: string; detailKey: string }[] = [
+      { insertText: "pm.response.code", label: "pm.response.code", detailKey: "autocomplete.pmResCode" },
+      { insertText: "pm.response.status", label: "pm.response.status", detailKey: "autocomplete.pmResStatus" },
+      { insertText: "pm.response.statusText", label: "pm.response.statusText", detailKey: "autocomplete.pmResStatusText" },
+      { insertText: "pm.response.headers", label: "pm.response.headers", detailKey: "autocomplete.pmResHeaders" },
+      { insertText: "pm.response.text()", label: "pm.response.text()", detailKey: "autocomplete.pmResText" },
+      { insertText: "pm.response.json()", label: "pm.response.json()", detailKey: "autocomplete.pmResJson" },
+      { insertText: "pm.response.to.have.status(", label: "pm.response.to.have.status(code)", detailKey: "autocomplete.pmResToHaveStatus" },
+      { insertText: "pm.response.to.have.header(", label: "pm.response.to.have.header(key, value?)", detailKey: "autocomplete.pmResToHaveHeader" },
+    ];
+    const all = includeResponse ? [...base, ...responseOnly] : base;
+    return all.map((s) => ({ insertText: s.insertText, label: s.label, detail: t(s.detailKey) }));
+  }
+
+  function pmSuggestionItems(query: string, includeResponse: boolean): AutocompleteItem[] {
+    const q = query.toLowerCase();
+    return pmApiSuggestions(includeResponse)
+      .filter((s) => s.insertText.toLowerCase().startsWith(q) || s.label.toLowerCase().startsWith(q))
+      .slice(0, 20);
+  }
+
+  // A curated set of headers actually useful when testing an API — not the full IANA registry,
+  // which would mostly just add noise (browser-only headers like Sec-Fetch-*, response-only
+  // headers like ETag, etc. don't belong in a request's own header list).
+  const STANDARD_REQUEST_HEADERS = [
+    "Accept", "Accept-Charset", "Accept-Encoding", "Accept-Language",
+    "Authorization", "Cache-Control", "Connection", "Content-Disposition",
+    "Content-Length", "Content-Type", "Cookie", "DNT", "Expect", "Forwarded",
+    "Host", "If-Match", "If-Modified-Since", "If-None-Match", "If-Unmodified-Since",
+    "Origin", "Pragma", "Range", "Referer", "TE", "User-Agent",
+    "Upgrade-Insecure-Requests", "Warning", "X-Api-Key", "X-CSRF-Token",
+    "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Request-ID",
+    "X-Requested-With",
+  ];
+
+  function headerNameQuery(text: string): { query: string; start: number } | null {
+    if (!text) return null;
+    return { query: text, start: 0 };
+  }
+
+  function headerSuggestionItems(query: string): AutocompleteItem[] {
+    const q = query.toLowerCase();
+    return STANDARD_REQUEST_HEADERS.filter((h) => h.toLowerCase().startsWith(q) && h.toLowerCase() !== q)
+      .slice(0, 20)
+      .map((h) => ({ insertText: h, label: h }));
+  }
+
+  function updateAutocompleteFor(
+    el: HTMLInputElement | HTMLTextAreaElement,
+    mode: "var" | "pm" | "header",
+    includeResponse: boolean,
+    setValue: (value: string) => void,
+  ) {
+    const caret = el.selectionStart ?? el.value.length;
+    const hit =
+      mode === "var"
+        ? variableAutocompleteQuery(el.value, caret)
+        : mode === "pm"
+          ? scriptAutocompleteQuery(el.value, caret)
+          : headerNameQuery(el.value);
+    if (!hit) {
+      autocomplete = null;
+      return;
+    }
+    const items =
+      mode === "var"
+        ? variableSuggestionItems(hit.query)
+        : mode === "pm"
+          ? pmSuggestionItems(hit.query, includeResponse)
+          : headerSuggestionItems(hit.query);
+    if (!items.length) {
+      autocomplete = null;
+      return;
+    }
+    // Header-name mode always replaces the whole field, regardless of caret position.
+    const replaceEnd = mode === "header" ? el.value.length : caret;
+    const pos = caretScreenPosition(el, hit.start);
+    autocomplete = {
+      mode,
+      items,
+      activeIndex: 0,
+      top: pos.top + pos.height + 2,
+      left: pos.left,
+      targetEl: el,
+      replaceStart: hit.start,
+      replaceEnd,
+      setValue,
+    };
+  }
+
+  function handleAutocompleteKeydown(e: KeyboardEvent) {
+    if (!autocomplete) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      autocomplete = { ...autocomplete, activeIndex: (autocomplete.activeIndex + 1) % autocomplete.items.length };
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      autocomplete = { ...autocomplete, activeIndex: (autocomplete.activeIndex - 1 + autocomplete.items.length) % autocomplete.items.length };
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      applyAutocompleteItem(autocomplete.items[autocomplete.activeIndex]);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      autocomplete = null;
+    }
+  }
+
+  function applyAutocompleteItem(item: AutocompleteItem) {
+    const ac = autocomplete;
+    if (!ac) return;
+    const { targetEl, replaceStart, replaceEnd, mode, setValue } = ac;
+    const value = targetEl.value;
+    const before = value.slice(0, replaceStart);
+    const after = value.slice(replaceEnd);
+    const hasClosing = mode === "var" && after.startsWith("}}");
+    const insertText = mode === "var" && !hasClosing ? item.insertText + "}}" : item.insertText;
+    const newValue = before + insertText + after;
+    const newCaret = before.length + insertText.length + (hasClosing ? 2 : 0);
+    setValue(newValue);
+    autocomplete = null;
+    tick().then(() => {
+      targetEl.focus();
+      targetEl.setSelectionRange(newCaret, newCaret);
+    });
+  }
+
+  function hideAutocompleteSoon() {
+    setTimeout(() => {
+      autocomplete = null;
+    }, 120);
   }
 
   async function deleteVariable(id: string) {
@@ -2947,10 +3761,49 @@
     }
   }
 
-  // --- Git & Collaboration Functions (LP-0701 - LP-0713) ---
-  async function loadGitSettings(projectId: string) {
+  // Full copy — headers, params, auth, body, description and scripts all carry over, not just
+  // method/URL, so "Duplicate" is a real starting point for a variant request, not a blank one.
+  async function duplicateRequest(id: string) {
     try {
-      const s = await api.getProjectGitSettings(projectId);
+      const source = await api.getRequest(id);
+      const created = await api.createRequest({
+        project_id: source.project_id,
+        folder_id: source.folder_id,
+        name: t("sidebar.copyOf", { name: source.name }),
+        method: source.method,
+        url: source.url,
+        headers: source.headers,
+        query_params: source.query_params,
+        auth: source.auth,
+        body: source.body,
+        description: source.description,
+        settings: source.settings,
+        pre_request_script: source.pre_request_script,
+        post_request_script: source.post_request_script,
+      });
+      requests = [
+        {
+          id: created.id,
+          project_id: created.project_id,
+          folder_id: created.folder_id,
+          name: created.name,
+          method: created.method,
+          url: created.url,
+          created_at: created.created_at,
+          updated_at: created.updated_at,
+        },
+        ...requests,
+      ];
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  // --- Git & Collaboration Functions (LP-0701 - LP-0713) ---
+  async function loadGitSettings() {
+    if (!activeWorkspaceId) return;
+    try {
+      const s = await api.getWorkspaceGitSettings(activeWorkspaceId);
       gitSettings = s;
       if (s) {
         gitRepoPathInput = s.repo_path ?? "";
@@ -2976,6 +3829,9 @@
         githubUser = null;
         githubRepoInfo = null;
       }
+      // No workspace-level settings yet — offer any leftover per-project configs as options
+      // rather than guessing; the user picks one (or dismisses and configures from scratch).
+      legacyGitCandidates = s ? [] : await api.findLegacyGitSettingsForWorkspace(activeWorkspaceId);
     } catch (err) {
       console.error("Failed to load git settings:", err);
     }
@@ -3000,12 +3856,12 @@
   }
 
   async function saveGitSettingsAction() {
-    if (!selectedProjectId) return;
+    if (!activeWorkspaceId) return;
     gitActionError = "";
     gitActionFeedback = "";
     try {
-      const settings: ProjectGitSettings = {
-        project_id: selectedProjectId,
+      const settings: WorkspaceGitSettings = {
+        workspace_id: activeWorkspaceId,
         repo_path: gitRepoPathInput.trim() || null,
         remote_url: gitRemoteUrlInput.trim() || null,
         branch: gitBranchInput.trim() || "main",
@@ -3013,8 +3869,9 @@
         github_token: githubTokenInput.trim() || null,
         last_sync_at: gitSettings?.last_sync_at ?? null,
       };
-      await api.saveProjectGitSettings(settings);
+      await api.saveWorkspaceGitSettings(settings);
       gitSettings = settings;
+      legacyGitCandidates = [];
       gitActionFeedback = "Settings saved successfully.";
       if (settings.repo_path) {
         await refreshGitStatus(settings.repo_path);
@@ -3022,6 +3879,22 @@
     } catch (err) {
       gitActionError = describeError(err);
     }
+  }
+
+  // The user picked one of the offered legacy per-project configs — fill the form with it and
+  // save it as this workspace's own settings (a real save, not just a preview: they explicitly
+  // chose it from the options).
+  async function adoptLegacyGitSettings(candidate: LegacyGitSettingsCandidate) {
+    gitRepoPathInput = candidate.settings.repo_path ?? "";
+    gitRemoteUrlInput = candidate.settings.remote_url ?? "";
+    gitBranchInput = candidate.settings.branch || "main";
+    gitAutoSyncInput = candidate.settings.auto_sync;
+    githubTokenInput = candidate.settings.github_token ?? "";
+    await saveGitSettingsAction();
+  }
+
+  function dismissLegacyGitCandidates() {
+    legacyGitCandidates = [];
   }
 
   async function initializeGitRepoAction() {
@@ -3036,11 +3909,11 @@
     try {
       await api.gitInitRepository(dir);
       await saveGitSettingsAction();
-      if (selectedProjectId) {
-        await api.saveProjectToRepo(selectedProjectId, dir, false);
+      if (activeWorkspaceId) {
+        await api.saveWorkspaceToRepo(activeWorkspaceId, dir, false);
       }
       await refreshGitStatus(dir);
-      gitActionFeedback = "Git repository initialized successfully with .gitignore and canonical project file.";
+      gitActionFeedback = "Git repository initialized successfully with .gitignore and every project's canonical file.";
     } catch (err) {
       gitActionError = describeError(err);
     } finally {
@@ -3048,15 +3921,15 @@
     }
   }
 
-  async function saveProjectToRepoAction() {
-    if (!selectedProjectId || !gitRepoPathInput.trim()) return;
+  async function saveWorkspaceToRepoAction() {
+    if (!activeWorkspaceId || !gitRepoPathInput.trim()) return;
     gitLoading = true;
     gitActionError = "";
     gitActionFeedback = "";
     try {
-      const path = await api.saveProjectToRepo(selectedProjectId, gitRepoPathInput.trim(), false);
+      const paths = await api.saveWorkspaceToRepo(activeWorkspaceId, gitRepoPathInput.trim(), false);
       await refreshGitStatus();
-      gitActionFeedback = `Saved canonical project file to ${path}`;
+      gitActionFeedback = `Saved ${paths.length} project file${paths.length === 1 ? "" : "s"} to the repo.`;
     } catch (err) {
       gitActionError = describeError(err);
     } finally {
@@ -3066,13 +3939,13 @@
 
   async function commitAndPushAction() {
     const dir = gitRepoPathInput.trim();
-    if (!dir || !selectedProjectId) return;
-    const msg = gitCommitMessage.trim() || "Update project from Light Postman";
+    if (!dir || !activeWorkspaceId) return;
+    const msg = gitCommitMessage.trim() || "Update workspace from Light Postman";
     gitLoading = true;
     gitActionError = "";
     gitActionFeedback = "";
     try {
-      await api.saveProjectToRepo(selectedProjectId, dir, false);
+      await api.saveWorkspaceToRepo(activeWorkspaceId, dir, false);
       const commitHash = await api.gitCommitChanges(dir, msg);
       gitCommitMessage = "";
       let pushed = false;
@@ -3089,7 +3962,7 @@
       const now = new Date().toISOString();
       if (gitSettings) {
         gitSettings.last_sync_at = now;
-        await api.saveProjectGitSettings(gitSettings);
+        await api.saveWorkspaceGitSettings(gitSettings);
       }
       gitActionFeedback = pushed
         ? `Committed (${commitHash.slice(0, 7)}) and pushed to remote.`
@@ -3102,17 +3975,27 @@
     }
   }
 
+  function describeWorkspaceImportReport(report: WorkspaceImportReport): string {
+    const parts = [];
+    if (report.updated_projects.length) parts.push(`${report.updated_projects.length} updated`);
+    if (report.created_projects.length) parts.push(`${report.created_projects.length} created`);
+    if (!parts.length) parts.push("nothing to import");
+    let msg = `Pulled from remote — ${parts.join(", ")}.`;
+    if (report.warnings.length) msg += ` ${report.warnings.length} warning(s): ${report.warnings.join("; ")}`;
+    return msg;
+  }
+
   async function pullRepositoryAction() {
     const dir = gitRepoPathInput.trim();
-    if (!dir || !selectedProjectId) return;
+    if (!dir || !activeWorkspaceId) return;
     gitLoading = true;
     gitActionError = "";
     gitActionFeedback = "";
     try {
       await api.gitPullRepository(dir, "origin", gitBranchInput.trim() || "main");
-      await api.loadProjectFromRepo(dir, selectedProjectId);
-      await selectProject(selectedProjectId);
-      gitActionFeedback = "Successfully pulled from remote and reloaded project.";
+      const report = await api.loadWorkspaceFromRepo(activeWorkspaceId, dir);
+      await loadProjects();
+      gitActionFeedback = describeWorkspaceImportReport(report);
       await refreshGitStatus();
     } catch (err) {
       gitActionError = describeError(err);
@@ -3154,7 +4037,7 @@
 
   async function resolveConflictAction(file: string, choice: string) {
     const dir = gitRepoPathInput.trim();
-    if (!dir || !selectedProjectId) return;
+    if (!dir || !activeWorkspaceId) return;
     gitLoading = true;
     gitActionError = "";
     gitActionFeedback = "";
@@ -3162,8 +4045,8 @@
       await api.gitResolveConflict(dir, file, choice);
       gitActionFeedback = `Resolved conflict on '${file}' with choice '${choice}'.`;
       if (choice === "theirs" && file.includes("light-postman.json")) {
-        await api.loadProjectFromRepo(dir, selectedProjectId);
-        await selectProject(selectedProjectId);
+        await api.loadWorkspaceFromRepo(activeWorkspaceId, dir);
+        await loadProjects();
       }
       await refreshGitStatus();
     } catch (err) {
@@ -3233,11 +4116,12 @@
   }
 
   async function importProjectFileAction() {
-    if (!projectFileJson.trim()) return;
+    if (!projectFileJson.trim() || !activeWorkspaceId) return;
     try {
-      const proj = await api.importProjectFile(projectFileJson, selectedProjectId);
+      const proj = await api.importProjectFile(projectFileJson, selectedProjectId, activeWorkspaceId);
       projectFileStatus = `Project '${proj.name}' imported successfully.`;
       await selectProject(proj.id);
+      await syncNewProjectIntoWorkspaceRepo();
     } catch (err) {
       projectFileStatus = `Import failed: ${describeError(err)}`;
     }
@@ -3261,7 +4145,7 @@
       clearInterval(autoSyncTimer);
       autoSyncTimer = null;
     }
-    if (gitAutoSyncInput && gitRepoPathInput.trim() && selectedProjectId) {
+    if (gitAutoSyncInput && gitRepoPathInput.trim() && activeWorkspaceId) {
       autoSyncTimer = setInterval(async () => {
         try {
           const status = await api.getGitStatus(gitRepoPathInput.trim());
@@ -3320,6 +4204,7 @@
 {#snippet iconChevronRight()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M6 3.3 11 8l-5 4.7"/></svg>{/snippet}
 {#snippet iconChevronLeft()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M10 3.3 5 8l5 4.7"/></svg>{/snippet}
 {#snippet iconChevronDown()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3.3 6 8 11l4.7-5"/></svg>{/snippet}
+{#snippet iconChevronUp()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3.3 10 8 5l4.7 5"/></svg>{/snippet}
 {#snippet iconExpandAll()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.4" y="2.4" width="11.2" height="11.2"/><path d="M8 5v6M5 8h6"/></svg>{/snippet}
 {#snippet iconCollapseAll()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.4" y="2.4" width="11.2" height="11.2"/><path d="M5 8h6"/></svg>{/snippet}
 {#snippet iconCopy()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="5.5" y="5.5" width="8" height="8"/><path d="M10.5 5.5V3H3v8h2.5"/></svg>{/snippet}
@@ -3337,7 +4222,11 @@
   {/if}
 {/snippet}
 
-<div class="app-shell" data-theme={themeMode} style={accentStyleOverride(accentColor)}>
+<div
+  class="app-shell"
+  data-theme={themeMode}
+  style="{surfaceStyleOverride(surfaceTint, themeMode)} {accentStyleOverride(accentColor)} {fontStyleOverride(headingFontOverride, bodyFontOverride)} {textColorStyleOverride(textColorOverride)}"
+>
   <nav class="screens-rail" class:collapsed={!screensRailVisible}>
     <div class="rail-brand">
       {#if screensRailVisible}<span>{t("rail.brand")}</span>{/if}
@@ -3443,6 +4332,7 @@
             <span class="request-name">{req.name}</span>
             {#if sampleCount}<span class="tab-badge">{sampleCount}</span>{/if}
           </button>
+          <button class="icon-btn icon-btn-ghost" title={t("sidebar.duplicate")} onclick={() => duplicateRequest(req.id)}>{@render iconCopy()}</button>
           <button class="icon-btn icon-btn-ghost" title={t("sidebar.delete")} onclick={() => deleteRequest(req.id)}>{@render iconTrash()}</button>
         {/if}
       </div>
@@ -3609,17 +4499,25 @@
               <button type="button" class="response-subtab" class:active={responseSubTab === "cookies"} onclick={() => (responseSubTab = "cookies")}>
                 {t("response.cookies")} {#if activeResponse.cookies?.length}<span class="tab-badge">{activeResponse.cookies.length}</span>{/if}
               </button>
+              <button type="button" class="response-subtab" class:active={responseSubTab === "history"} onclick={() => (responseSubTab = "history")}>
+                {t("response.history")} {#if responseHistory.length}<span class="tab-badge">{responseHistory.length}</span>{/if}
+              </button>
               <div class="response-stat-spacer"></div>
               {#if responseSubTab === "body"}
                 <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>{t("response.pretty")}</button>
                 <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>{t("response.raw")}</button>
+                {#if responseBodyIsHtml}
+                  <button type="button" class="btn-ghost btn-xs" class:active={responseViewMode === "preview"} onclick={() => (responseViewMode = "preview")}>{t("response.preview")}</button>
+                {/if}
               {/if}
               <button type="button" class="btn-ghost btn-xs" onclick={copyResponseBody}>{t("response.copyAction")}</button>
               <button type="button" class="btn-ghost btn-xs" onclick={downloadResponseBody}>{t("response.saveToFile")}</button>
             </div>
             <div class="response-screen-content">
               {#if responseSubTab === "body"}
-                {#if responseBodyIsJson}
+                {#if responseViewMode === "preview" && responseBodyIsHtml}
+                  <iframe class="response-preview-frame" title={t("response.preview")} sandbox="" srcdoc={activeResponseBody}></iframe>
+                {:else if responseBodyIsJson}
                   <pre class="body-view screen-body-view">{@html highlightedResponseBody}</pre>
                 {:else}
                   <pre class="body-view screen-body-view">{prettyResponseBody}</pre>
@@ -3644,6 +4542,22 @@
                   </div>
                 {:else}
                   <p class="empty">{t("response.noCookies")}</p>
+                {/if}
+              {:else if responseSubTab === "history"}
+                {#if responseHistory.length}
+                  <ul class="response-history-list">
+                    {#each responseHistory as r (r.id)}
+                      <li>
+                        <button type="button" class="response-history-row" onclick={() => openHistoryResponse(r.id)}>
+                          <span class="status-chip" class:status-ok={r.status < 400} class:status-err={r.status >= 400}>{r.status}</span>
+                          <span class="response-history-duration">{r.duration_ms} ms</span>
+                          <span class="response-history-time">{new Date(r.created_at).toLocaleString()}</span>
+                        </button>
+                      </li>
+                    {/each}
+                  </ul>
+                {:else}
+                  <p class="empty">{t("history.empty")}</p>
                 {/if}
               {/if}
             </div>
@@ -4177,8 +5091,8 @@
                           class="url-token-var"
                           class:missing
                           role="presentation"
-                          onmouseenter={(e) => missing && showMissingVarPopover(tok.name, e.currentTarget as HTMLElement)}
-                          onmouseleave={() => missing && scheduleHideMissingVarPopover()}
+                          onmouseenter={(e) => showVarPopover(tok.name, e.currentTarget as HTMLElement)}
+                          onmouseleave={scheduleHideMissingVarPopover}
                         >
                           {tok.raw}
                         </span>
@@ -4189,7 +5103,9 @@
                     placeholder={t("request.urlPlaceholder")}
                     bind:value={editUrl}
                     class="url-input url-input-ghost"
-                    oninput={scheduleAutoSave}
+                    oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLInputElement, "var", false, (v) => (editUrl = v)); }}
+                    onkeydown={handleAutocompleteKeydown}
+                    onblur={hideAutocompleteSoon}
                     onpaste={handleUrlPaste}
                     onscroll={syncUrlOverlayScroll}
                   />
@@ -4243,14 +5159,18 @@
           </form>
 
           {#if missingVarHover}
+            {@const resolved = findResolvedVariable(missingVarHover.name)}
             <div
               class="missing-var-popover-portal"
               role="group"
-              aria-label={t("missingvar.addValueFor", { name: missingVarHover.name })}
+              aria-label={t(resolved ? "var.editValueFor" : "missingvar.addValueFor", { name: missingVarHover.name })}
               style="top: {missingVarHover.top}px; left: {missingVarHover.left}px;"
               onmouseenter={cancelHideMissingVarPopover}
               onmouseleave={scheduleHideMissingVarPopover}
             >
+              {#if resolved}
+                <span class="var-popover-scope">{t(resolved.scope === "environment" ? "var.scopeEnvironment" : "var.scopeGlobal")}</span>
+              {/if}
               <input
                 placeholder={t("missingvar.valueFor", { name: missingVarHover.name })}
                 value={missingVarDrafts[missingVarHover.name] ?? ""}
@@ -4258,12 +5178,34 @@
                 onkeydown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
-                    addMissingVariable(missingVarHover!.name);
+                    saveVariableFromPopover(missingVarHover!.name);
                   }
                 }}
               />
-              <button type="button" onclick={() => addMissingVariable(missingVarHover!.name)}>{t("missingvar.add")}</button>
+              <button type="button" onclick={() => saveVariableFromPopover(missingVarHover!.name)}>{t(resolved ? "var.save" : "missingvar.add")}</button>
             </div>
+          {/if}
+
+          {#if autocomplete}
+            <ul
+              class="autocomplete-portal"
+              role="listbox"
+              style="top: {autocomplete.top}px; left: {autocomplete.left}px;"
+            >
+              {#each autocomplete.items as item, i (item.insertText)}
+                <li>
+                  <button
+                    type="button"
+                    class="autocomplete-item"
+                    class:active={i === autocomplete.activeIndex}
+                    onmousedown={(e) => { e.preventDefault(); applyAutocompleteItem(item); }}
+                  >
+                    <span class="autocomplete-label">{item.label}</span>
+                    {#if item.detail}<span class="autocomplete-detail">{item.detail}</span>{/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
           {/if}
 
           {#if urlPreview}
@@ -4358,8 +5300,28 @@
                 {#each editHeaders as header, i (i)}
                   <div class="params-row">
                     <input type="checkbox" bind:checked={header.enabled} title={t("params.enabled")} onchange={scheduleAutoSave} />
-                    <input placeholder={t("params.key")} bind:value={header.key} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
-                    <input placeholder={t("params.value")} bind:value={header.value} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
+                    <input
+                      placeholder={t("params.key")}
+                      bind:value={header.key}
+                      oninput={(e) => {
+                        growHeaders();
+                        scheduleAutoSave();
+                        updateAutocompleteFor(e.currentTarget as HTMLInputElement, "header", false, (v) => (header.key = v));
+                      }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
+                    />
+                    <input
+                      placeholder={t("params.value")}
+                      bind:value={header.value}
+                      oninput={(e) => {
+                        growHeaders();
+                        scheduleAutoSave();
+                        updateAutocompleteFor(e.currentTarget as HTMLInputElement, "var", false, (v) => (header.value = v));
+                      }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
+                    />
                     <input placeholder={t("headers.description")} bind:value={header.description} oninput={() => { growHeaders(); scheduleAutoSave(); }} />
                     {#if i < editHeaders.length - 1 || header.key.trim()}
                       <button type="button" class="icon-btn" title={t("params.remove")} onclick={() => { removeHeader(i); scheduleAutoSave(); }}>{@render iconTrash()}</button>
@@ -4416,8 +5378,19 @@
                     <input type="radio" bind:group={editBodyType} value="graphql" onchange={scheduleAutoSave} /> {t("body.graphql")}
                   </label>
                   {#if editBodyType === "raw"}
-                    <button type="button" onclick={() => { if (!editBody) editBody = "{\n  \n}"; scheduleAutoSave(); }}>{t("body.jsonTemplate")}</button>
+                    <select class="raw-type-select" value={rawContentType} onchange={(e) => setRawContentType((e.target as HTMLSelectElement).value)}>
+                      {#each RAW_CONTENT_TYPES as type (type.id)}
+                        <option value={type.id}>{t(type.label)}</option>
+                      {/each}
+                    </select>
+                    {#if rawContentType === "json"}
+                      <button type="button" onclick={() => { if (!editBody) editBody = "{\n  \n}"; scheduleAutoSave(); }}>{t("body.jsonTemplate")}</button>
+                    {/if}
                     <button type="button" onclick={() => { editBody = ""; scheduleAutoSave(); }}>{t("body.clearBody")}</button>
+                    {#if rawContentType === "json" || rawContentType === "xml" || rawContentType === "html"}
+                      <button type="button" onclick={prettifyBody}>{t("body.prettify")}</button>
+                    {/if}
+                    {#if bodyPrettifyFeedback}<span class="warn-inline">{bodyPrettifyFeedback}</span>{/if}
                   {/if}
                 </div>
 
@@ -4427,7 +5400,9 @@
                     bind:value={editBody}
                     class="body-input"
                     rows="8"
-                    oninput={scheduleAutoSave}
+                    oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLTextAreaElement, "var", false, (v) => (editBody = v)); }}
+                    onkeydown={handleAutocompleteKeydown}
+                    onblur={hideAutocompleteSoon}
                   ></textarea>
                 {:else if editBodyType === "form-data"}
                   <div class="params-table">
@@ -4524,7 +5499,9 @@
                       placeholder={t("scripts.prePlaceholder")}
                       bind:value={editPreScript}
                       class="body-input scripts-textarea"
-                      oninput={scheduleAutoSave}
+                      oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLTextAreaElement, "pm", false, (v) => (editPreScript = v)); }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
                     ></textarea>
                   {:else}
                     <div class="field-header-row">
@@ -4546,7 +5523,9 @@
                       placeholder={t("scripts.postPlaceholder")}
                       bind:value={editPostScript}
                       class="body-input scripts-textarea"
-                      oninput={scheduleAutoSave}
+                      oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLTextAreaElement, "pm", true, (v) => (editPostScript = v)); }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
                     ></textarea>
                   {/if}
                 </div>
@@ -4664,25 +5643,42 @@
           </div>
           </div>
 
-          <div
-            class="response-pane-resize-handle"
-            class:resizing={responsePaneResizing}
-            onmousedown={startResponsePaneResize}
-            onkeydown={(e) => {
-              responsePaneManuallyResized = true;
-              if (e.key === "ArrowUp") responsePaneHeight = Math.min(window.innerHeight - 220, responsePaneHeight + 16);
-              else if (e.key === "ArrowDown") responsePaneHeight = Math.max(160, responsePaneHeight - 16);
-            }}
-            role="slider"
-            aria-orientation="horizontal"
-            aria-label={t("response.resizeHandle")}
-            aria-valuenow={responsePaneHeight}
-            aria-valuemin={160}
-            aria-valuemax={900}
-            tabindex="0"
-          ></div>
+          {#if !responsePaneCollapsed}
+            <div
+              class="response-pane-resize-handle"
+              class:resizing={responsePaneResizing}
+              onmousedown={startResponsePaneResize}
+              onkeydown={(e) => {
+                responsePaneManuallyResized = true;
+                if (e.key === "ArrowUp") responsePaneHeight = Math.min(window.innerHeight - 220, responsePaneHeight + 16);
+                else if (e.key === "ArrowDown") responsePaneHeight = Math.max(160, responsePaneHeight - 16);
+              }}
+              role="slider"
+              aria-orientation="horizontal"
+              aria-label={t("response.resizeHandle")}
+              aria-valuenow={responsePaneHeight}
+              aria-valuemin={160}
+              aria-valuemax={900}
+              tabindex="0"
+            ></div>
+          {/if}
 
-          <div class="response-pane" style="height: {responsePaneHeight}px">
+          <div class="response-pane" class:collapsed={responsePaneCollapsed} style="height: {responsePaneCollapsed ? 'auto' : responsePaneHeight + 'px'}">
+          <div class="response-pane-bar">
+            <button
+              type="button"
+              class="icon-btn"
+              title={responsePaneCollapsed ? t("response.expandPane") : t("response.collapsePane")}
+              onclick={() => setResponsePaneCollapsed(!responsePaneCollapsed)}
+            >{#if responsePaneCollapsed}{@render iconChevronUp()}{:else}{@render iconChevronDown()}{/if}</button>
+            <span class="response-pane-bar-label">
+              {t("response.title")}
+              {#if activeResponse}
+                <span class="status-chip" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>{activeResponse.status}</span>
+              {/if}
+            </span>
+          </div>
+          {#if !responsePaneCollapsed}
           {#if sending}
             <div class="response-loading">
               <span class="spinner" aria-hidden="true"></span>
@@ -4732,13 +5728,18 @@
                   <div class="response-format-toggle">
                     <button type="button" class="btn-toggle" class:active={responseViewMode === "pretty"} onclick={() => (responseViewMode = "pretty")}>{t("response.pretty")}</button>
                     <button type="button" class="btn-toggle" class:active={responseViewMode === "raw"} onclick={() => (responseViewMode = "raw")}>{t("response.raw")}</button>
+                    {#if responseBodyIsHtml}
+                      <button type="button" class="btn-toggle" class:active={responseViewMode === "preview"} onclick={() => (responseViewMode = "preview")}>{t("response.preview")}</button>
+                    {/if}
                   </div>
                 {/if}
               </div>
 
               <div class="response-subtab-content">
                 {#if responseSubTab === "body"}
-                  {#if responseBodyIsJson}
+                  {#if responseViewMode === "preview" && responseBodyIsHtml}
+                    <iframe class="response-preview-frame" title={t("response.preview")} sandbox="" srcdoc={activeResponseBody}></iframe>
+                  {:else if responseBodyIsJson}
                     <pre class="body-view">{@html highlightedResponseBody}</pre>
                   {:else}
                     <pre class="body-view">{prettyResponseBody}</pre>
@@ -4813,6 +5814,7 @@
               <p>{t("response.sendEmpty")}</p>
             </div>
           {/if}
+          {/if}
           </div>
           </div>
         </section>
@@ -4861,10 +5863,10 @@
               <div class="params-row">
                 <select bind:value={snippetTarget}>
                   <option value="windows_cmd">{t("bottom.targetWindowsCmd")}</option>
-                  <option value="powershell">{t("bottom.targetPowershell")}</option>
+                  <option value="power_shell">{t("bottom.targetPowershell")}</option>
                   <option value="bash">{t("bottom.targetBash")}</option>
-                  <option value="python">{t("bottom.targetPython")}</option>
-                  <option value="javascript">{t("bottom.targetJavascript")}</option>
+                  <option value="python_requests">{t("bottom.targetPython")}</option>
+                  <option value="java_script_fetch">{t("bottom.targetJavascript")}</option>
                 </select>
                 <select bind:value={snippetMode}>
                   <option value="placeholder">{t("bottom.placeholderSafe")}</option>
@@ -4966,11 +5968,97 @@
                 </div>
 
                 {#if expandedEventIds.has(evt.id) && evt.details}
+                  {@const d = evt.details as Record<string, unknown>}
+                  {@const known = ["request_start", "response_received", "cookie_injected", "request_error", "test_assertion"].includes(evt.event_type)}
                   <div class="console-row-details">
                     <div class="details-actions">
+                      {#if known}
+                        <button type="button" class="console-mini-btn" onclick={() => toggleRawDetails(evt.id)}>
+                          {rawDetailsVisible.has(evt.id) ? t("console.hideRawJson") : t("console.viewRawJson")}
+                        </button>
+                      {/if}
                       <button type="button" class="console-mini-btn" onclick={() => copyEventDetails(evt)}>{t("console.copyDetailsJson")}</button>
                     </div>
-                    <pre class="console-json-view">{JSON.stringify(evt.details, null, 2)}</pre>
+
+                    {#if evt.event_type === "request_start"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.method")}</span><span class="detail-v">{detailStr(d, "method")}</span>
+                        <span class="detail-k">{t("console.url")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "url")}</span>
+                        <span class="detail-k">{t("console.authType")}</span><span class="detail-v">{detailStr(d, "auth_type")}</span>
+                        <span class="detail-k">{t("console.bodyBytes")}</span><span class="detail-v">{formatByteSize(Number(d.body_bytes ?? 0))}</span>
+                        <span class="detail-k">{t("console.timeout")}</span><span class="detail-v">{detailStr(d, "timeout_ms")} ms</span>
+                        <span class="detail-k">{t("console.followRedirects")}</span><span class="detail-v">{String(d.follow_redirects)}</span>
+                        <span class="detail-k">{t("console.verifySsl")}</span><span class="detail-v">{String(d.verify_ssl)}</span>
+                        {#if detailStr(d, "proxy")}
+                          <span class="detail-k">{t("console.proxy")}</span><span class="detail-v">{detailStr(d, "proxy")}</span>
+                        {/if}
+                        {#if detailStr(d, "http_version")}
+                          <span class="detail-k">{t("console.httpVersion")}</span><span class="detail-v">{detailStr(d, "http_version")}</span>
+                        {/if}
+                      </div>
+                      {#if asHeaderRows(d.headers).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("params.key")}</th><th>{t("params.value")}</th></tr></thead>
+                          <tbody>
+                            {#each asHeaderRows(d.headers) as h, i (i)}
+                              <tr class:disabled-row={h.enabled === false}><td>{h.key}</td><td>{h.value}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                    {:else if evt.event_type === "response_received"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.status")}</span><span class="detail-v">{detailStr(d, "status")} {detailStr(d, "status_text")}</span>
+                        <span class="detail-k">{t("console.duration")}</span><span class="detail-v">{detailStr(d, "duration_ms")} ms</span>
+                        <span class="detail-k">{t("console.bodySize")}</span><span class="detail-v">{formatByteSize(Number(d.body_size ?? 0))}</span>
+                        {#if detailStr(d, "content_type")}
+                          <span class="detail-k">{t("console.contentType")}</span><span class="detail-v">{detailStr(d, "content_type")}</span>
+                        {/if}
+                      </div>
+                      {#if asHeaderRows(d.headers).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("params.key")}</th><th>{t("params.value")}</th></tr></thead>
+                          <tbody>
+                            {#each asHeaderRows(d.headers) as h, i (i)}
+                              <tr><td>{h.key}</td><td>{h.value}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                      {#if asCookieRows(d.cookies).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("console.cookieName")}</th><th>{t("params.value")}</th><th>{t("console.cookieDomain")}</th></tr></thead>
+                          <tbody>
+                            {#each asCookieRows(d.cookies) as c, i (i)}
+                              <tr><td>{c.name}</td><td>{c.value || "—"}</td><td>{c.domain}{c.path}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                    {:else if evt.event_type === "cookie_injected"}
+                      <p class="detail-list-label">{t("console.injectedCookies")}</p>
+                      <ul class="detail-plain-list">
+                        {#each (Array.isArray(d.cookies) ? d.cookies : []) as c, i (i)}
+                          <li>{String(c)}</li>
+                        {/each}
+                      </ul>
+                    {:else if evt.event_type === "request_error"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.error")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "error")}</span>
+                      </div>
+                    {:else if evt.event_type === "test_assertion"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.testName")}</span><span class="detail-v">{detailStr(d, "name")}</span>
+                        <span class="detail-k">{t("console.testPassed")}</span><span class="detail-v">{d.passed ? t("console.pass") : t("console.fail")}</span>
+                        {#if detailStr(d, "error")}
+                          <span class="detail-k">{t("console.testError")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "error")}</span>
+                        {/if}
+                      </div>
+                    {/if}
+
+                    {#if !known || rawDetailsVisible.has(evt.id)}
+                      <pre class="console-json-view">{JSON.stringify(evt.details, null, 2)}</pre>
+                    {/if}
                   </div>
                 {/if}
               </div>
@@ -5241,6 +6329,16 @@
           <div class="modal-body">
             <div class="ai-settings-grid">
               <div class="settings-field">
+                <label for="ai-provider-select"><strong>{t("ai.providerLabel")}</strong></label>
+                <select id="ai-provider-select" bind:value={aiProviderInput} onchange={onAiProviderChange} class="url-input">
+                  {#each AI_PROVIDERS as p (p.id)}
+                    <option value={p.id}>{t(p.labelKey)}</option>
+                  {/each}
+                </select>
+                <span class="hint">{t("ai.providerHint")}</span>
+              </div>
+
+              <div class="settings-field">
                 <label for="ai-api-key-input">
                   <strong>{t("ai.apiKeyLabel")}</strong>
                   {#if aiConfigured}
@@ -5253,7 +6351,7 @@
                   <input
                     id="ai-api-key-input"
                     type={aiShowKey ? "text" : "password"}
-                    placeholder={aiSettings?.api_key || "sk-ant-api03-..."}
+                    placeholder={aiSettings?.api_key || AI_API_KEY_PLACEHOLDER[aiProviderInput]}
                     bind:value={aiApiKeyInput}
                     class="url-input"
                   />
@@ -5265,23 +6363,38 @@
               </div>
 
               <div class="settings-field">
-                <label for="ai-model-select"><strong>{t("ai.modelLabel")}</strong></label>
-                <select id="ai-model-select" bind:value={aiModelInput} class="url-input">
-                  <option value="claude-3-5-sonnet-20241022">{t("ai.modelSonnet")}</option>
-                  <option value="claude-3-5-haiku-20241022">{t("ai.modelHaiku")}</option>
-                  <option value="claude-3-opus-20240229">{t("ai.modelOpus")}</option>
-                </select>
+                <label for="ai-model-input"><strong>{t("ai.modelLabel")}</strong></label>
+                <input
+                  id="ai-model-input"
+                  type="text"
+                  list="ai-model-suggestions"
+                  placeholder={t("ai.modelPlaceholder")}
+                  bind:value={aiModelInput}
+                  class="url-input"
+                />
+                <datalist id="ai-model-suggestions">
+                  {#each AI_MODEL_SUGGESTIONS[aiProviderInput] as m (m)}
+                    <option value={m}></option>
+                  {/each}
+                </datalist>
+                <span class="hint">{t("ai.modelHint")}</span>
               </div>
 
               <div class="settings-field">
-                <label for="ai-base-url-input"><strong>{t("ai.baseUrlLabel")}</strong></label>
+                <label for="ai-base-url-input">
+                  <strong>{t("ai.baseUrlLabel")}</strong>
+                  {#if aiProviderInput === "custom"}
+                    <span class="badge badge-warn">{t("ai.required")}</span>
+                  {/if}
+                </label>
                 <input
                   id="ai-base-url-input"
                   type="text"
-                  placeholder={t("ai.baseUrlPlaceholder")}
+                  placeholder={aiProviderInput === "custom" ? t("ai.baseUrlPlaceholderCustom") : t("ai.baseUrlPlaceholder")}
                   bind:value={aiBaseUrlInput}
                   class="url-input"
                 />
+                <span class="hint">{aiProviderInput === "custom" ? t("ai.baseUrlHintCustom") : t("ai.baseUrlHint")}</span>
               </div>
 
               <div class="params-row">
@@ -5569,16 +6682,19 @@
     </div>
   {/if}
 {:else if activeScreen === "git"}
-  {#if !selectedProjectId}
-    {@render noProjectPicker(t("git.title"))}
+  {#if !activeWorkspaceId}
+    <div class="screen-empty">
+      <div class="empty-icon">{@render iconInboxEmpty()}</div>
+      <p>{t("rail.loading")}</p>
+    </div>
   {:else}
     <section class="screen-page">
       <div class="screen-page-header">
         <span class="screen-kicker">{t("git.title")}</span>
         <div class="screen-title-row">
-          <h1 class="screen-title">{projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId}</h1>
-          {@render projectSwitcher()}
+          <h1 class="screen-title">{workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? t("workspace.defaultName")}</h1>
         </div>
+        <p class="screen-subtitle">{t("git.workspaceScopeHint")}</p>
       </div>
 
       <div class="modal-tabs" style="flex:none; padding: 0 var(--space-6);">
@@ -5628,6 +6744,24 @@
           {/if}
 
           {#if gitActiveTab === "sync"}
+            {#if legacyGitCandidates.length}
+              <div class="git-panel-section legacy-git-banner">
+                <h4>{t("git.legacyFoundTitle")}</h4>
+                <p class="hint">{t("git.legacyFoundHint")}</p>
+                <ul class="legacy-git-list">
+                  {#each legacyGitCandidates as candidate (candidate.project_id)}
+                    <li class="legacy-git-row">
+                      <div class="legacy-git-row-info">
+                        <strong>{candidate.project_name}</strong>
+                        <span class="hint">{candidate.settings.repo_path}</span>
+                      </div>
+                      <button type="button" class="btn-primary btn-xs" onclick={() => adoptLegacyGitSettings(candidate)}>{t("git.legacyUseThis")}</button>
+                    </li>
+                  {/each}
+                </ul>
+                <button type="button" class="btn-ghost btn-xs" onclick={dismissLegacyGitCandidates}>{t("git.legacyDismiss")}</button>
+              </div>
+            {/if}
             <div class="git-panel-section">
               <h4>{t("git.repositorySettings")}</h4>
               <div class="form-row-stacked">
@@ -5718,7 +6852,7 @@
                     </button>
                   </div>
                   <div class="quick-git-actions">
-                    <button type="button" class="icon-btn-text" onclick={saveProjectToRepoAction} disabled={gitLoading}>
+                    <button type="button" class="icon-btn-text" onclick={saveWorkspaceToRepoAction} disabled={gitLoading}>
                       {t("git.saveProjectFile")}
                     </button>
                     <button type="button" class="icon-btn-text" onclick={viewDiffAction} disabled={gitLoading}>
@@ -5900,13 +7034,16 @@
             <div class="git-panel-section">
               <h4>{t("git.canonicalFormat")}</h4>
               <p class="hint">{t("git.canonicalFormatDesc")}</p>
+              {#if !selectedProjectId}
+                <p class="hint">{t("git.selectProjectFirst")}</p>
+              {/if}
 
               <div class="projectfile-options">
                 <label class="checkbox-label">
                   <input type="checkbox" bind:checked={projectFileMaskSecrets} />
                   {t("git.maskSecrets")}
                 </label>
-                <button type="button" class="btn-primary" onclick={exportProjectFileAction}>
+                <button type="button" class="btn-primary" onclick={exportProjectFileAction} disabled={!selectedProjectId}>
                   {t("git.generateJson")}
                 </button>
               </div>
@@ -6220,7 +7357,11 @@
               <span class="screen-kicker">{t(opt.label)}</span>
               {#if themeMode === opt.id}<span class="theme-active-badge">{t("theme.active")}</span>{/if}
             </div>
-            <div class="theme-swatch" data-theme={opt.id} style={accentStyleOverride(accentColor)}>
+            <div
+              class="theme-swatch"
+              data-theme={opt.id}
+              style="{surfaceStyleOverride(surfaceTint, opt.id)} {accentStyleOverride(accentColor)} {fontStyleOverride(headingFontOverride, bodyFontOverride)} {textColorStyleOverride(textColorOverride)}"
+            >
               <div class="theme-swatch-topbar">
                 <span>{t("rail.brand")}</span>
                 <span class="theme-swatch-sync">SYNC</span>
@@ -6269,6 +7410,34 @@
           <button type="button" class="btn-ghost accent-reset" onclick={() => setAccentColor(null)}>{t("accent.reset")}</button>
         {/if}
       </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.surfaceTint")}</div>
+        <div class="screen-empty-inline">{surfaceTintAvailable ? t("settings.surfaceTintHint") : t("settings.surfaceTintUnavailable")}</div>
+      </div>
+      {#if surfaceTintAvailable}
+        <div class="accent-picker">
+          {#each SURFACE_TINTS as tint (tint.id)}
+            <button
+              type="button"
+              class="accent-swatch"
+              class:active={surfaceTint === tint.id}
+              style="background: {themeMode === 'dark' ? tint.dark.bg : tint.light.bg}"
+              title={t(`surfaceTint.${tint.id}`)}
+              onclick={() => setSurfaceTint(tint.id)}
+            ></button>
+          {/each}
+          <label class="accent-swatch accent-swatch-custom" style={isCustomSurfaceTint(surfaceTint) ? `background: ${surfaceTint}` : ""} title={t("accent.custom")}>
+            <input type="color" value={isCustomSurfaceTint(surfaceTint) ? surfaceTint : "#faf6ef"} oninput={(e) => setSurfaceTint((e.currentTarget as HTMLInputElement).value)} />
+            {#if !isCustomSurfaceTint(surfaceTint)}<span class="accent-swatch-plus">+</span>{/if}
+          </label>
+          {#if surfaceTint}
+            <button type="button" class="btn-ghost accent-reset" onclick={() => setSurfaceTint(null)}>{t("accent.reset")}</button>
+          {/if}
+        </div>
+      {/if}
     </div>
 
     <div class="settings-screen-row">
@@ -6411,7 +7580,125 @@
      Two further themes, "terminal" and "blueprint" (below the light/dark pair), swap the whole
      structural language, not just color — different fonts, radius and rule-weight — so each
      carries its own font/radius/shadow declarations instead of only colors. */
-  @import url('https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;0,700;0,800;1,500;1,600&family=Work+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=Space+Mono:wght@400;700&display=swap');
+  /* Self-hosted (LP-1403) — was a Google Fonts @import, which made this "local-first,
+     offline storage" app require network access just to render its own UI correctly on
+     first paint. These are the same five families/weights, downloaded once into
+     static/fonts/ (latin + latin-ext subsets only — Arabic UI text already falls back to
+     system-ui below, since none of these families cover Arabic glyphs either way). Several
+     collapse to one variable-font file across their whole weight range, so this is 14 files,
+     not the 20 the original @import weight list implied. */
+  @font-face {
+    font-family: 'Newsreader';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url('/fonts/newsreader-normal-400-800-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Newsreader';
+    font-style: normal;
+    font-weight: 400 800;
+    font-display: swap;
+    src: url('/fonts/newsreader-normal-400-800-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Newsreader';
+    font-style: italic;
+    font-weight: 500 600;
+    font-display: swap;
+    src: url('/fonts/newsreader-italic-500-600-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Newsreader';
+    font-style: italic;
+    font-weight: 500 600;
+    font-display: swap;
+    src: url('/fonts/newsreader-italic-500-600-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Work Sans';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url('/fonts/work-sans-normal-400-700-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Work Sans';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url('/fonts/work-sans-normal-400-700-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url('/fonts/jetbrains-mono-normal-400-700-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url('/fonts/jetbrains-mono-normal-400-700-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Space Grotesk';
+    font-style: normal;
+    font-weight: 500 700;
+    font-display: swap;
+    src: url('/fonts/space-grotesk-normal-500-700-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Space Grotesk';
+    font-style: normal;
+    font-weight: 500 700;
+    font-display: swap;
+    src: url('/fonts/space-grotesk-normal-500-700-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Space Mono';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/fonts/space-mono-normal-400-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Space Mono';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/fonts/space-mono-normal-400-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
+  @font-face {
+    font-family: 'Space Mono';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('/fonts/space-mono-normal-700-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
+  @font-face {
+    font-family: 'Space Mono';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('/fonts/space-mono-normal-700-latin-ext.woff2') format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+  }
 
   :root {
     --color-bg: #faf6ef;
@@ -6424,41 +7711,41 @@
     --color-border-strong: color-mix(in srgb, #2b2620 22%, transparent);
     --color-text: #2b2620;
     --color-text-secondary: #6b5f4e;
-    --color-text-tertiary: #9a8c78;
-    --color-primary: #c1603f;
-    --color-primary-hover: #a84f32;
+    --color-text-tertiary: #7b7060;
+    --color-primary: #b3593b;
+    --color-primary-hover: #984c32;
     --color-primary-contrast: #fff9f0;
-    --color-accent: #c1603f;
-    --color-accent-hover: #a84f32;
+    --color-accent: #b3593b;
+    --color-accent-hover: #984c32;
     --color-accent-contrast: #fff9f0;
     --color-success: #4d7a3f;
     --color-success-bg: #e4f1e0;
     --color-danger: #b0453f;
     --color-danger-bg: #fbe1e1;
-    --color-warn: #96701c;
+    --color-warn: #8e6a1b;
     --color-warn-bg: #fbecd2;
-    --color-focus: #c1603f;
+    --color-focus: #b3593b;
 
     /* Each HTTP method gets its own hue so a dense request list is scannable at a glance.
        GET/DELETE deliberately reuse --color-success/--color-danger (read=safe, delete=danger
        are the same signal in both places); the rest fill out the set without inventing
        unrelated colors. */
     --method-get: var(--color-success);
-    --method-post: #96701c;
+    --method-post: #8e6a1b;
     --method-put: #3a6d9c;
-    --method-patch: #3a8f8e;
+    --method-patch: #327c7c;
     --method-delete: var(--color-danger);
     --method-head: #7c5aa6;
     --method-options: #6b5f4e;
-    --method-trace: #8a7a5c;
+    --method-trace: #7e6f54;
 
     /* JSON response/body syntax highlighting — independent from the method/status palette above
        so the two can evolve separately even though a couple of hues are shared by coincidence. */
-    --json-key: #96701c;
+    --json-key: #8e6a1b;
     --json-string: #4d7a3f;
     --json-number: #7c5aa6;
     --json-boolean: #3a6d9c;
-    --json-null: #9a8c78;
+    --json-null: #7b7060;
 
     /* Tonal ramps — warm parchment/ink steps: light (100-300) for tinted fills/hovers, 500 as a
        role's base, dark (700-900) for text on tinted fills. */
@@ -6582,35 +7869,35 @@
     --color-border-strong: color-mix(in srgb, #2b2620 22%, transparent);
     --color-text: #2b2620;
     --color-text-secondary: #6b5f4e;
-    --color-text-tertiary: #9a8c78;
-    --color-primary: #c1603f;
-    --color-primary-hover: #a84f32;
+    --color-text-tertiary: #7b7060;
+    --color-primary: #b3593b;
+    --color-primary-hover: #984c32;
     --color-primary-contrast: #fff9f0;
-    --color-accent: #c1603f;
-    --color-accent-hover: #a84f32;
+    --color-accent: #b3593b;
+    --color-accent-hover: #984c32;
     --color-accent-contrast: #fff9f0;
     --color-success: #4d7a3f;
     --color-success-bg: #e4f1e0;
     --color-danger: #b0453f;
     --color-danger-bg: #fbe1e1;
-    --color-warn: #96701c;
+    --color-warn: #8e6a1b;
     --color-warn-bg: #fbecd2;
-    --color-focus: #c1603f;
+    --color-focus: #b3593b;
 
     --method-get: var(--color-success);
-    --method-post: #96701c;
+    --method-post: #8e6a1b;
     --method-put: #3a6d9c;
-    --method-patch: #3a8f8e;
+    --method-patch: #327c7c;
     --method-delete: var(--color-danger);
     --method-head: #7c5aa6;
     --method-options: #6b5f4e;
-    --method-trace: #8a7a5c;
+    --method-trace: #7e6f54;
 
-    --json-key: #96701c;
+    --json-key: #8e6a1b;
     --json-string: #4d7a3f;
     --json-number: #7c5aa6;
     --json-boolean: #3a6d9c;
-    --json-null: #9a8c78;
+    --json-null: #7b7060;
 
     color-scheme: light;
   }
@@ -6686,7 +7973,7 @@
     --color-border-strong: color-mix(in srgb, #14202f 85%, transparent);
     --color-text: #14202f;
     --color-text-secondary: #5b6b80;
-    --color-text-tertiary: #9aa7b6;
+    --color-text-tertiary: #666e78;
     --color-primary: #2554e6;
     --color-primary-hover: #1a3fb8;
     --color-primary-contrast: #ffffff;
@@ -6697,24 +7984,24 @@
     --color-success-bg: color-mix(in srgb, #1a7a3d 14%, transparent);
     --color-danger: #c22b4d;
     --color-danger-bg: color-mix(in srgb, #c22b4d 14%, transparent);
-    --color-warn: #a3690c;
+    --color-warn: #99630b;
     --color-warn-bg: color-mix(in srgb, #a3690c 14%, transparent);
     --color-focus: #2554e6;
 
     --method-get: var(--color-success);
-    --method-post: #a3690c;
+    --method-post: #99630b;
     --method-put: var(--color-accent);
-    --method-patch: #0f7d8a;
+    --method-patch: #0f7986;
     --method-delete: var(--color-danger);
     --method-head: #7c3aed;
     --method-options: #5b6b80;
-    --method-trace: #8a7a5c;
+    --method-trace: #796b51;
 
     --json-key: #2554e6;
     --json-string: #1a7a3d;
     --json-number: #7c3aed;
-    --json-boolean: #a3690c;
-    --json-null: #9aa7b6;
+    --json-boolean: #99630b;
+    --json-null: #666e78;
 
     --radius-sm: 0px;
     --radius-md: 0px;
@@ -8038,6 +9325,70 @@
     font-size: var(--text-base);
   }
 
+  .var-popover-scope {
+    align-self: center;
+    font-size: var(--text-2xs);
+    color: var(--color-text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  /* Shared inline autocomplete dropdown (LP-1401) — {{variable}} suggestions and pm/console API
+     script suggestions both render through this one fixed-position portal, positioned at the
+     caret via caretScreenPosition() rather than the field's own bounding box. */
+  .autocomplete-portal {
+    position: fixed;
+    z-index: 1000;
+    margin: 0;
+    padding: 4px;
+    list-style: none;
+    min-width: 200px;
+    max-width: 360px;
+    max-height: 240px;
+    overflow-y: auto;
+    background: var(--color-bg);
+    border: var(--border-strong-width) solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+  }
+
+  .autocomplete-item {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 8px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .autocomplete-item.active,
+  .autocomplete-item:hover {
+    background: var(--color-bg-hover);
+  }
+
+  .autocomplete-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .autocomplete-detail {
+    flex-shrink: 0;
+    font-family: var(--font-sans);
+    font-size: var(--text-2xs);
+    color: var(--color-text-tertiary);
+    white-space: nowrap;
+  }
+
   /* Highlights {{variables}} directly inside the URL bar, in place, instead of only in the
      warning banner below — an invisible-text "ghost" input sits on top of a styled overlay
      that renders the same string with each {{var}} as its own token; the overlay is
@@ -9101,6 +10452,32 @@
     background: var(--color-panel-bg);
   }
 
+  .response-pane.collapsed {
+    min-height: 0;
+  }
+
+  .response-pane-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: none;
+    padding: 0.3rem 0.6rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .response-pane.collapsed .response-pane-bar {
+    border-bottom: none;
+  }
+
+  .response-pane-bar-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+  }
+
   .response-pane .response-loading,
   .response-pane .response-empty-state {
     flex: 1;
@@ -9122,6 +10499,15 @@
   .response-pane .body-view {
     height: 100%;
     max-height: none;
+  }
+
+  .response-preview-frame {
+    width: 100%;
+    height: 100%;
+    min-height: 260px;
+    background: #fff;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
   }
 
   /* Docked to the right edge of the whole window (sibling of <main>, not nested in the
@@ -9268,6 +10654,10 @@
     gap: 0.9rem;
   }
 
+  .raw-type-select {
+    max-width: 140px;
+  }
+
   .graphql-editor h4,
   .params-table h4 {
     font-size: var(--text-sm);
@@ -9320,6 +10710,11 @@
   .badge-local {
     background: color-mix(in srgb, var(--method-put) 16%, transparent);
     color: var(--method-put);
+  }
+
+  .badge-warn {
+    background: var(--color-warn-bg);
+    color: var(--color-warn);
   }
 
   /* ---------- Response panel ---------- */
@@ -9396,6 +10791,12 @@
     align-items: center;
     gap: 0.1rem;
     border-bottom: 1px solid var(--color-border);
+    overflow-x: auto;
+  }
+
+  .response-subtab,
+  .response-format-toggle {
+    flex-shrink: 0;
   }
 
   /* .response-subtab base + hover + active styles live with .editor-tab above (shared panel-tab
@@ -9699,6 +11100,72 @@
 
   .details-actions {
     margin-bottom: 0.3rem;
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .detail-kv-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 0.75rem;
+    row-gap: 0.2rem;
+    margin-bottom: 0.5rem;
+    font-size: var(--text-xs);
+  }
+
+  .detail-k {
+    color: var(--color-text-tertiary);
+    text-align: right;
+  }
+
+  .detail-v {
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    word-break: break-word;
+  }
+
+  .detail-v-wrap {
+    white-space: pre-wrap;
+  }
+
+  .detail-header-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 0.5rem;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+  }
+
+  .detail-header-table th {
+    text-align: left;
+    color: var(--color-text-tertiary);
+    font-weight: 500;
+    padding: 0.15rem 0.5rem 0.15rem 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .detail-header-table td {
+    padding: 0.15rem 0.5rem 0.15rem 0;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text);
+  }
+
+  .detail-header-table tr.disabled-row td {
+    color: var(--color-text-tertiary);
+    text-decoration: line-through;
+  }
+
+  .detail-list-label {
+    margin: 0 0 0.2rem;
+    font-size: var(--text-xs);
+    color: var(--color-text-tertiary);
+  }
+
+  .detail-plain-list {
+    margin: 0 0 0.5rem;
+    padding-left: 1.1rem;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
   }
 
   .console-mini-btn {
@@ -10056,6 +11523,40 @@
   .git-panel-section h5 {
     margin: 0.2rem 0;
     font-size: var(--text-base);
+  }
+
+  .legacy-git-banner {
+    padding: 0.7rem 0.9rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-bg-tertiary);
+  }
+
+  .legacy-git-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .legacy-git-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.4rem 0.6rem;
+    background: var(--color-panel-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+
+  .legacy-git-row-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    min-width: 0;
   }
 
   .form-row-stacked {

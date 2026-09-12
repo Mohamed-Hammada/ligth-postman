@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::models::{
     Auth, Cookie, HeaderEntry, NewCookieInput, NewRequestInput, NewSampleResponseInput,
-    QueryParam, RequestFull, RequestSettings, RequestSummary, SampleResponse,
+    QueryParam, RequestFull, RequestSearchResult, RequestSettings, RequestSummary, SampleResponse,
     UpdateRequestInput, UpdateSampleResponseInput, VALID_METHODS,
 };
 
@@ -33,7 +33,7 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
     let settings_json = input
         .settings
         .as_ref()
-        .map(|s| serde_json::to_string(s))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|err| AppError::Validation(format!("invalid settings: {err}")))?;
 
@@ -91,11 +91,12 @@ pub fn create_request(conn: &Connection, input: NewRequestInput) -> Result<Reque
 /// Never selects `headers`/`body` — list views must stay cheap even with 10k+ requests (README §20).
 pub fn list_requests(conn: &Connection, project_id: &str) -> Result<Vec<RequestSummary>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, folder_id, name, method, url, updated_at
+        "SELECT id, project_id, folder_id, name, method, url, created_at, updated_at
          FROM requests WHERE project_id = ?1 ORDER BY updated_at DESC",
     )?;
     let rows = stmt.query_map(params![project_id], |row| {
-        let updated_at: String = row.get(6)?;
+        let created_at: String = row.get(6)?;
+        let updated_at: String = row.get(7)?;
         Ok(RequestSummary {
             id: row.get(0)?,
             project_id: row.get(1)?,
@@ -103,7 +104,42 @@ pub fn list_requests(conn: &Connection, project_id: &str) -> Result<Vec<RequestS
             name: row.get(3)?,
             method: row.get(4)?,
             url: row.get(5)?,
+            created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
             updated_at: updated_at.parse().unwrap_or_else(|_| Utc::now()),
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// Workspace-wide search for the command palette (LP-1404) — matches name or URL, across every
+/// project in the workspace, not just whichever one happens to be open. A leading `%` wildcard
+/// means this can't use an index, but that's fine at the scale a local single-user SQLite file
+/// actually holds; move to FTS5 only if that stops being true.
+pub fn search_requests_in_workspace(
+    conn: &Connection,
+    workspace_id: &str,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<RequestSearchResult>, AppError> {
+    let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.project_id, p.name, r.folder_id, r.name, r.method, r.url
+         FROM requests r
+         JOIN projects p ON p.id = r.project_id
+         WHERE p.workspace_id = ?1 AND (r.name LIKE ?2 ESCAPE '\\' OR r.url LIKE ?2 ESCAPE '\\')
+         ORDER BY r.updated_at DESC
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![workspace_id, pattern, limit], |row| {
+        Ok(RequestSearchResult {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            project_name: row.get(2)?,
+            folder_id: row.get(3)?,
+            name: row.get(4)?,
+            method: row.get(5)?,
+            url: row.get(6)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -226,7 +262,7 @@ pub fn update_request(conn: &Connection, input: UpdateRequestInput) -> Result<Re
         .map_err(|err| AppError::Validation(format!("invalid auth: {err}")))?;
     let settings_json = settings
         .as_ref()
-        .map(|s| serde_json::to_string(s))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|err| AppError::Validation(format!("invalid settings: {err}")))?;
     let updated_at = Utc::now();
@@ -1089,5 +1125,73 @@ mod tests {
         delete_cookie(&conn, &cookie.id).unwrap();
         let empty = list_cookies_for_project(&conn, &project_id).unwrap();
         assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn search_in_workspace_finds_matches_across_every_project_in_it() {
+        let conn = db::open_in_memory().unwrap();
+        let project_a = seed_project(&conn); // "Demo", workspace "default"
+        let project_b = project_store::create_project(
+            &conn,
+            NewProjectInput { name: "Payments".into(), workspace_id: "default".into() },
+        )
+        .unwrap()
+        .id;
+        let other_workspace = crate::store::workspace_store::create_workspace(
+            &conn,
+            crate::models::NewWorkspaceInput { name: "Other".into() },
+        )
+        .unwrap();
+        let other_workspace_project = project_store::create_project(
+            &conn,
+            NewProjectInput { name: "Unrelated".into(), workspace_id: other_workspace.id },
+        );
+
+        create_request(
+            &conn,
+            NewRequestInput {
+                project_id: project_a.clone(),
+                name: "List users".into(),
+                method: "GET".into(),
+                url: "https://api.example.com/users".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        create_request(
+            &conn,
+            NewRequestInput {
+                project_id: project_b.clone(),
+                name: "Refund charge".into(),
+                method: "POST".into(),
+                url: "https://api.example.com/charges/refund".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        if let Ok(unrelated) = other_workspace_project {
+            create_request(
+                &conn,
+                NewRequestInput {
+                    project_id: unrelated.id,
+                    name: "Refund something else".into(),
+                    method: "POST".into(),
+                    url: "https://api.example.com/other".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+
+        // Matches by name, across both projects in the "default" workspace.
+        let results = search_requests_in_workspace(&conn, "default", "refund", 30).unwrap();
+        assert_eq!(results.len(), 1, "should not include the other workspace's matching request");
+        assert_eq!(results[0].project_id, project_b);
+        assert_eq!(results[0].project_name, "Payments");
+
+        // Matches by URL too.
+        let by_url = search_requests_in_workspace(&conn, "default", "users", 30).unwrap();
+        assert_eq!(by_url.len(), 1);
+        assert_eq!(by_url[0].project_id, project_a);
     }
 }

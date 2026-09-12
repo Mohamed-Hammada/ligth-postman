@@ -1,7 +1,7 @@
 use base64::Engine;
 
 use crate::error::AppError;
-use crate::models::{Auth, HeaderEntry, QueryParam};
+use crate::models::{Auth, FormDataPart, HeaderEntry, QueryParam, RequestBody, RequestSettings};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ParsedCurlRequest {
@@ -11,6 +11,8 @@ pub struct ParsedCurlRequest {
     pub query_params: Vec<QueryParam>,
     pub auth: Auth,
     pub body: Option<String>,
+    #[serde(default)]
+    pub settings: RequestSettings,
 }
 
 pub fn parse_curl(command: &str) -> Result<ParsedCurlRequest, AppError> {
@@ -23,18 +25,40 @@ pub fn parse_curl(command: &str) -> Result<ParsedCurlRequest, AppError> {
     let mut url_candidate = None;
     let mut headers = Vec::new();
     let mut body_parts = Vec::new();
+    let mut form_parts = Vec::new();
     let mut auth = Auth::None;
+    let mut settings = RequestSettings::default();
 
     let mut iter = tokens.into_iter();
     if let Some(first) = iter.next() {
         let first_lower = first.to_lowercase();
         if first_lower != "curl" && first_lower != "curl.exe" {
-            process_token(&first, &mut iter, &mut method, &mut url_candidate, &mut headers, &mut body_parts, &mut auth)?;
+            process_token(
+                &first,
+                &mut iter,
+                &mut method,
+                &mut url_candidate,
+                &mut headers,
+                &mut body_parts,
+                &mut form_parts,
+                &mut auth,
+                &mut settings,
+            )?;
         }
     }
 
     while let Some(token) = iter.next() {
-        process_token(&token, &mut iter, &mut method, &mut url_candidate, &mut headers, &mut body_parts, &mut auth)?;
+        process_token(
+            &token,
+            &mut iter,
+            &mut method,
+            &mut url_candidate,
+            &mut headers,
+            &mut body_parts,
+            &mut form_parts,
+            &mut auth,
+            &mut settings,
+        )?;
     }
 
     let raw_url = url_candidate.ok_or_else(|| AppError::Validation("no URL found in curl command".into()))?;
@@ -42,7 +66,7 @@ pub fn parse_curl(command: &str) -> Result<ParsedCurlRequest, AppError> {
     let inferred_method = match method {
         Some(m) => m.to_uppercase(),
         None => {
-            if !body_parts.is_empty() {
+            if !body_parts.is_empty() || !form_parts.is_empty() {
                 "POST".to_string()
             } else {
                 "GET".to_string()
@@ -50,7 +74,16 @@ pub fn parse_curl(command: &str) -> Result<ParsedCurlRequest, AppError> {
         }
     };
 
-    let body = if body_parts.is_empty() {
+    // `-F` takes priority over `-d`/`--data` if a command somehow mixes them (not valid real
+    // curl usage, but favoring the multipart interpretation matches what `-F`'s presence signals
+    // more strongly than a body-shape guess would). Serialized the same tagged-JSON shape
+    // `RequestBody::FormData` already uses everywhere else, so the frontend's existing
+    // form-data editor picks it up with no special-casing for curl-imported requests.
+    let body = if !form_parts.is_empty() {
+        serde_json::to_string(&RequestBody::FormData { items: form_parts })
+            .map_err(|e| AppError::Validation(format!("failed to encode imported form-data body: {e}")))
+            .map(Some)?
+    } else if body_parts.is_empty() {
         None
     } else {
         Some(body_parts.join("&"))
@@ -85,6 +118,7 @@ pub fn parse_curl(command: &str) -> Result<ParsedCurlRequest, AppError> {
         query_params,
         auth,
         body,
+        settings,
     })
 }
 
@@ -142,6 +176,7 @@ fn tokenize_command(cmd: &str) -> Vec<String> {
     tokens
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_token(
     token: &str,
     iter: &mut std::vec::IntoIter<String>,
@@ -149,7 +184,9 @@ fn process_token(
     url_candidate: &mut Option<String>,
     headers: &mut Vec<HeaderEntry>,
     body_parts: &mut Vec<String>,
+    form_parts: &mut Vec<FormDataPart>,
     auth: &mut Auth,
+    settings: &mut RequestSettings,
 ) -> Result<(), AppError> {
     if token == "-X" || token == "--request" {
         if let Some(m) = iter.next() {
@@ -169,6 +206,32 @@ fn process_token(
         }
     } else if let Some(d) = token.strip_prefix("--data=").or_else(|| token.strip_prefix("--data-raw=")) {
         body_parts.push(d.to_string());
+    } else if token == "-F" || token == "--form" {
+        if let Some(f) = iter.next() {
+            parse_form_token(&f, form_parts);
+        }
+    } else if let Some(f) = token.strip_prefix("--form=") {
+        parse_form_token(f, form_parts);
+    } else if token == "-b" || token == "--cookie" {
+        if let Some(c) = iter.next() {
+            parse_cookie_token(&c, headers);
+        }
+    } else if let Some(c) = token.strip_prefix("--cookie=") {
+        parse_cookie_token(c, headers);
+    } else if token == "-A" || token == "--user-agent" {
+        if let Some(a) = iter.next() {
+            headers.push(HeaderEntry { key: "User-Agent".to_string(), value: a, enabled: true, description: None });
+        }
+    } else if let Some(a) = token.strip_prefix("--user-agent=") {
+        headers.push(HeaderEntry { key: "User-Agent".to_string(), value: a.to_string(), enabled: true, description: None });
+    } else if token == "-k" || token == "--insecure" {
+        settings.verify_ssl = Some(false);
+    } else if token == "-x" || token == "--proxy" {
+        if let Some(p) = iter.next() {
+            settings.proxy_url = Some(p);
+        }
+    } else if let Some(p) = token.strip_prefix("--proxy=") {
+        settings.proxy_url = Some(p.to_string());
     } else if token == "-u" || token == "--user" {
         if let Some(u) = iter.next() {
             parse_auth_token(&u, auth);
@@ -196,6 +259,52 @@ fn parse_header_token(h: &str, headers: &mut Vec<HeaderEntry>) {
             description: None,
         });
     }
+}
+
+/// `-F key=value` for a plain text field, `-F key=@/path/to/file` for a file field (curl's
+/// optional trailing `;type=...`/`;filename=...` modifiers are dropped — this app's form-data
+/// model has no field for an explicit part content-type).
+fn parse_form_token(f: &str, form_parts: &mut Vec<FormDataPart>) {
+    let Some((key, raw_value)) = f.split_once('=') else {
+        return;
+    };
+    if let Some(file_ref) = raw_value.strip_prefix('@') {
+        let file_path = file_ref.split(';').next().unwrap_or(file_ref);
+        form_parts.push(FormDataPart {
+            key: key.trim().to_string(),
+            value: String::new(),
+            enabled: true,
+            description: None,
+            is_file: true,
+            file_path: Some(file_path.trim().to_string()),
+        });
+    } else {
+        form_parts.push(FormDataPart {
+            key: key.trim().to_string(),
+            value: raw_value.trim().to_string(),
+            enabled: true,
+            description: None,
+            is_file: false,
+            file_path: None,
+        });
+    }
+}
+
+/// `-b "name1=value1; name2=value2"` becomes a literal `Cookie` header — the same thing curl
+/// itself sends. `-b @file` (read cookies from a Netscape cookie-jar file) can't be resolved
+/// while just parsing a command string, so that form is silently skipped rather than emitting a
+/// broken header with the literal "@file" text as its value.
+fn parse_cookie_token(c: &str, headers: &mut Vec<HeaderEntry>) {
+    let trimmed = c.trim();
+    if trimmed.starts_with('@') {
+        return;
+    }
+    headers.push(HeaderEntry {
+        key: "Cookie".to_string(),
+        value: trimmed.to_string(),
+        enabled: true,
+        description: None,
+    });
 }
 
 fn parse_auth_token(u: &str, auth: &mut Auth) {
@@ -311,5 +420,49 @@ mod tests {
         let cmd = "curl -u myuser:mypass https://example.com";
         let parsed = parse_curl(cmd).unwrap();
         assert_eq!(parsed.auth, Auth::Basic { username: "myuser".into(), password: "mypass".into() });
+    }
+
+    #[test]
+    fn parses_multipart_form_fields_and_files() {
+        let cmd = r#"curl -F 'name=Alice' -F 'avatar=@/tmp/pic.png;type=image/png' https://api.example.com/upload"#;
+        let parsed = parse_curl(cmd).unwrap();
+        assert_eq!(parsed.method, "POST", "presence of -F should infer POST just like -d does");
+
+        let body: RequestBody = serde_json::from_str(parsed.body.as_deref().unwrap()).unwrap();
+        match body {
+            RequestBody::FormData { items } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].key, "name");
+                assert_eq!(items[0].value, "Alice");
+                assert!(!items[0].is_file);
+                assert_eq!(items[1].key, "avatar");
+                assert!(items[1].is_file);
+                // The ";type=image/png" modifier must not leak into the stored file path.
+                assert_eq!(items[1].file_path.as_deref(), Some("/tmp/pic.png"));
+            }
+            other => panic!("expected RequestBody::FormData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_cookie_user_agent_insecure_and_proxy_flags() {
+        let cmd = r#"curl -b 'session=abc123; theme=dark' -A 'MyClient/1.0' -k -x 'http://proxy.local:8080' https://api.example.com"#;
+        let parsed = parse_curl(cmd).unwrap();
+
+        let cookie = parsed.headers.iter().find(|h| h.key == "Cookie").expect("Cookie header");
+        assert_eq!(cookie.value, "session=abc123; theme=dark");
+
+        let ua = parsed.headers.iter().find(|h| h.key == "User-Agent").expect("User-Agent header");
+        assert_eq!(ua.value, "MyClient/1.0");
+
+        assert_eq!(parsed.settings.verify_ssl, Some(false));
+        assert_eq!(parsed.settings.proxy_url.as_deref(), Some("http://proxy.local:8080"));
+    }
+
+    #[test]
+    fn cookie_jar_file_reference_is_skipped_rather_than_sent_as_a_literal_header() {
+        let cmd = "curl -b @cookies.txt https://api.example.com";
+        let parsed = parse_curl(cmd).unwrap();
+        assert!(parsed.headers.iter().all(|h| h.key != "Cookie"));
     }
 }

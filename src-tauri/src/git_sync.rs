@@ -52,6 +52,19 @@ pub struct ProjectGitSettings {
     pub last_sync_at: Option<String>,
 }
 
+/// Same shape as `ProjectGitSettings`, keyed by workspace instead of project — one repo covers
+/// every project in the workspace (see `project_file::export_workspace_to_repo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceGitSettings {
+    pub workspace_id: String,
+    pub repo_path: Option<String>,
+    pub remote_url: Option<String>,
+    pub branch: String,
+    pub auto_sync: bool,
+    pub github_token: Option<String>,
+    pub last_sync_at: Option<String>,
+}
+
 pub struct GitService;
 
 impl GitService {
@@ -350,6 +363,7 @@ impl GitService {
         conn: &mut Connection,
         dir: &Path,
         target_project_id: Option<&str>,
+        workspace_id: &str,
     ) -> Result<crate::models::Project, AppError> {
         let file_path = dir.join(crate::project_file::PROJECT_FILE_DEFAULT_NAME);
         if !file_path.exists() {
@@ -361,7 +375,7 @@ impl GitService {
         }
         let json_content = std::fs::read_to_string(&file_path)
             .map_err(|e| AppError::Storage(format!("Failed to read project file: {e}")))?;
-        crate::project_file::import_project_from_json(conn, &json_content, target_project_id)
+        crate::project_file::import_project_from_json(conn, &json_content, target_project_id, workspace_id)
     }
 }
 
@@ -396,6 +410,45 @@ pub fn get_project_git_settings(
     Ok(res)
 }
 
+/// One leftover per-project git config, found while looking for something to offer the user in
+/// `find_legacy_git_settings_for_workspace` — carries the project's name so the picker UI can
+/// show "from Payments API" rather than a bare id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyGitSettingsCandidate {
+    pub project_id: String,
+    pub project_name: String,
+    pub settings: ProjectGitSettings,
+}
+
+/// Looks across every project in the workspace for a leftover per-project git config (from
+/// before Git sync moved to the workspace level) and returns every distinct one found — the
+/// caller presents these as options and lets the user pick (or ignore them and configure the
+/// workspace repo from scratch); nothing here is applied automatically. Deduplicated by
+/// `repo_path` (two projects pointing at the same repo show up once), newest `last_sync_at`
+/// first so the most likely candidate leads the list.
+pub fn find_legacy_git_settings_for_workspace(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<LegacyGitSettingsCandidate>, AppError> {
+    let projects = crate::store::project_store::list_projects(conn, workspace_id)?;
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut candidates = Vec::new();
+    for p in projects {
+        let Some(settings) = get_project_git_settings(conn, &p.id)? else { continue };
+        let Some(repo_path) = settings.repo_path.clone() else { continue };
+        if !seen_paths.insert(repo_path) {
+            continue;
+        }
+        candidates.push(LegacyGitSettingsCandidate {
+            project_id: p.id,
+            project_name: p.name,
+            settings,
+        });
+    }
+    candidates.sort_by(|a, b| b.settings.last_sync_at.cmp(&a.settings.last_sync_at));
+    Ok(candidates)
+}
+
 pub fn save_project_git_settings(
     conn: &Connection,
     settings: &ProjectGitSettings,
@@ -415,6 +468,68 @@ pub fn save_project_git_settings(
             last_sync_at = excluded.last_sync_at;",
         params![
             settings.project_id,
+            settings.repo_path,
+            settings.remote_url,
+            settings.branch,
+            auto_sync_int,
+            settings.github_token,
+            settings.last_sync_at.as_deref().unwrap_or(&now),
+        ],
+    )?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Git Settings Store Operations
+// ---------------------------------------------------------------------------
+
+pub fn get_workspace_git_settings(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Option<WorkspaceGitSettings>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT workspace_id, repo_path, remote_url, branch, auto_sync, github_token, last_sync_at
+         FROM workspace_git_settings WHERE workspace_id = ?1",
+    )?;
+
+    let res = stmt
+        .query_row(params![workspace_id], |row| {
+            let auto_sync_int: i64 = row.get(4)?;
+            Ok(WorkspaceGitSettings {
+                workspace_id: row.get(0)?,
+                repo_path: row.get(1)?,
+                remote_url: row.get(2)?,
+                branch: row.get(3)?,
+                auto_sync: auto_sync_int != 0,
+                github_token: row.get(5)?,
+                last_sync_at: row.get(6)?,
+            })
+        })
+        .optional()?;
+
+    Ok(res)
+}
+
+pub fn save_workspace_git_settings(
+    conn: &Connection,
+    settings: &WorkspaceGitSettings,
+) -> Result<(), AppError> {
+    let auto_sync_int = if settings.auto_sync { 1 } else { 0 };
+    let now = Utc::now().to_rfc3339();
+
+    conn.execute(
+        "INSERT INTO workspace_git_settings (workspace_id, repo_path, remote_url, branch, auto_sync, github_token, last_sync_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+            repo_path = excluded.repo_path,
+            remote_url = excluded.remote_url,
+            branch = excluded.branch,
+            auto_sync = excluded.auto_sync,
+            github_token = excluded.github_token,
+            last_sync_at = excluded.last_sync_at;",
+        params![
+            settings.workspace_id,
             settings.repo_path,
             settings.remote_url,
             settings.branch,
@@ -516,5 +631,80 @@ mod tests {
         assert_eq!(versions.remote.as_deref(), Some("feature line\n"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn make_project(conn: &Connection, workspace_id: &str, name: &str) -> crate::models::Project {
+        crate::store::project_store::create_project(
+            conn,
+            crate::models::NewProjectInput { name: name.into(), workspace_id: workspace_id.into() },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn finds_legacy_settings_across_projects_newest_first_deduped_by_repo_path() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let p1 = make_project(&conn, "default", "Old Payments");
+        let p2 = make_project(&conn, "default", "Old Auth");
+        let p3 = make_project(&conn, "default", "No Git Ever");
+
+        save_project_git_settings(
+            &conn,
+            &ProjectGitSettings {
+                project_id: p1.id.clone(),
+                repo_path: Some("/repos/payments".into()),
+                remote_url: None,
+                branch: "main".into(),
+                auto_sync: false,
+                github_token: None,
+                last_sync_at: Some("2024-01-01T00:00:00Z".into()),
+            },
+        )
+        .unwrap();
+        save_project_git_settings(
+            &conn,
+            &ProjectGitSettings {
+                project_id: p2.id.clone(),
+                repo_path: Some("/repos/auth".into()),
+                remote_url: None,
+                branch: "main".into(),
+                auto_sync: false,
+                github_token: None,
+                last_sync_at: Some("2024-06-01T00:00:00Z".into()),
+            },
+        )
+        .unwrap();
+        let _ = &p3; // has no git settings row at all — must not appear as a candidate
+
+        let candidates = find_legacy_git_settings_for_workspace(&conn, "default").unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].project_name, "Old Auth", "most recently synced comes first");
+        assert_eq!(candidates[1].project_name, "Old Payments");
+    }
+
+    #[test]
+    fn two_projects_pointing_at_the_same_repo_only_show_up_once() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let p1 = make_project(&conn, "default", "Service A");
+        let p2 = make_project(&conn, "default", "Service B");
+
+        for p in [&p1, &p2] {
+            save_project_git_settings(
+                &conn,
+                &ProjectGitSettings {
+                    project_id: p.id.clone(),
+                    repo_path: Some("/repos/shared".into()),
+                    remote_url: None,
+                    branch: "main".into(),
+                    auto_sync: false,
+                    github_token: None,
+                    last_sync_at: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let candidates = find_legacy_git_settings_for_workspace(&conn, "default").unwrap();
+        assert_eq!(candidates.len(), 1);
     }
 }

@@ -1,7 +1,7 @@
 {
   "name": "postman-client",
   "version": "0.1.0",
-  "description": "",
+  "description": "Lightweight, local-first API client with offline storage and AI assistance",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -14,8 +14,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/api": "^2"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.10",

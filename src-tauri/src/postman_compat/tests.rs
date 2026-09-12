@@ -36,7 +36,7 @@ fn imports_basic_collection_with_variables() {
         ]
     }"#;
 
-    let report = import_collection(&conn, json, None).unwrap();
+    let report = import_collection(&conn, json, None, "default").unwrap();
     assert_eq!(report.project_name, "Test API");
     assert_eq!(report.requests_count, 1);
     assert_eq!(report.variables_count, 1);
@@ -134,7 +134,7 @@ fn imports_nested_folders_auth_scripts_and_sample_responses() {
         ]
     }"#;
 
-    let report = import_collection(&conn, json, None).unwrap();
+    let report = import_collection(&conn, json, None, "default").unwrap();
     assert_eq!(report.requests_count, 1);
     assert_eq!(report.sample_responses_count, 1);
 
@@ -273,7 +273,7 @@ fn exports_collection_and_roundtrips() {
     assert!(exported_json.contains("Sample 200"));
 
     // Now re-import the exported collection as a new project
-    let import_report = import_collection(&conn, &exported_json, None).unwrap();
+    let import_report = import_collection(&conn, &exported_json, None, "default").unwrap();
     assert_eq!(import_report.project_name, "Exportable API");
     assert_eq!(import_report.requests_count, 1);
     assert_eq!(import_report.variables_count, 1);
@@ -313,7 +313,7 @@ fn unsupported_auth_adds_warning_and_falls_back_to_none() {
         ]
     }"#;
 
-    let report = import_collection(&conn, json, None).unwrap();
+    let report = import_collection(&conn, json, None, "default").unwrap();
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0].contains("oauth1"));
 
@@ -366,7 +366,7 @@ fn imports_formdata_and_urlencoded_bodies_as_structured_sendable_bodies() {
         ]
     }"#;
 
-    let report = import_collection(&conn, json, None).unwrap();
+    let report = import_collection(&conn, json, None, "default").unwrap();
     let reqs = request_store::list_requests(&conn, &report.project_id).unwrap();
 
     let form_req = reqs.iter().find(|r| r.name == "Submit Form").unwrap();

@@ -59,6 +59,7 @@ fn yaml_get<'a>(doc: &'a Yaml, key: &str) -> Option<&'a Yaml> {
 pub fn import_local_workspace(
     conn: &Connection,
     root_path: &str,
+    workspace_id: &str,
 ) -> Result<LocalWorkspaceImportReport, AppError> {
     let root = Path::new(root_path);
     if !root.exists() || !root.is_dir() {
@@ -105,7 +106,7 @@ pub fn import_local_workspace(
 
                 let project = project_store::create_project(
                     conn,
-                    NewProjectInput { name: collection_name.clone(), workspace_id: "default".into() },
+                    NewProjectInput { name: collection_name.clone(), workspace_id: workspace_id.to_string() },
                 )?;
                 projects_created += 1;
 
@@ -138,7 +139,7 @@ pub fn import_local_workspace(
             if !env_files.is_empty() {
                 let holder = project_store::create_project(
                     conn,
-                    NewProjectInput { name: "Imported Environments".to_string(), workspace_id: "default".into() },
+                    NewProjectInput { name: "Imported Environments".to_string(), workspace_id: workspace_id.to_string() },
                 )?;
                 projects_created += 1;
 
@@ -809,7 +810,7 @@ mod tests {
         .unwrap();
 
         let conn = db::open_in_memory().unwrap();
-        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap();
+        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap(), "default").unwrap();
 
         assert_eq!(report.projects_created, 1);
         assert_eq!(report.requests_imported, 1);
@@ -847,7 +848,7 @@ mod tests {
         .unwrap();
 
         let conn = db::open_in_memory().unwrap();
-        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap();
+        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap(), "default").unwrap();
 
         assert_eq!(report.requests_imported, 1);
         assert_eq!(report.samples_imported, 1);
@@ -874,7 +875,7 @@ mod tests {
         .unwrap();
 
         let conn = db::open_in_memory().unwrap();
-        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap();
+        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap(), "default").unwrap();
 
         assert_eq!(report.requests_imported, 1);
         assert_eq!(report.folders_created, 1);
@@ -897,7 +898,7 @@ mod tests {
         .unwrap();
 
         let conn = db::open_in_memory().unwrap();
-        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap();
+        let report = import_local_workspace(&conn, scratch.0.to_str().unwrap(), "default").unwrap();
 
         assert_eq!(report.environments_imported, 1);
         assert_eq!(report.variables_imported, 2);
@@ -916,7 +917,7 @@ mod tests {
     #[test]
     fn rejects_missing_directory() {
         let conn = db::open_in_memory().unwrap();
-        let err = import_local_workspace(&conn, r"Z:\definitely\not\a\real\path\for\this\test").unwrap_err();
+        let err = import_local_workspace(&conn, r"Z:\definitely\not\a\real\path\for\this\test", "default").unwrap_err();
         assert!(matches!(err, AppError::Validation(_)));
     }
 
@@ -924,7 +925,7 @@ mod tests {
     fn rejects_directory_that_is_not_a_postman_workspace() {
         let scratch = ScratchDir::new("not-a-workspace");
         let conn = db::open_in_memory().unwrap();
-        let err = import_local_workspace(&conn, scratch.0.to_str().unwrap()).unwrap_err();
+        let err = import_local_workspace(&conn, scratch.0.to_str().unwrap(), "default").unwrap_err();
         assert!(matches!(err, AppError::Validation(_)));
     }
 }

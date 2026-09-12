@@ -365,7 +365,7 @@ mod tests {
 
         assert_eq!(updated.key, "baseUrl");
         assert_eq!(updated.value, "https://new.example.com");
-        assert_eq!(updated.enabled, true);
+        assert!(updated.enabled);
     }
 
     #[test]

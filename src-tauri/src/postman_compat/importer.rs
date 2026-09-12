@@ -32,6 +32,7 @@ pub fn import_collection(
     conn: &Connection,
     json_str: &str,
     target_project_id: Option<String>,
+    workspace_id: &str,
 ) -> Result<CollectionImportReport, AppError> {
     let collection: PostmanCollection = serde_json::from_str(json_str)
         .map_err(|err| AppError::Validation(format!("Invalid Postman Collection JSON: {err}")))?;
@@ -54,9 +55,8 @@ pub fn import_collection(
                 } else {
                     collection.info.name.trim().to_string()
                 };
-                // Imports with no target project land in the default workspace — moving a
-                // project between workspaces isn't wired up yet, so this is the safe default.
-                let p = project_store::create_project(conn, NewProjectInput { name, workspace_id: "default".into() })?;
+                // Imports with no target project land in the caller's current workspace.
+                let p = project_store::create_project(conn, NewProjectInput { name, workspace_id: workspace_id.to_string() })?;
                 (p.id, p.name)
             }
         };

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 use tauri::State;
 
-use crate::ai::{AiProvider, ClaudeProvider, GeneratedApiDefinition};
+use crate::ai::{self, AiProvider, GeneratedApiDefinition};
 use crate::canonical_request;
 use crate::error::AppError;
 use crate::execution::{self, ExecutionInput};
@@ -33,9 +33,6 @@ pub struct AppState {
     /// the second send's sender overwrites the first's — a documented simplification, not
     /// a real per-execution id yet (see PROJECT_MAP).
     pub cancel_signals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
-    /// `None` when `ANTHROPIC_API_KEY` isn't set — AI is an opt-in feature, its absence is
-    /// not a startup failure (LP-0803).
-    pub ai_provider: Option<ClaudeProvider>,
     pub console: std::sync::Arc<crate::console::ConsoleBuffer>,
     pub job_manager: std::sync::Arc<crate::background_jobs::BackgroundJobManager>,
     pub start_time: std::time::Instant,
@@ -138,6 +135,18 @@ pub fn list_requests(
 ) -> Result<Vec<RequestSummary>, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
     request_store::list_requests(&conn, &project_id)
+}
+
+/// Backs the command palette's workspace-wide search (LP-1404) — every project in the
+/// workspace, not just whichever one is currently open.
+#[tauri::command]
+pub fn search_requests_in_workspace(
+    state: State<AppState>,
+    workspace_id: String,
+    query: String,
+) -> Result<Vec<crate::models::RequestSearchResult>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    request_store::search_requests_in_workspace(&conn, &workspace_id, &query, 30)
 }
 
 #[tauri::command]
@@ -429,14 +438,11 @@ pub fn diagnose_request(
     Ok(canonical_request::diagnose(&req, &chain))
 }
 
-fn resolve_ai_provider(state: &AppState) -> Result<ClaudeProvider, AppError> {
-    if let Some(ref p) = state.ai_provider {
-        return Ok(p.clone());
-    }
+fn resolve_ai_provider(state: &AppState) -> Result<ai::AnyAiProvider, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
-    ClaudeProvider::from_db_or_env(state.http_client.clone(), &conn).ok_or_else(|| {
+    ai::provider_from_db_or_env(state.http_client.clone(), &conn).ok_or_else(|| {
         AppError::Validation(
-            "AI is not configured. Please configure your Anthropic API key in AI Settings or set ANTHROPIC_API_KEY.".into(),
+            "AI is not configured. Please choose a provider and enter an API key in AI Settings.".into(),
         )
     })
 }
@@ -445,11 +451,8 @@ fn resolve_ai_provider(state: &AppState) -> Result<ClaudeProvider, AppError> {
 /// key is configured.
 #[tauri::command]
 pub fn is_ai_configured(state: State<AppState>) -> bool {
-    if state.ai_provider.is_some() {
-        return true;
-    }
     let conn = state.db.lock().expect("db mutex poisoned");
-    ClaudeProvider::from_db_or_env(state.http_client.clone(), &conn).is_some()
+    ai::provider_from_db_or_env(state.http_client.clone(), &conn).is_some()
 }
 
 #[tauri::command]
@@ -656,6 +659,7 @@ pub fn import_discovered_endpoint(
         name: created.name,
         method: created.method,
         url: created.url,
+        created_at: created.created_at,
         updated_at: created.updated_at,
     })
 }
@@ -750,18 +754,20 @@ pub fn import_postman_collection(
     state: State<AppState>,
     collection_json: String,
     project_id: Option<String>,
+    workspace_id: String,
 ) -> Result<crate::postman_compat::CollectionImportReport, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
-    crate::postman_compat::import_collection(&conn, &collection_json, project_id)
+    crate::postman_compat::import_collection(&conn, &collection_json, project_id, &workspace_id)
 }
 
 #[tauri::command]
 pub fn import_local_postman_workspace(
     state: State<AppState>,
     root_path: String,
+    workspace_id: String,
 ) -> Result<crate::postman_compat::LocalWorkspaceImportReport, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
-    crate::postman_compat::import_local_workspace(&conn, &root_path)
+    crate::postman_compat::import_local_workspace(&conn, &root_path, &workspace_id)
 }
 
 #[tauri::command]
@@ -832,9 +838,10 @@ pub fn import_project_file(
     state: State<AppState>,
     file_content: String,
     target_project_id: Option<String>,
+    workspace_id: String,
 ) -> Result<crate::models::Project, AppError> {
     let mut conn = state.db.lock().expect("db mutex poisoned");
-    crate::project_file::import_project_from_json(&mut conn, &file_content, target_project_id.as_deref())
+    crate::project_file::import_project_from_json(&mut conn, &file_content, target_project_id.as_deref(), &workspace_id)
 }
 
 #[tauri::command]
@@ -860,10 +867,67 @@ pub fn load_project_from_repo(
     state: State<AppState>,
     directory: String,
     target_project_id: Option<String>,
+    workspace_id: String,
 ) -> Result<crate::models::Project, AppError> {
     let mut conn = state.db.lock().expect("db mutex poisoned");
     let path = std::path::Path::new(&directory);
-    crate::git_sync::GitService::import_from_repo(&mut conn, path, target_project_id.as_deref())
+    crate::git_sync::GitService::import_from_repo(&mut conn, path, target_project_id.as_deref(), &workspace_id)
+}
+
+#[tauri::command]
+pub fn save_workspace_to_repo(
+    state: State<AppState>,
+    workspace_id: String,
+    directory: String,
+    include_secrets: Option<bool>,
+) -> Result<Vec<String>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    let path = std::path::Path::new(&directory);
+    let written = crate::project_file::export_workspace_to_repo(
+        &conn,
+        &workspace_id,
+        path,
+        include_secrets.unwrap_or(false),
+    )?;
+    Ok(written.into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+}
+
+#[tauri::command]
+pub fn load_workspace_from_repo(
+    state: State<AppState>,
+    workspace_id: String,
+    directory: String,
+) -> Result<crate::project_file::WorkspaceImportReport, AppError> {
+    let mut conn = state.db.lock().expect("db mutex poisoned");
+    let path = std::path::Path::new(&directory);
+    crate::project_file::import_workspace_from_repo(&mut conn, &workspace_id, path)
+}
+
+#[tauri::command]
+pub fn get_workspace_git_settings(
+    state: State<AppState>,
+    workspace_id: String,
+) -> Result<Option<crate::git_sync::WorkspaceGitSettings>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::git_sync::get_workspace_git_settings(&conn, &workspace_id)
+}
+
+#[tauri::command]
+pub fn save_workspace_git_settings(
+    state: State<AppState>,
+    settings: crate::git_sync::WorkspaceGitSettings,
+) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::git_sync::save_workspace_git_settings(&conn, &settings)
+}
+
+#[tauri::command]
+pub fn find_legacy_git_settings_for_workspace(
+    state: State<AppState>,
+    workspace_id: String,
+) -> Result<Vec<crate::git_sync::LegacyGitSettingsCandidate>, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    crate::git_sync::find_legacy_git_settings_for_workspace(&conn, &workspace_id)
 }
 
 #[tauri::command]
@@ -1006,7 +1070,7 @@ pub fn get_system_diagnostics(
 ) -> Result<crate::diagnostics::SystemDiagnostics, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
     let console_count = state.console.get_events(None, None, None).len();
-    let ai_configured = state.ai_provider.is_some() || crate::ai::get_ai_settings(&conn)?.is_configured;
+    let ai_configured = crate::ai::get_ai_settings(&conn)?.is_configured;
     let uptime = state.start_time.elapsed().as_secs();
 
     crate::diagnostics::collect_system_diagnostics(

@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -181,6 +184,7 @@ pub fn import_project_from_json(
     conn: &mut Connection,
     json_content: &str,
     target_project_id: Option<&str>,
+    workspace_id: &str,
 ) -> Result<Project, AppError> {
     let file: ProjectFile = serde_json::from_str(json_content)
         .map_err(|e| AppError::Validation(format!("Invalid light-postman.json: {e}")))?;
@@ -195,14 +199,14 @@ pub fn import_project_from_json(
         } else {
             file.name.trim().to_string()
         };
-        let existing_projects = project_store::list_projects(&tx, "default")?;
+        let existing_projects = project_store::list_projects(&tx, workspace_id)?;
         let mut name = base_name.clone();
         let mut suffix = 1;
         while existing_projects.iter().any(|p| p.name == name) {
             name = format!("{base_name} ({suffix})");
             suffix += 1;
         }
-        project_store::create_project(&tx, NewProjectInput { name, workspace_id: "default".into() })?
+        project_store::create_project(&tx, NewProjectInput { name, workspace_id: workspace_id.to_string() })?
     };
 
     // Import Global Variables
@@ -290,6 +294,144 @@ pub fn import_project_from_json(
 
     tx.commit()?;
     Ok(project)
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-level sync: one shared repo covering every project in a workspace
+// ---------------------------------------------------------------------------
+
+pub const WORKSPACE_PROJECTS_SUBDIR: &str = "projects";
+
+/// Filesystem-safe folder name for one project inside a workspace repo: the project's name,
+/// sanitized, with a short id suffix appended only on collision (two projects sharing a name) —
+/// keeps the common case human-readable in diffs/PRs while staying unique.
+fn project_folder_slug(name: &str, id: &str, used: &mut HashSet<String>) -> String {
+    let mut slug: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if slug.is_empty() {
+        slug = "project".to_string();
+    }
+    if used.contains(&slug) {
+        let short_id: String = id.chars().take(8).collect();
+        slug = format!("{slug}-{short_id}");
+    }
+    used.insert(slug.clone());
+    slug
+}
+
+/// Writes every project in the workspace into its own `projects/<slug>/light-postman.json`,
+/// under one shared repo directory — the workspace-level counterpart to `export_project_to_json`
+/// (used per-project). Returns the file paths written, for the caller to `git add`.
+pub fn export_workspace_to_repo(
+    conn: &Connection,
+    workspace_id: &str,
+    dir: &Path,
+    include_secrets: bool,
+) -> Result<Vec<PathBuf>, AppError> {
+    let projects = project_store::list_projects(conn, workspace_id)?;
+    let projects_dir = dir.join(WORKSPACE_PROJECTS_SUBDIR);
+    std::fs::create_dir_all(&projects_dir)
+        .map_err(|e| AppError::Storage(format!("Failed to create projects folder: {e}")))?;
+
+    let mut used = HashSet::new();
+    let mut written = Vec::new();
+    for p in projects {
+        let slug = project_folder_slug(&p.name, &p.id, &mut used);
+        let proj_dir = projects_dir.join(&slug);
+        std::fs::create_dir_all(&proj_dir)
+            .map_err(|e| AppError::Storage(format!("Failed to create project folder: {e}")))?;
+        let json = export_project_to_json(conn, &p.id, include_secrets)?;
+        let file_path = proj_dir.join(PROJECT_FILE_DEFAULT_NAME);
+        std::fs::write(&file_path, json)
+            .map_err(|e| AppError::Storage(format!("Failed to write project file: {e}")))?;
+        written.push(file_path);
+    }
+    Ok(written)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceImportReport {
+    pub updated_projects: Vec<Project>,
+    pub created_projects: Vec<Project>,
+    pub warnings: Vec<String>,
+}
+
+/// Reads every `projects/*/light-postman.json` under the repo. A file whose embedded `id`
+/// matches a project already in this workspace updates it in place (pulling on the machine that
+/// made the export); anything else creates a new project, same as importing a single
+/// light-postman.json with no target (pulling onto a fresh machine/workspace) — so this never
+/// silently overwrites an unrelated project that just happens to share a name. One bad/unreadable
+/// file is recorded as a warning and skipped, not a fatal error for the whole sync.
+pub fn import_workspace_from_repo(
+    conn: &mut Connection,
+    workspace_id: &str,
+    dir: &Path,
+) -> Result<WorkspaceImportReport, AppError> {
+    let projects_dir = dir.join(WORKSPACE_PROJECTS_SUBDIR);
+    let mut report = WorkspaceImportReport {
+        updated_projects: vec![],
+        created_projects: vec![],
+        warnings: vec![],
+    };
+    if !projects_dir.is_dir() {
+        return Ok(report);
+    }
+
+    let existing_ids: HashSet<String> = project_store::list_projects(conn, workspace_id)?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+
+    let mut entries: Vec<_> = std::fs::read_dir(&projects_dir)
+        .map_err(|e| AppError::Storage(format!("Failed to read projects folder: {e}")))?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let file_path = path.join(PROJECT_FILE_DEFAULT_NAME);
+        if !file_path.is_file() {
+            continue;
+        }
+        let json_content = match std::fs::read_to_string(&file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                report.warnings.push(format!("Could not read {}: {e}", file_path.display()));
+                continue;
+            }
+        };
+        let parsed: ProjectFile = match serde_json::from_str(&json_content) {
+            Ok(p) => p,
+            Err(e) => {
+                report
+                    .warnings
+                    .push(format!("Skipped {}: invalid JSON ({e})", file_path.display()));
+                continue;
+            }
+        };
+        let target_id = parsed.id.as_deref().filter(|id| existing_ids.contains(*id));
+        match import_project_from_json(conn, &json_content, target_id, workspace_id) {
+            Ok(project) => {
+                if target_id.is_some() {
+                    report.updated_projects.push(project);
+                } else {
+                    report.created_projects.push(project);
+                }
+            }
+            Err(e) => report
+                .warnings
+                .push(format!("Failed to import {}: {e}", file_path.display())),
+        }
+    }
+
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -417,7 +559,7 @@ pub mod tests {
         assert!(!exported_full.contains("super_secret_local")); // local var still excluded!
 
         // Import into new project
-        let imported = import_project_from_json(&mut conn, &exported_full, None).unwrap();
+        let imported = import_project_from_json(&mut conn, &exported_full, None, "default").unwrap();
         assert_ne!(imported.id, project.id);
         assert!(imported.name.starts_with("Test Sync Project"));
 
@@ -428,5 +570,89 @@ pub mod tests {
         let imported_envs = environment_store::list_environments(&conn, &imported.id).unwrap();
         assert_eq!(imported_envs.len(), 1);
         assert_eq!(imported_envs[0].name, "Staging");
+    }
+
+    fn make_project(conn: &Connection, workspace_id: &str, name: &str) -> Project {
+        project_store::create_project(
+            conn,
+            NewProjectInput { name: name.into(), workspace_id: workspace_id.into() },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn export_workspace_writes_one_file_per_project_and_import_creates_them_on_a_fresh_workspace() {
+        let conn = db::open_in_memory().unwrap();
+        let ws = crate::store::workspace_store::create_workspace(
+            &conn,
+            crate::models::NewWorkspaceInput { name: "Team A".into() },
+        )
+        .unwrap();
+        make_project(&conn, &ws.id, "Payments API");
+        make_project(&conn, &ws.id, "Auth Service");
+
+        let dir = std::env::temp_dir().join(format!("lp-ws-export-{}", uuid::Uuid::new_v4()));
+        let written = export_workspace_to_repo(&conn, &ws.id, &dir, true).unwrap();
+        assert_eq!(written.len(), 2);
+        assert!(dir.join(WORKSPACE_PROJECTS_SUBDIR).join("Payments_API").join(PROJECT_FILE_DEFAULT_NAME).exists());
+        assert!(dir.join(WORKSPACE_PROJECTS_SUBDIR).join("Auth_Service").join(PROJECT_FILE_DEFAULT_NAME).exists());
+
+        // Fresh workspace (simulating a different machine/db) — importing creates both projects.
+        let mut conn2 = db::open_in_memory().unwrap();
+        let ws2 = crate::store::workspace_store::create_workspace(
+            &conn2,
+            crate::models::NewWorkspaceInput { name: "Team A copy".into() },
+        )
+        .unwrap();
+        let report = import_workspace_from_repo(&mut conn2, &ws2.id, &dir).unwrap();
+        assert_eq!(report.created_projects.len(), 2);
+        assert!(report.updated_projects.is_empty());
+        assert!(report.warnings.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reimporting_into_the_same_workspace_updates_in_place_instead_of_duplicating() {
+        let mut conn = db::open_in_memory().unwrap();
+        let ws = crate::store::workspace_store::create_workspace(
+            &conn,
+            crate::models::NewWorkspaceInput { name: "Team A".into() },
+        )
+        .unwrap();
+        make_project(&conn, &ws.id, "Payments API");
+
+        let dir = std::env::temp_dir().join(format!("lp-ws-reimport-{}", uuid::Uuid::new_v4()));
+        export_workspace_to_repo(&conn, &ws.id, &dir, true).unwrap();
+
+        // Re-importing the same export back into the SAME workspace must update the existing
+        // project (matched by the id embedded in light-postman.json), not create a duplicate.
+        let report = import_workspace_from_repo(&mut conn, &ws.id, &dir).unwrap();
+        assert_eq!(report.updated_projects.len(), 1);
+        assert!(report.created_projects.is_empty());
+
+        let projects = project_store::list_projects(&conn, &ws.id).unwrap();
+        assert_eq!(projects.len(), 1, "must still be exactly one project, not a duplicate");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_projects_with_the_same_name_get_distinct_slugs() {
+        let conn = db::open_in_memory().unwrap();
+        let ws = crate::store::workspace_store::create_workspace(
+            &conn,
+            crate::models::NewWorkspaceInput { name: "Team A".into() },
+        )
+        .unwrap();
+        make_project(&conn, &ws.id, "API");
+        make_project(&conn, &ws.id, "API");
+
+        let dir = std::env::temp_dir().join(format!("lp-ws-slug-{}", uuid::Uuid::new_v4()));
+        let written = export_workspace_to_repo(&conn, &ws.id, &dir, true).unwrap();
+        assert_eq!(written.len(), 2);
+        assert_ne!(written[0], written[1]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

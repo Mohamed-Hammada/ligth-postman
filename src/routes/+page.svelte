@@ -7442,6 +7442,57 @@
 
     <div class="settings-screen-row">
       <div>
+        <div class="settings-screen-row-label">{t("settings.headingFont")}</div>
+        <div class="screen-empty-inline">{t("settings.headingFontHint")}</div>
+      </div>
+      <select
+        class="url-input"
+        value={headingFontOverride ?? ""}
+        onchange={(e) => setHeadingFontOverride((e.currentTarget as HTMLSelectElement).value || null)}
+      >
+        <option value="">{t("settings.themeDefault")}</option>
+        {#each THEME_FONT_OPTIONS as font (font.id)}
+          <option value={font.id}>{font.label}</option>
+        {/each}
+      </select>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.bodyFont")}</div>
+        <div class="screen-empty-inline">{t("settings.bodyFontHint")}</div>
+      </div>
+      <select
+        class="url-input"
+        value={bodyFontOverride ?? ""}
+        onchange={(e) => setBodyFontOverride((e.currentTarget as HTMLSelectElement).value || null)}
+      >
+        <option value="">{t("settings.themeDefault")}</option>
+        {#each THEME_FONT_OPTIONS as font (font.id)}
+          <option value={font.id}>{font.label}</option>
+        {/each}
+      </select>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">{t("settings.textColor")}</div>
+        <div class="screen-empty-inline">{t("settings.textColorHint")}</div>
+        {#if textColorContrastWarning}<div class="warn-inline">{textColorContrastWarning}</div>{/if}
+      </div>
+      <div class="accent-picker">
+        <label class="accent-swatch accent-swatch-custom" style={textColorOverride ? `background: ${textColorOverride}` : ""} title={t("accent.custom")}>
+          <input type="color" value={textColorOverride ?? "#2b2620"} oninput={(e) => setTextColorOverride((e.currentTarget as HTMLInputElement).value)} />
+          {#if !textColorOverride}<span class="accent-swatch-plus">+</span>{/if}
+        </label>
+        {#if textColorOverride}
+          <button type="button" class="btn-ghost accent-reset" onclick={() => setTextColorOverride(null)}>{t("accent.reset")}</button>
+        {/if}
+      </div>
+    </div>
+
+    <div class="settings-screen-row">
+      <div>
         <div class="settings-screen-row-label">{t("settings.uiScale")}</div>
         <div class="screen-empty-inline">{t("settings.uiScaleHint")}</div>
       </div>

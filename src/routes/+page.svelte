@@ -3556,7 +3556,8 @@
     if (!match) return null;
     const word = match[0];
     if (word.length < 2) return null;
-    if (!word.startsWith("pm") && !word.startsWith("console") && !"pm".startsWith(word) && !"console".startsWith(word)) {
+    const prefixes = ["pm", "console", "CryptoJS"];
+    if (!prefixes.some((p) => word.startsWith(p) || p.startsWith(word))) {
       return null;
     }
     return { query: word, start: caret - word.length };
@@ -3586,7 +3587,26 @@
       { insertText: "pm.response.to.have.status(", label: "pm.response.to.have.status(code)", detailKey: "autocomplete.pmResToHaveStatus" },
       { insertText: "pm.response.to.have.header(", label: "pm.response.to.have.header(key, value?)", detailKey: "autocomplete.pmResToHaveHeader" },
     ];
-    const all = includeResponse ? [...base, ...responseOnly] : base;
+    // pm.request only exists in pre-request scripts (LP-1406) — the request hasn't been sent
+    // yet in that context, so it's the mirror image of pm.response being post-request-only.
+    const requestOnly: { insertText: string; label: string; detailKey: string }[] = [
+      { insertText: "pm.request.headers.add(", label: "pm.request.headers.add({key, value})", detailKey: "autocomplete.pmReqHeadersAdd" },
+      { insertText: "pm.request.headers.upsert(", label: "pm.request.headers.upsert({key, value})", detailKey: "autocomplete.pmReqHeadersUpsert" },
+      { insertText: "pm.request.headers.remove(", label: "pm.request.headers.remove(key)", detailKey: "autocomplete.pmReqHeadersRemove" },
+      { insertText: "pm.request.headers.has(", label: "pm.request.headers.has(key)", detailKey: "autocomplete.pmReqHeadersHas" },
+      { insertText: "pm.request.headers.get(", label: "pm.request.headers.get(key)", detailKey: "autocomplete.pmReqHeadersGet" },
+      { insertText: "pm.request.body.toString()", label: "pm.request.body.toString()", detailKey: "autocomplete.pmReqBodyToString" },
+      { insertText: "pm.request.body.update(", label: "pm.request.body.update(newBody)", detailKey: "autocomplete.pmReqBodyUpdate" },
+      { insertText: "pm.request.url.toString()", label: "pm.request.url.toString()", detailKey: "autocomplete.pmReqUrl" },
+      { insertText: "pm.request.method", label: "pm.request.method", detailKey: "autocomplete.pmReqMethod" },
+      { insertText: "CryptoJS.HmacSHA256(", label: "CryptoJS.HmacSHA256(message, key)", detailKey: "autocomplete.cryptoHmacSha256" },
+      { insertText: "CryptoJS.HmacSHA1(", label: "CryptoJS.HmacSHA1(message, key)", detailKey: "autocomplete.cryptoHmacSha1" },
+      { insertText: "CryptoJS.SHA256(", label: "CryptoJS.SHA256(message)", detailKey: "autocomplete.cryptoSha256" },
+      { insertText: "CryptoJS.SHA1(", label: "CryptoJS.SHA1(message)", detailKey: "autocomplete.cryptoSha1" },
+      { insertText: "CryptoJS.enc.Base64.stringify(", label: "CryptoJS.enc.Base64.stringify(wordArray)", detailKey: "autocomplete.cryptoBase64Stringify" },
+      { insertText: "CryptoJS.enc.Hex.stringify(", label: "CryptoJS.enc.Hex.stringify(wordArray)", detailKey: "autocomplete.cryptoHexStringify" },
+    ];
+    const all = includeResponse ? [...base, ...responseOnly] : [...base, ...requestOnly];
     return all.map((s) => ({ insertText: s.insertText, label: s.label, detail: t(s.detailKey) }));
   }
 

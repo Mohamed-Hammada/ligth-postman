@@ -1040,6 +1040,7 @@ pub async fn get_github_repo_info(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn run_script_sandbox(
     script: String,
     environment: Option<HashMap<String, String>>,
@@ -1048,6 +1049,10 @@ pub fn run_script_sandbox(
     response_status_text: Option<String>,
     response_headers: Option<Vec<(String, String)>>,
     response_body: Option<String>,
+    request_method: Option<String>,
+    request_url: Option<String>,
+    request_headers: Option<Vec<(String, String)>>,
+    request_body: Option<String>,
 ) -> Result<crate::script_engine::ScriptExecutionResult, String> {
     let env = environment.unwrap_or_default();
     let vars = variables.unwrap_or_default();
@@ -1060,7 +1065,13 @@ pub fn run_script_sandbox(
             &script, &env, &vars, status, &status_text, &headers, &body, 2000,
         ))
     } else {
-        Ok(crate::script_engine::execute_pre_request_script(&script, &env, &vars, 2000))
+        let request = crate::script_engine::RequestContext {
+            method: request_method.unwrap_or_else(|| "GET".into()),
+            url: request_url.unwrap_or_default(),
+            headers: request_headers.unwrap_or_default(),
+            body: request_body,
+        };
+        Ok(crate::script_engine::execute_pre_request_script(&script, &env, &vars, &request, 2000))
     }
 }
 

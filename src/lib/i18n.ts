@@ -201,7 +201,7 @@ const en: Dict = {
   "body.graphql": "GraphQL",
   "body.jsonTemplate": "JSON template",
   "body.clearBody": "Clear body",
-  "body.prettify": "Prettify",
+  "body.prettify": "Beautify",
   "body.prettifyInvalidJson": "Not valid JSON — nothing changed.",
   "body.prettifyInvalidXml": "Not well-formed XML — nothing changed.",
   "body.rawTypeText": "Text",
@@ -666,8 +666,15 @@ const en: Dict = {
   "diffHistory.title": "Git Commit History",
   "diffHistory.noHistory": "No commit history found.",
 
-  // Error/success banners
+  //  "error.title": "Error",
   "error.dismiss": "Dismiss",
+  "common.confirm": "Confirm",
+  "error.confirmDeleteProject": "Are you sure you want to delete this project? This cannot be undone.",
+  "error.confirmDeleteRequest": "Are you sure you want to delete this request?",
+  "error.confirmDeleteFolder": "Are you sure you want to delete this folder?",
+  "error.confirmDeleteEnvironment": "Are you sure you want to delete this environment?",
+  "error.confirmDeleteVariable": "Are you sure you want to delete this variable?",
+  "error.confirmDeleteSampleResponse": "Are you sure you want to delete this response?",
 
   // Developer Console drawer
   "console.title": "Developer Console",
@@ -1356,7 +1363,14 @@ const ar: Dict = {
   "diffHistory.title": "سجل حفظ جيت",
   "diffHistory.noHistory": "لم يتم العثور على سجل حفظ.",
 
-  "error.dismiss": "تجاهل",
+  "error.dismiss": "إخفاء",
+  "common.confirm": "تأكيد",
+  "error.confirmDeleteProject": "هل أنت متأكد أنك تريد حذف هذا المشروع؟ لا يمكن التراجع عن هذا.",
+  "error.confirmDeleteRequest": "هل أنت متأكد أنك تريد حذف هذا الطلب؟",
+  "error.confirmDeleteFolder": "هل أنت متأكد أنك تريد حذف هذا المجلد؟",
+  "error.confirmDeleteEnvironment": "هل أنت متأكد أنك تريد حذف هذه البيئة؟",
+  "error.confirmDeleteVariable": "هل أنت متأكد أنك تريد حذف هذا المتغير؟",
+  "error.confirmDeleteSampleResponse": "هل أنت متأكد أنك تريد حذف هذه الاستجابة؟",
 
   "console.title": "وحدة تحكم المطوّر",
   "console.eventsCount": "{count} حدث",

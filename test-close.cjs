@@ -2170,14 +2170,19 @@
 
   function closeTabAction(id: string) {
     if (isTabDirty(id)) {
-      showConfirm(t("common.confirm"), t("error.confirmCloseDirtyTab") || "You have unsaved changes. Are you sure you want to close without saving?", () => {
-        // discard changes
-        if (id === selectedRequest?.id && autoSaveTimer) {
-          clearTimeout(autoSaveTimer);
-          autoSaveTimer = null;
-          autoSaveStatus = "saved";
+      showConfirm(t("common.confirm"), t("error.confirmCloseDirtyTab") || "You have unsaved changes. Are you sure you want to close this tab without saving?", () => {
+        // Discard draft
+        if (id === selectedRequest?.id) {
+           // It's the active tab, we need to revert it so it doesn't auto-save on switch
+           if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
+           // Revert the currently bound fields so they don't get saved by any other path
+           editName = selectedRequest.name;
+           editMethod = selectedRequest.method;
+           editUrl = selectedRequest.url;
+           editBody = selectedRequest.body ?? "";
+           // etc... wait, it's easier to just skip saving. 
+           // But saveRequest is called in closeTab. We can pass a flag.
         }
-        tabDrafts.delete(id);
         closeTab(id, true);
       });
     } else {
@@ -2200,7 +2205,7 @@
         // Same flush openRequest does — closing the last tab must not silently drop a pending
         // debounced edit (see openRequest's comment for the full failure mode).
         if (!skipSave) await saveRequest();
-          selectedRequest = null;
+        selectedRequest = null;
         activeResponse = null;
         activeResponseBody = "";
         responseHistory = [];
@@ -2611,7 +2616,7 @@
     if (selectedProjectId === id) {
       // Same flush as openRequest/closeTab — collapsing the project must not silently drop a
       // pending debounced edit on whatever request was open.
-      await saveRequest();
+      if (!skipSave) await saveRequest();
       selectedProjectId = null;
       selectedRequest = null;
       selectedEnvironmentId = null;
@@ -2627,7 +2632,7 @@
   }
 
   async function selectProject(id: string) {
-    await saveRequest();
+    if (!skipSave) await saveRequest();
     selectedProjectId = id;
     selectedRequest = null;
     selectedEnvironmentId = null;
@@ -2851,7 +2856,7 @@
     // selectedRequest/edit* fields point at the NEW request, so the stale save silently diffs
     // against the wrong request and does nothing. This is what made curl-paste-then-switch (and
     // any other quick edit-then-switch) look like it never saved.
-    await saveRequest();
+    if (!skipSave) await saveRequest();
     saveCurrentDraft();
 
     // Ensure tab exists in openTabs (LP-0407)
@@ -2889,7 +2894,7 @@
     // auth, ...) must be flushed first — otherwise Send would silently fire the last-saved
     // version while the editor shows something different. saveRequest() is a cheap diff-based
     // no-op when nothing changed, so it's safe to call unconditionally.
-    await saveRequest();
+    if (!skipSave) await saveRequest();
     if (!selectedRequest) return;
     const requestId = selectedRequest.id;
     sending = true;

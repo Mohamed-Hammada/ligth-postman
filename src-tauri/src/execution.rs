@@ -277,6 +277,19 @@ pub async fn execute_request(
                 "url": redacted_url,
                 "headers": redacted_headers,
                 "body_bytes": spec.body.as_ref().map(|b| b.len()).unwrap_or(0),
+                "req_body": if let Some(b) = &spec.body {
+                    if b.len() > 5000 {
+                        format!("{}... (truncated, full size: {} bytes)", &b[..5000], b.len())
+                    } else {
+                        b.clone()
+                    }
+                } else if spec.multipart.is_some() {
+                    "[Multipart form data]".to_string()
+                } else if let Some(p) = &spec.body_file_path {
+                    format!("[Binary file: {}]", p)
+                } else {
+                    "".to_string()
+                },
                 "project_id": project_id_for_cookies,
                 "environment_id": input.environment_id,
                 "auth_type": auth_type_label,
@@ -339,6 +352,19 @@ pub async fn execute_request(
                         "status_text": res.status_text,
                         "duration_ms": res.duration_ms,
                         "body_size": res.body_size,
+                        "resp_body": match &res.body {
+                            crate::http_engine::BodyCapture::Inline(bytes) => {
+                                let text = String::from_utf8_lossy(bytes);
+                                if text.len() > 5000 {
+                                    format!("{}... (truncated, full size: {} bytes)", &text[..5000], text.len())
+                                } else {
+                                    text.into_owned()
+                                }
+                            }
+                            crate::http_engine::BodyCapture::Spilled { size, .. } => {
+                                format!("[Body spilled to disk: {} bytes]", size)
+                            }
+                        },
                         "headers": redacted_resp_headers,
                         "cookies": redacted_cookies,
                         "content_type": res.content_type,

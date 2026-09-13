@@ -331,8 +331,10 @@ export interface NewSampleResponseInput {
   request_id: string;
   name: string;
   status: number;
+  status_text: string;
   headers: HeaderEntry[];
   body?: string | null;
+  content_type?: string | null;
 }
 
 export interface UpdateSampleResponseInput {
@@ -569,7 +571,7 @@ export const api = {
     invoke<void>("delete_cookie", { id }),
 
   importCurl: (curlCommand: string) =>
-    invoke<ParsedCurlRequest>("import_curl", { curlCommand }),
+    invoke<ParsedCurlRequest>("import_curl", { command: curlCommand }),
 
   isAiConfigured: () => invoke<boolean>("is_ai_configured"),
   generateApiWithAi: (prompt: string) =>

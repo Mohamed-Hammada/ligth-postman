@@ -11,3 +11,7 @@ vite.config.ts.timestamp-*
 
 # superpowers subagent-driven-development scratch (ledgers, briefs, review packages)
 .superpowers/
+
+# Local SQLite snapshot used only by the dev-server browser mock (contains real project data)
+src/lib/browser-data.json
+app.db

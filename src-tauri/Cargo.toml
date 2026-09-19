@@ -34,7 +34,7 @@ tauri-plugin-log = "2"
 # timeouts and proxy support — chosen over hyper (too low-level, would mean reimplementing
 # redirects/TLS/proxy) and over blocking clients like ureq (would block the async runtime).
 # rustls instead of the default native-tls avoids an OpenSSL system dependency on Linux.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream", "json", "multipart"] }
 # Needed directly (not just transitively via reqwest/tauri) for task::spawn + AbortHandle
 # (request cancellation) and async file IO (large-response disk spillover).
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs", "io-util"] }

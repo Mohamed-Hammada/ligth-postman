@@ -1,0 +1,19 @@
+/* Global stylesheet entry (imported once by src/routes/+layout.svelte).
+ *
+ * The page styles used to be Svelte-scoped inside +page.svelte, which made them outrank the plain
+ * rules in app.css. Cascade layers keep exactly that precedence now that both are global:
+ * everything in `page` beats everything in `app`, whatever the selector specificity.
+ * Order inside `page` matters - later files override earlier ones. */
+@layer app, page;
+@import "../../app.css" layer(app);
+@import "./01-base.css" layer(page);
+@import "./02-topbar.css" layer(page);
+@import "./03-sidebar.css" layer(page);
+@import "./04-workbench-tabs.css" layer(page);
+@import "./05-statusbar-controls.css" layer(page);
+@import "./06-popover-workspace.css" layer(page);
+@import "./07-request-editor.css" layer(page);
+@import "./08-console-modals.css" layer(page);
+@import "./09-git.css" layer(page);
+@import "./10-ai-source-intel.css" layer(page);
+@import "./11-editor-misc.css" layer(page);

@@ -410,6 +410,12 @@ pub fn list_project_history(
 }
 
 #[tauri::command]
+pub fn clear_project_history(state: State<AppState>, project_id: String) -> Result<usize, AppError> {
+    let conn = state.db.lock().expect("db mutex poisoned");
+    response_store::clear_history_for_project(&conn, &project_id)
+}
+
+#[tauri::command]
 pub fn get_response(state: State<AppState>, id: String) -> Result<ResponseMeta, AppError> {
     let conn = state.db.lock().expect("db mutex poisoned");
     response_store::get_response(&conn, &id)
@@ -1072,6 +1078,52 @@ pub async fn get_github_repo_info(
     repo: String,
 ) -> Result<crate::github_auth::GitHubRepoInfo, AppError> {
     crate::github_auth::GitHubService::get_repo_info(&token, &owner, &repo).await
+}
+
+/// Repo coordinates + token for a workspace's Git sync, as needed to call the GitHub API.
+fn workspace_github_target(
+    state: &State<AppState>,
+    workspace_id: &str,
+) -> Result<(String, String, String), AppError> {
+    let settings = {
+        let conn = state.db.lock().expect("db mutex poisoned");
+        crate::git_sync::get_workspace_git_settings(&conn, workspace_id)?
+    }
+    .ok_or_else(|| AppError::Validation("Set up Git sync for this workspace first (Git panel)".into()))?;
+    let remote = settings
+        .remote_url
+        .filter(|r| !r.trim().is_empty())
+        .ok_or_else(|| AppError::Validation("This workspace has no Git remote configured yet".into()))?;
+    let (owner, repo) = crate::github_auth::parse_github_remote(&remote)
+        .ok_or_else(|| AppError::Validation("The workspace's Git remote isn't a GitHub repository".into()))?;
+    let token = settings
+        .github_token
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| AppError::Validation("Add a GitHub token in the Git panel to manage collaborators".into()))?;
+    Ok((owner, repo, token))
+}
+
+/// Invites a GitHub user to the workspace's sync repository as viewer / collaborator / admin.
+#[tauri::command]
+pub async fn invite_workspace_collaborator(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    username: String,
+    role: String,
+) -> Result<crate::github_auth::InviteResult, AppError> {
+    let username = crate::github_auth::validate_github_username(&username)?;
+    let role = crate::github_auth::CollaboratorRole::parse(&role)?;
+    let (owner, repo, token) = workspace_github_target(&state, &workspace_id)?;
+    crate::github_auth::GitHubService::invite_collaborator(&token, &owner, &repo, &username, role).await
+}
+
+#[tauri::command]
+pub async fn list_workspace_collaborators(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Vec<crate::github_auth::GitHubCollaborator>, AppError> {
+    let (owner, repo, token) = workspace_github_target(&state, &workspace_id)?;
+    crate::github_auth::GitHubService::list_collaborators(&token, &owner, &repo).await
 }
 
 #[tauri::command]

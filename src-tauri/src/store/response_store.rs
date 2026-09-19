@@ -234,6 +234,17 @@ pub fn delete_disk_files_for_request(conn: &Connection, request_id: &str) -> Res
     Ok(())
 }
 
+/// Wipes every saved response for the project's requests (its "history"), spilled body files
+/// included. Requests themselves are untouched. Returns how many responses were removed.
+pub fn clear_history_for_project(conn: &Connection, project_id: &str) -> Result<usize, AppError> {
+    delete_disk_files_for_project(conn, project_id)?;
+    let removed = conn.execute(
+        "DELETE FROM responses WHERE request_id IN (SELECT id FROM requests WHERE project_id = ?1)",
+        params![project_id],
+    )?;
+    Ok(removed)
+}
+
 pub fn delete_disk_files_for_project(conn: &Connection, project_id: &str) -> Result<(), AppError> {
     let mut stmt = conn.prepare(
         "SELECT r.body_path FROM responses r
@@ -346,6 +357,32 @@ mod tests {
         assert_eq!(history[0].request_name, "Get");
         assert_eq!(history[0].method, "GET");
         assert_eq!(history[0].status, 200);
+    }
+
+    #[test]
+    fn clear_history_only_removes_the_given_projects_responses() {
+        let conn = db::open_in_memory().unwrap();
+        let (project_id, request_id) = seed_request(&conn);
+        let (other_project, other_request) = seed_request(&conn);
+        for rid in [&request_id, &other_request] {
+            create_response(
+                &conn,
+                NewResponseInput {
+                    request_id: rid.clone(),
+                    status: 200,
+                    status_text: "OK".into(),
+                    headers: vec![],
+                    duration_ms: 1,
+                    body_size: 1,
+                    body: BodyCapture::Inline(b"x".to_vec()),
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(clear_history_for_project(&conn, &project_id).unwrap(), 1);
+        assert!(list_history_for_project(&conn, &project_id, 200).unwrap().is_empty());
+        assert_eq!(list_history_for_project(&conn, &other_project, 200).unwrap().len(), 1);
     }
 
     #[test]

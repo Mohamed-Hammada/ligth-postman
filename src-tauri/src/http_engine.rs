@@ -35,7 +35,7 @@ pub struct HttpRequestSpec {
     pub settings: Option<RequestSettings>,
 }
 
-pub fn build_configured_client(settings: &RequestSettings) -> Result<Client, AppError> {
+pub fn build_configured_client(settings: &RequestSettings, url: &str) -> Result<Client, AppError> {
     let mut builder = reqwest::Client::builder();
 
     if settings.verify_ssl == Some(false) {
@@ -62,7 +62,16 @@ pub fn build_configured_client(settings: &RequestSettings) -> Result<Client, App
     if let Some(ver) = &settings.http_version {
         if ver == "HTTP/1.1" {
             builder = builder.http1_only();
+        } else if ver == "HTTP/2" && url.starts_with("http://") {
+            // Plain-text HTTP/2 (h2c) only ever happens via prior knowledge — there's no ALPN
+            // negotiation to fall back on like there is over TLS, so without this the server
+            // just gets HTTP/1.1 no matter what the user picked.
+            builder = builder.http2_prior_knowledge();
         }
+        // For https:// targets, HTTP/2 is negotiated automatically via TLS ALPN whenever the
+        // server supports it — no explicit opt-in needed now that the "http2" reqwest feature
+        // is enabled (see Cargo.toml). Forcing http2_prior_knowledge() over TLS would break
+        // ALPN negotiation instead of helping it.
     }
 
     builder
@@ -110,7 +119,7 @@ pub async fn execute(
             || settings.proxy_url.is_some()
             || settings.http_version.is_some()
         {
-            Some(build_configured_client(settings)?)
+            Some(build_configured_client(settings, &spec.url)?)
         } else {
             None
         }
@@ -635,14 +644,29 @@ mod tests {
             proxy_url: None,
             http_version: Some("HTTP/1.1".into()),
         };
-        let client = build_configured_client(&settings);
+        let client = build_configured_client(&settings, "https://example.com/");
         assert!(client.is_ok(), "configured client should build successfully");
 
         let bad_proxy = RequestSettings {
             proxy_url: Some("invalid proxy URI %%".into()),
             ..Default::default()
         };
-        let err_client = build_configured_client(&bad_proxy);
+        let err_client = build_configured_client(&bad_proxy, "https://example.com/");
         assert!(matches!(err_client, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn build_configured_client_forces_h2_prior_knowledge_only_for_plain_http() {
+        let http2_settings = RequestSettings {
+            http_version: Some("HTTP/2".into()),
+            ..Default::default()
+        };
+        // Plain-text h2c target: forcing prior knowledge is the only way HTTP/2 ever happens.
+        let cleartext_client = build_configured_client(&http2_settings, "http://127.0.0.1:8080/");
+        assert!(cleartext_client.is_ok());
+        // https:// target: must NOT force prior knowledge (that would break normal TLS/ALPN
+        // negotiation) — plain client build should still succeed.
+        let tls_client = build_configured_client(&http2_settings, "https://example.com/");
+        assert!(tls_client.is_ok());
     }
 }

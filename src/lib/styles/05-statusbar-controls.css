@@ -1,0 +1,399 @@
+/* ---------- App Status Bar ---------- */
+.app-status-bar {
+  height: 26px;
+  background: #181818;
+  border-top: 1px solid #282828;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  font-size: 11px;
+  color: #8c8c8c;
+  flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
+  z-index: 90;
+}
+
+.status-left, .status-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.status-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 6px;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: #8c8c8c;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.status-btn:hover {
+  background: #242424;
+  color: #e0e0e0;
+}
+
+.status-badge-err {
+  background: rgba(235, 32, 19, 0.2);
+  color: #ff5252;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.status-badge-warn {
+  background: rgba(255, 152, 0, 0.2);
+  color: #ffb74d;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.brand {
+  font-weight: 700;
+  font-size: var(--text-md);
+  color: var(--color-primary);
+  white-space: nowrap;
+}
+
+.env-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.env-select {
+  max-width: 180px;
+}
+
+/* Postman renders the active environment as a colored pill sitting right next to the request
+   tabs — the single highest-visibility "which environment am I about to hit" signal in its
+   whole layout. Shape-only here (no functional/positional change, see `env-select-btn.active`
+   below for the color): a plain dropdown reads as "just another menu", a pill reads as status. */
+.env-select-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  border-radius: 999px;
+  padding-inline: 0.7rem;
+}
+
+.env-select-btn.active {
+  background: var(--color-warn);
+  border-color: var(--color-warn);
+  color: var(--color-bg);
+  font-weight: 600;
+}
+
+.env-select-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-picker-menu {
+  width: max-content;
+  min-width: 15rem;
+  max-width: min(28rem, calc(100vw - 2rem));
+  inset-inline-start: 0;
+  inset-inline-end: auto;
+}
+
+.env-picker-search {
+  width: 100%;
+  margin-bottom: 0.25rem;
+}
+
+.env-picker-list {
+  overflow-y: auto;
+  max-height: 16rem;
+}
+
+/* ---------- Buttons & inputs ---------- */
+button {
+  font-family: inherit;
+  font-size: var(--text-base);
+  cursor: pointer;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.7rem;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+}
+
+button:hover {
+  background: var(--color-bg-hover);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* A destructive action (clears the body with no confirm) sitting next to two harmless ones
+   ("JSON template", "Beautify") shouldn't share their exact look — stays quiet at rest, turns
+   danger-toned only on hover/focus so the warning shows up right when it matters, not before. */
+.btn-danger-ghost:hover,
+.btn-danger-ghost:focus-visible {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: var(--text-base);
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.55rem;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -1px;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.btn-ghost:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.btn-secondary {
+  background: transparent;
+  border: var(--border-strong-width) solid var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.btn-xs {
+  padding: 0.2rem 0.5rem;
+  font-size: var(--text-xs);
+}
+
+.btn-xs.active {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+/* Orange is the brand mark only (logo, "+"/add affordances) — the actual primary action
+   color in real Postman is blue (Send, and anything analogous to it). Conflating the two
+   was the biggest color mismatch against the reference. */
+.btn-primary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-primary-contrast);
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  background: var(--color-primary-hover);
+  border-color: var(--color-primary-hover);
+}
+
+.btn-save {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  background: transparent;
+  border: var(--border-strong-width) solid var(--color-border-strong);
+  white-space: nowrap;
+}
+
+.btn-save:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-tertiary);
+}
+
+/* Matches the tab pill's dirty treatment (background wash + warn color) so "this has unsaved
+   edits" reads the same way in both places instead of two different visual languages. */
+.btn-save.is-unsaved {
+  color: var(--color-warn);
+  border-color: var(--color-warn);
+  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
+}
+
+.btn-save.is-error {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+/* Send gets its own blue, independent of --color-accent — real Postman reserves its brand
+   mark (orange, here --color-primary/--color-accent) for the logo and "+"/add affordances, and
+   uses blue only for Send and its close relatives. No theme below defines --color-send, so
+   this fallback is the actual color everywhere until a theme opts in with its own. */
+.btn-send {
+  background: var(--color-send, #4c86f9);
+  border-color: var(--color-send, #4c86f9);
+  color: var(--color-send-contrast, #ffffff);
+  font-weight: 600;
+}
+
+.btn-send:hover {
+  background: var(--color-send-hover, #2f6fe0);
+  border-color: var(--color-send-hover, #2f6fe0);
+}
+
+/* Postman-style split button: Send stays one click, the attached caret reveals "Send and
+   Download" — a shared border between the two halves reads as one control, not two buttons. */
+.btn-send-group {
+  display: flex;
+}
+
+.btn-send-group .btn-send {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+  border-inline-end: none;
+}
+
+.btn-send-caret {
+  display: flex;
+  align-items: center;
+  padding: 0 0.4rem;
+  background: var(--color-send, #4c86f9);
+  border: 1px solid var(--color-send, #4c86f9);
+  border-inline-start: 1px solid color-mix(in srgb, var(--color-send-contrast, #ffffff) 30%, transparent);
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  color: var(--color-send-contrast, #ffffff);
+  height: 100%;
+}
+
+.btn-send-caret:hover {
+  background: var(--color-send-hover, #2f6fe0);
+  border-color: var(--color-send-hover, #2f6fe0);
+}
+
+.btn-cancel {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-icon-add {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #fff;
+  font-weight: 700;
+  padding: 0.35rem 0.6rem;
+  flex-shrink: 0;
+}
+
+.icon-btn {
+  background: transparent;
+  border: none;
+  padding: 0.2rem 0.35rem;
+  color: var(--color-text-tertiary);
+  border-radius: var(--radius-sm);
+}
+
+.icon-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.icon-btn.active {
+  color: var(--color-accent);
+}
+
+.btn-code-toggle {
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.icon-btn-ghost {
+  display: none;
+}
+
+/* ---------- Banners ---------- */
+.success-banner,
+.error-banner,
+.warn-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.9rem;
+  font-size: var(--text-base);
+  flex-shrink: 0;
+}
+
+/* A severity icon reads faster than the message text — success/error/warn each get a distinct
+   glyph (check / X / triangle) rather than relying on background tint alone to say what kind
+   of thing this is. Wrapped so it stays one flex item alongside the dismiss button. */
+.banner-message {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.banner-message .icon {
+  flex-shrink: 0;
+}
+
+.success-banner {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.error-banner {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.warn-banner {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+  border-radius: var(--radius-sm);
+  margin: 0.5rem 0.9rem 0;
+}
+
+.missing-vars-banner {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.missing-var-chip {
+  display: inline-block;
+  cursor: default;
+  border-bottom: 1px dotted var(--color-warn);
+}
+
+/* A plain CSS :hover popover nested inside either the banner or the (overflow-clipped) URL
+   bar would get clipped by an ancestor eventually — the URL bar's overlay in particular
+   needs real overflow-x clipping for long URLs, and CSS has no "clip X, don't clip Y" (a
+   non-"visible" axis paired with "visible" silently becomes "auto", which still clips). So
+   this is a single shared, JS-positioned, fixed-position portal instead — see
+   showMissingVarPopover/scheduleHideMissingVarPopover — rendered once at the bottom of the
+   request editor and reused by both the banner chips and the URL bar tokens.  */

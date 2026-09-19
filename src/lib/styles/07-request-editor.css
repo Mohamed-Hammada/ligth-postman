@@ -1,0 +1,988 @@
+/* ---------- Main content ---------- */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--color-bg);
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  color: var(--color-text-tertiary);
+}
+
+.empty-icon {
+  font-size: var(--text-3xl);
+  opacity: 0.5;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* ---------- Request tabs bar ---------- */
+/* Wraps the scrollable tab strip plus the fixed "N tabs" overflow trigger, so the trigger
+   stays reachable once there are more open tabs than fit — a plain horizontal scrollbar alone
+   doesn't hold up once a workspace has 100+ open tabs. */
+.request-tabs-row {
+  display: flex;
+  align-items: stretch;
+  background: var(--color-sidebar-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.request-tabs-bar {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 0;
+  padding: 0 0.4rem;
+  overflow-x: auto;
+}
+
+.tab-overflow-menu {
+  flex: none;
+  position: relative;
+  border-left: 1px solid var(--color-border);
+}
+
+.tab-overflow-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  height: 100%;
+  padding: 0 0.6rem;
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.tab-overflow-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.tab-overflow-trigger:hover {
+  color: var(--color-text);
+  background: var(--color-bg-hover);
+}
+
+.tab-overflow-menu[open] .tab-overflow-trigger {
+  color: var(--color-text);
+}
+
+.tab-overflow-list {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  min-width: 240px;
+  max-width: 320px;
+  max-height: 420px;
+  overflow-y: auto;
+  background: var(--color-panel-bg);
+  border: var(--border-strong-width) solid var(--color-border-strong);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-1);
+}
+
+.tab-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0.35rem 0.5rem;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.tab-overflow-item .request-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-overflow-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.tab-overflow-item.active {
+  background: var(--color-bg-hover);
+  font-weight: 600;
+}
+
+.request-tab-pill {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  background: transparent;
+  border: none;
+  border-right: 1px solid var(--color-border);
+  border-top: 2px solid transparent;
+  padding: 0 0.15rem 0 0.6rem;
+  max-width: 200px;
+}
+
+.request-tab-pill.active {
+  background: var(--color-bg);
+  border-top-color: var(--color-accent);
+}
+
+.request-tab-pill.dirty {
+}
+
+.request-tab-pill.dirty.active {
+}
+
+.tab-pill-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: none;
+  border: none;
+  padding: 0.45rem 0.2rem;
+  min-width: 0;
+  color: var(--color-text-secondary);
+}
+
+.request-tab-pill.active .tab-pill-btn {
+  color: var(--color-text);
+}
+
+.tab-pill-btn:hover {
+  background: none;
+  color: var(--color-text);
+}
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  max-width: 110px;
+}
+
+.dirty-dot {
+  color: var(--color-warn);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: 0;
+}
+
+.tab-close-btn {
+  background: none;
+  border: none;
+  padding: 0.15rem 0.35rem;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-2xs);
+  opacity: 0;
+}
+
+.request-tab-pill:hover .tab-close-btn {
+  opacity: 1;
+}
+
+.tab-close-btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-danger);
+}
+
+/* ---------- Request bar ---------- */
+.breadcrumb-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 0.9rem 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  min-width: 0;
+}
+
+.breadcrumb-icon {
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.breadcrumb-sep {
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+/* A request nested several folders deep (real Postman collections routinely name a folder a
+   full sentence, see the reference screenshots) would otherwise force the whole breadcrumb row
+   wider than the panel instead of just eliding the one segment that's too long. */
+.breadcrumb-folder {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+
+.breadcrumb-current {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.breadcrumb-current-btn {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.breadcrumb-current-btn:hover {
+  background: var(--color-bg-hover);
+}
+
+.breadcrumb-edit-hint {
+  opacity: 0;
+  font-size: var(--text-xs);
+}
+
+.breadcrumb-current-btn:hover .breadcrumb-edit-hint {
+  opacity: 0.6;
+}
+
+/* Flush, full-bleed strip (not a floating card) — matches the reference's request bar, which
+   sits directly in the panel with no margin/shadow/rounded card around it. */
+.request-bar {
+  padding: 0.6rem 0.9rem 0.5rem;
+  background: var(--color-panel-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.request-bar-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.request-bar-row.secondary {
+  align-items: center;
+}
+
+/* One seamless pill (method + url), like the reference — not two separate boxed
+   controls sitting side by side. */
+.url-pill {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  background: var(--color-panel-bg);
+  border: var(--border-strong-width) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  /* No overflow:hidden — the method-select/url-input children paint no background of their
+     own (they sit transparent on this pill's fill), so there's nothing to corner-clip, and
+     hiding overflow would clip the missing-variable popover that hangs below the URL bar. */
+}
+
+.url-pill:focus-within {
+  border-color: var(--color-focus);
+}
+
+.url-pill-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--color-border);
+  margin: 0.4rem 0;
+}
+
+.url-pill .method-select {
+  border: none;
+  background: transparent;
+  border-radius: 0;
+}
+
+.url-pill .url-input {
+  border: none;
+  background: transparent;
+  border-radius: 0;
+}
+
+.url-pill .url-input:focus {
+  outline: none;
+}
+
+.url-input {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+}
+
+.send-action {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.url-preview-bar {
+  padding: 0.3rem 0.9rem;
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.preview-label {
+  color: var(--color-text-tertiary);
+}
+
+code {
+  font-family: var(--font-mono);
+  background: var(--color-bg-hover);
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-base);
+}
+
+/* ---------- Editor tab strip ---------- */
+.editor-tabs {
+  display: flex;
+  gap: 1rem;
+  padding: 0 0.9rem;
+  border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+/* Shared "panel tab" grammar (.editor-tab and .response-subtab) — one consistent
+   treatment for tabs that switch a sub-view within an already-bounded panel, distinct from
+   .request-tab-pill's document-tab treatment (top border + background fill, for open
+   requests). Active state stays neutral text + a colored underline, not accent-tinted text —
+   matches how DevTools' own panel tabs (Elements/Console/Network) behave. */
+.editor-tab,
+.response-subtab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.5rem 0.7rem;
+  font-size: var(--text-base);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.editor-tab.active,
+.response-subtab.active {
+  color: var(--color-text);
+  border-bottom-color: var(--color-accent);
+  font-weight: 600;
+}
+
+.editor-tab:hover,
+.response-subtab:hover {
+  background: none;
+  color: var(--color-text);
+}
+
+.tab-badge {
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+
+.tab-badge-warn {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+
+.tab-dot {
+  color: var(--color-primary);
+}
+
+.tab-content {
+  padding: 0.8rem 0.9rem;
+}
+
+/* Request editor (top) and docked response (bottom), stacked with a draggable divider —
+   each scrolls independently instead of the old single-column layout where the response
+   was just one more thing you scrolled past below a potentially long params/headers list. */
+.editor-body-row {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editor-pane {
+  flex: 1 1 auto;
+  min-height: 80px;
+  overflow-y: auto;
+}
+
+.response-pane-resize-handle {
+  flex: none;
+  height: 7px;
+  margin: -3px 0;
+  background: transparent;
+  cursor: row-resize;
+  position: relative;
+  z-index: 1;
+}
+
+.response-pane-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--color-border);
+}
+
+.response-pane-resize-handle:hover::before,
+.response-pane-resize-handle.resizing::before {
+  top: 2px;
+  height: 3px;
+  background: var(--color-accent);
+}
+
+.response-pane-resize-handle:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+/* Same floating-card treatment as .request-bar (see comment there) — margin is horizontal
+   and bottom only, so the JS-driven `responsePaneHeight` (an explicit height, not flex-grow)
+   still governs the box's actual height without the margin skewing that math. */
+.response-pane {
+  flex: none;
+  min-height: 160px;
+  max-height: calc(100% - 80px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin: 0 0.9rem 0.9rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  background: var(--color-panel-bg);
+}
+
+.response-pane.collapsed {
+  min-height: 0;
+}
+
+.response-pane-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: none;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.response-pane.collapsed .response-pane-bar {
+  border-bottom: none;
+}
+
+.response-pane-bar-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.response-pane .response-loading,
+.response-pane .response-empty-state {
+  flex: 1;
+}
+
+.response-pane .response {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.response-pane .response-subtab-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.response-pane .body-view {
+  height: 100%;
+  max-height: none;
+}
+
+.response-preview-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 260px;
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* Docked to the right edge of the whole window (sibling of <main>, not nested in the
+   scrollable response pane) — stays visible regardless of which editor tab is open or how
+   far the request/response area is scrolled. Mirrors the left project sidebar's treatment,
+   including being resizable (width comes from the inline style, driven by
+   rightSidebarWidth) — at 340px fixed this crowded the request editor's own tabs/body-mode
+   row into needing their own horizontal scrollbar on anything short of a very wide window. */
+.right-sidebar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-left: var(--border-strong-width) solid var(--color-border-strong);
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.right-sidebar-resize-handle {
+  width: 5px;
+  flex-shrink: 0;
+  margin-right: -3px;
+  cursor: col-resize;
+  z-index: 1;
+  background: transparent;
+}
+
+.right-sidebar-resize-handle:hover,
+.right-sidebar-resize-handle.resizing {
+  background: var(--color-accent);
+}
+
+.right-sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex: none;
+  padding: var(--space-2) var(--space-2);
+  border-bottom: var(--border-strong-width) solid var(--color-border-strong);
+}
+
+/* Code is the sidebar's one real feature now (Info is a small icon toggle beside it, not an
+   equal-weight tab) — a static label reads better here than a tab control with only one
+   meaningful state. */
+.right-sidebar-title {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.35rem 0.6rem;
+  color: var(--color-text);
+  font-size: var(--text-base);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.bottom-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+  background: var(--color-panel-bg);
+}
+
+.bottom-panel .params-row {
+  flex-wrap: wrap;
+}
+
+.bottom-panel-code {
+  max-height: none;
+}
+
+.info-list-grid {
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--space-4);
+}
+
+.info-list {
+  display: grid;
+  grid-template-columns: auto;
+  row-gap: 0.5rem;
+  margin: 0;
+  font-size: var(--text-base);
+}
+
+.info-list dt {
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+  letter-spacing: 0.03em;
+  margin-bottom: 0.1rem;
+}
+
+.info-list dd {
+  color: var(--color-text);
+  margin: 0 0 0.4rem;
+  word-break: break-all;
+}
+
+/* Defensive default: any bare heading dropped into the detail/response area (e.g. new
+   feature sections not yet given their own class) inherits the same muted label style
+   as the rest of the system instead of a jarring browser-default heading. */
+.detail h3 {
+  font-size: var(--text-base);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-tertiary);
+  margin: 1rem 0.9rem 0.4rem;
+  font-weight: 700;
+}
+
+
+/* ---------- Params/headers tables ---------- */
+.params-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.params-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.params-row-spacer {
+  display: inline-block;
+  width: 14px;
+  flex: none;
+}
+
+.params-row input:not([type="checkbox"]) {
+  flex: 1;
+  min-width: 80px;
+}
+
+.radio-label,
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--text-base);
+  white-space: nowrap;
+}
+
+.radio-row {
+  display: flex;
+  gap: 1rem;
+}
+
+.body-input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  resize: vertical;
+}
+
+/* Wraps instead of forcing a horizontal scrollbar on the whole editor pane (the old behavior —
+   .editor-pane's overflow-y:auto makes overflow-x compute as auto too per spec, so unwrapped
+   content here silently grew a horizontal scrollbar affecting the entire tab body, not just
+   this row) — same pattern the Developer Console toolbar already uses for the same reason:
+   with a narrowed center pane (right sidebar open, project tree widened, etc.) five body-type
+   radios + a type select + three buttons just don't reliably fit on one line. */
+.body-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.raw-type-select {
+  max-width: 140px;
+}
+
+.graphql-editor h4,
+.params-table h4 {
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-tertiary);
+  margin: 0.3rem 0 0.1rem;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(200px, 1fr));
+  gap: 0.7rem;
+}
+
+.settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: var(--text-base);
+}
+
+.settings-row span {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.var-key {
+  font-weight: 600;
+  min-width: 100px;
+}
+
+.var-val {
+  flex: 1;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  font-size: var(--text-2xs);
+  background: var(--color-bg-hover);
+  color: var(--color-text-secondary);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+
+.badge-local {
+  background: color-mix(in srgb, var(--method-put) 16%, transparent);
+  color: var(--method-put);
+}
+
+.badge-warn {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+
+/* ---------- Response panel ---------- */
+.response {
+  padding: 0.7rem 0.9rem 1rem;
+}
+
+.response-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 0.9rem;
+  color: var(--color-text-secondary);
+  font-size: var(--text-base);
+}
+
+.response-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 2rem 0.9rem;
+  color: var(--color-text-tertiary);
+}
+
+.spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: var(--border-strong-width) solid var(--color-border-strong);
+  border-top-color: var(--color-accent);
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.response-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding-bottom: 0.6rem;
+}
+
+.response-stat-status {
+  font-weight: 700;
+  font-size: var(--text-md);
+}
+
+.response-stat-item {
+  font-size: var(--text-base);
+  color: var(--color-text-secondary);
+}
+
+.response-stat-label {
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  font-size: var(--text-2xs);
+  letter-spacing: 0.03em;
+  margin-right: 0.2rem;
+}
+
+.response-stat-spacer {
+  flex: 1;
+}
+
+.status-ok { color: var(--color-success); }
+.status-err { color: var(--color-danger); }
+
+.response-subtabs {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+.response-subtab,
+.response-format-toggle {
+  flex-shrink: 0;
+}
+
+/* .response-subtab base + hover + active styles live with .editor-tab above (shared panel-tab
+   grammar). */
+
+.response-subtab-content {
+  padding-top: 0.6rem;
+}
+
+.response-format-toggle {
+  display: flex;
+  gap: 2px;
+  background: var(--color-bg-hover);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  margin-left: auto;
+}
+
+.btn-toggle {
+  border: none;
+  background: none;
+  padding: 0.2rem 0.6rem;
+  font-size: var(--text-xs);
+  border-radius: var(--radius-sm);
+}
+
+.btn-toggle.active {
+  background: var(--color-bg);
+  box-shadow: var(--shadow-sm);
+  font-weight: 600;
+}
+
+.test-results-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.test-result-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: var(--text-base);
+  padding: 0.25rem 0;
+}
+
+.test-result-icon {
+  font-weight: 700;
+  width: 1rem;
+  flex-shrink: 0;
+}
+
+.test-pass .test-result-icon { color: var(--color-success); }
+.test-fail .test-result-icon { color: var(--color-danger); }
+
+.test-result-name {
+  color: var(--color-text);
+}
+
+.test-result-error {
+  color: var(--color-danger);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.headers-list {
+  padding: 0.3rem 0 0.3rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.header-line {
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.body-view {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.7rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.json-key { color: var(--json-key); }
+.json-string { color: var(--json-string); }
+.json-number { color: var(--json-number); }
+.json-boolean { color: var(--json-boolean); }
+.json-null { color: var(--json-null); font-style: italic; }
+
+.response-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.response-history-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 0.35rem 0.2rem;
+  color: var(--color-text);
+  font-size: var(--text-base);
+  cursor: pointer;
+}
+
+.response-history-row:hover {
+  background: var(--color-bg-hover);
+}
+
+.response-history-duration { font-weight: 500; }
+.response-history-time { color: var(--color-text-tertiary); }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { iconSearch, iconBell, iconHome, iconUser, iconArrowLeft, iconArrowRight, iconCube, iconClose, iconCheck, iconCheckCircle, iconXCircle, iconTrash, iconEdit, iconWarning, iconInfo, iconMoreVertical, iconMenu, iconFolder, iconFolderOpen, iconFolderPlus, iconGlobe, iconImport, iconEye, iconLock, iconGitBranch, iconMonitor, iconGrid, iconLayout, iconSidebar, iconClock, iconSettings, iconSparkle, iconInboxEmpty, iconFileText, iconSave, iconStar, iconChevronRight, iconChevronLeft, iconChevronDown, iconChevronUp, iconExpandAll, iconCollapseAll, iconCopy, iconExpandDiagonal, iconCompressDiagonal, iconMinus, iconArrowUp, iconArrowDown, railScreenIcon } from "$lib/components/icons.svelte";
   import { onMount, tick } from "svelte";
   import { translate, RTL_LOCALES, type Locale } from "$lib/i18n";
   import {
@@ -68,6 +69,142 @@
   // There's always at least one (the backend seeds/protects a 'default' workspace), so
   // activeWorkspaceId only stays null for the instant before the first load resolves.
   let workspaces = $state<Workspace[]>([]);
+  let sidebarSection = $state<"collections" | "environments" | "history" | "mocks" | "specs" | "projects">("collections");
+  let collectionsAccordionOpen = $state(true);
+  let environmentsAccordionOpen = $state(false);
+  let documentsAccordionOpen = $state(false);
+  let specsAccordionOpen = $state(false);
+  let mocksAccordionOpen = $state(false);
+  let datasetsAccordionOpen = $state(false);
+  let flowsAccordionOpen = $state(false);
+
+  // Customizable sidebar section visibility ("only collection/environment/dataset used, others hidden in a view menu")
+  let sidebarSectionsVisible = $state({
+    collections: true,
+    environments: true,
+    datasets: true,
+    documents: false,
+    specs: false,
+    mocks: false,
+    flows: false,
+  });
+  let sidebarViewMenuOpen = $state(false);
+
+  if (typeof localStorage !== "undefined") {
+    try {
+      const saved = localStorage.getItem("lp_sidebar_sections_visibility");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        sidebarSectionsVisible = { ...sidebarSectionsVisible, ...parsed };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function toggleSidebarSectionVisibility(section: keyof typeof sidebarSectionsVisible) {
+    sidebarSectionsVisible[section] = !sidebarSectionsVisible[section];
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("lp_sidebar_sections_visibility", JSON.stringify(sidebarSectionsVisible));
+      } catch {}
+    }
+  }
+  let notificationsOpen = $state(false);
+  let accountMenuOpen = $state(false);
+  let envForkCount = $state(0);
+  let sendOptionsOpen = $state(false);
+  let saveOptionsOpen = $state(false);
+  let showSnippetSettings = $state(false);
+  let showInviteModal = $state(false);
+  let inviteEmail = $state("");
+  let inviteRole = $state("editor");
+  let showUpgradeModal = $state(false);
+  let snippetIndentType = $state<"space" | "tab">("space");
+  let snippetTrimTrailing = $state(true);
+
+  const sampleDocuments = [
+    { id: "doc-overview", name: "API Reference Overview" },
+    { id: "doc-auth", name: "Authentication & Security Guide" },
+    { id: "doc-remittance", name: "Remittance & Payment Flow" },
+    { id: "doc-changelog", name: "Release Notes & Changelog" },
+  ];
+
+  const sampleSpecs = [
+    { id: "spec-openapi", name: "openapi.json (OpenAPI 3.1)" },
+    { id: "spec-swagger", name: "auth-service.yaml (Swagger 2.0)" },
+    { id: "spec-remittance", name: "remittance-v2-schema.json" },
+  ];
+
+  const sampleMockServers = [
+    { id: "mock-local", name: "Local Mock Server (Port 8080)" },
+    { id: "mock-auth-200", name: "200 OK - Success Sample Mock" },
+    { id: "mock-auth-401", name: "401 Unauthorized Error Mock" },
+    { id: "mock-card-200", name: "200 OK - Card Transaction Response" },
+  ];
+
+  const sampleDatasets = [
+    { id: "data-users", name: "users-test-data.json" },
+    { id: "data-payments", name: "payments-batch.csv" },
+  ];
+
+  const sampleFlows = [
+    { id: "flow-login", name: "User Login & Token Exchange Flow" },
+    { id: "flow-onboard", name: "Card Onboarding & PIN Setup Flow" },
+    { id: "flow-topup", name: "Batch Remittance & Poll Flow" },
+  ];
+
+  const sampleDocContent = `# API Reference Overview
+
+## Base URL
+- Production: \`https://api.alansari.ae/v1\`
+- UAT / Staging: \`https://aaeuat.alansari.ae:19443/FintechGateway\`
+- Sandbox: \`https://api-sandbox.network.global\`
+
+## Authentication
+All requests must include a valid session token obtained from \`/api/v1/auth/login\` and verified via SMS OTP at \`/api/v1/auth/validate-otp\`.
+
+## Endpoints
+1. \`POST /api/v1/auth/login\` - Authenticates mobile number and encrypted PIN.
+2. \`POST /api/v1/auth/validate-otp\` - Confirms SMS one-time passcode.
+3. \`POST /api/v1/card/setCardCon\` - Updates user debit/credit card parameters.
+4. \`POST /api/v1/card/transaction\` - Submits an instant remittance payment order.
+5. \`POST /api/v1/wps/topup\` - Performs top-up on registered WPS salary accounts.
+`;
+
+  const sampleOpenApiJson = JSON.stringify({
+    openapi: "3.1.0",
+    info: {
+      title: "Ansari Remittance & Payment Gateway API",
+      version: "2.4.0",
+      description: "High-throughput financial exchange & transaction services."
+    },
+    servers: [
+      { url: "https://aaeuat.alansari.ae:19443/FintechGateway", description: "UAT Gateway" },
+      { url: "https://api-sandbox.network.global", description: "Global Sandbox" }
+    ],
+    paths: {
+      "/api/v1/auth/login": {
+        post: {
+          summary: "Authenticate user and issue session token",
+          responses: { "200": { description: "Successful login response" } }
+        }
+      },
+      "/api/v1/auth/validate-otp": {
+        post: {
+          summary: "Validate SMS OTP",
+          responses: { "200": { description: "Device verification confirmed" } }
+        }
+      },
+      "/api/v1/card/transaction": {
+        post: {
+          summary: "Initiate Card Remittance",
+          responses: { "200": { description: "Transaction completed" } }
+        }
+      }
+    }
+  }, null, 2);
+
   let activeWorkspaceId = $state<string | null>(null);
   let workspacePickerOpen = $state(false);
   async function loadWorkspaces() {
@@ -172,7 +309,7 @@
   // Flat (non-nested) folders — a request either sits directly under its project or under one
   // folder in that project (see models::Folder on the backend).
   let folders = $state<Folder[]>([]);
-  let expandedFolderIds = $state<Set<string>>(new Set());
+  let expandedFolderIds = $state<Set<string>>(new Set(["folder-auth-flow"]));
   let renamingFolderId = $state<string | null>(null);
   let renameFolderValue = $state("");
 
@@ -225,6 +362,11 @@
     }
     return filtered;
   });
+  let envPickerFilteredEnvironments = $derived.by(() => {
+    const q = envPickerQuery.trim().toLocaleLowerCase();
+    if (!q) return allEnvironments;
+    return allEnvironments.filter((e) => e.name.toLocaleLowerCase().includes(q));
+  });
   function openEnvPicker() {
     envPickerQuery = "";
     envPickerOpen = true;
@@ -233,6 +375,9 @@
     selectedEnvironmentId = id;
     envPickerOpen = false;
     loadVariables();
+    if (id && !expandedEnvIds.has(id)) {
+      toggleEnvExpand(id);
+    }
   }
   let renamingEnvironmentId = $state<string | null>(null);
   let renameEnvironmentValue = $state("");
@@ -635,10 +780,31 @@
 
   let exportFeedback = $state("");
 
+  async function exportGlobalVariables() {
+    try {
+      const data = {
+        name: "Globals",
+        values: projectVariables.map((v) => ({ key: v.key, value: v.value, enabled: v.enabled })),
+        _postman_variable_scope: "globals",
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `globals-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      exportFeedback = "Globals exported!";
+      setTimeout(() => (exportFeedback = ""), 2000);
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
   let snippetMode = $state<SnippetMode>("placeholder");
   // Windows CMD curl by default — this app's dev/target environment is Windows; anything else
   // is one click away in the same dropdown.
-  let snippetTarget = $state<SnippetTarget>("windows_cmd");
+  let snippetTarget = $state<SnippetTarget>("bash");
   let snippet = $state("");
   let snippetError = $state("");
   let snippetLoading = $state(false);
@@ -809,12 +975,45 @@
   // Minimized down to a thin status bar (not the same as a small resized height — collapse
   // remembers the full height underneath and restores it exactly on expand).
   let responsePaneCollapsed = $state(false);
+  let responsePaneMaximized = $state(false);
   function setResponsePaneCollapsed(value: boolean) {
     responsePaneCollapsed = value;
+    if (value) responsePaneMaximized = false;
     try {
       localStorage.setItem("lp-response-pane-collapsed", String(value));
     } catch {
       // collapsed state just won't persist across restarts
+    }
+  }
+
+  async function handleWindowMinimize() {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().minimize();
+    } catch {
+      // Browser fallback
+    }
+  }
+
+  async function handleWindowMaximize() {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().toggleMaximize();
+    } catch {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+  }
+
+  async function handleWindowClose() {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().close();
+    } catch {
+      window.close();
     }
   }
 
@@ -824,11 +1023,16 @@
     responsePaneManuallyResized = true;
     const startY = e.clientY;
     const startHeight = responsePaneHeight;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "ns-resize";
     const onMove = (ev: MouseEvent) => {
-      responsePaneHeight = Math.min(window.innerHeight - 220, Math.max(160, startHeight - (ev.clientY - startY)));
+      const delta = startY - ev.clientY;
+      responsePaneHeight = Math.min(window.innerHeight - 160, Math.max(100, startHeight + delta));
     };
     const onUp = () => {
       responsePaneResizing = false;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
@@ -861,7 +1065,7 @@
   // Screen navigation shell — a real left-rail switcher between full-page screens. Each
   // screen reuses the exact same state/functions the old modal-based UI used; nothing here
   // introduces a second source of truth for projects/requests/environments/git/etc.
-  type ScreenId = "workspace" | "environments" | "git" | "launcher" | "history" | "settings";
+  type ScreenId = "workspace" | "environments" | "globals" | "git" | "launcher" | "history" | "settings";
   let activeScreen = $state<ScreenId>("workspace");
   // `label` stores an i18n key (see SHORTCUT_DEFS above for why) — resolve via t(s.label).
   const SCREENS: { id: ScreenId; label: string }[] = [
@@ -883,6 +1087,7 @@
   // collapsing; a user who expands it gets that choice remembered via lp-rail-visible below.
   let screensRailVisible = $state(false);
   let rightSidebarVisible = $state(true);
+  let utilityRailVisible = $state(true);
 
   function setSidebarVisible(v: boolean) {
     sidebarVisible = v;
@@ -895,6 +1100,10 @@
   function setRightSidebarVisible(v: boolean) {
     rightSidebarVisible = v;
     try { localStorage.setItem("lp-right-sidebar-visible", String(v)); } catch {}
+  }
+  function setUtilityRailVisible(v: boolean) {
+    utilityRailVisible = v;
+    try { localStorage.setItem("lp-utility-rail-visible", String(v)); } catch {}
   }
   // The full-detail response view (stat sidebar, tests, bigger body) used to be its own rail
   // screen, but it's meaningless without Workspace's request context — it's now an expand
@@ -911,7 +1120,7 @@
     { id: "terminal", label: "theme.terminal" },
     { id: "blueprint", label: "theme.blueprint" },
   ];
-  let themeMode = $state<ThemeMode>("light");
+  let themeMode = $state<ThemeMode>("dark");
 
   // Real, user-adjustable auto-sync interval (Settings screen) — previously a hardcoded 60000ms
   // literal with no way to change it. Persisted so it survives a restart.
@@ -1221,19 +1430,195 @@
   let historySearchQuery = $state("");
   let historyShowFailuresOnly = $state(false);
   async function refreshProjectHistory() {
-    if (!selectedProjectId) {
-      projectHistory = [];
-      return;
-    }
     historyLoading = true;
     try {
-      projectHistory = await api.listProjectHistory(selectedProjectId, 200);
+      const pid = selectedProjectId || (projects[0]?.id ?? "proj-default");
+      const list = await api.listProjectHistory(pid, 200);
+      projectHistory = Array.isArray(list) ? list : [];
     } catch (err) {
       errorMessage = describeError(err);
+      projectHistory = [];
     } finally {
       historyLoading = false;
     }
   }
+  async function clearHistory() {
+    projectHistory = [];
+    try {
+      const pid = selectedProjectId || (projects[0]?.id ?? "proj-default");
+      await api.clearProjectHistory(pid);
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  // Favorite environments (global / workspace-level for all projects)
+  let favoriteEnvIds = $state<string[]>((() => {
+    try {
+      const saved = localStorage.getItem("lp-global-fav-envs");
+      if (saved) return JSON.parse(saved);
+      // Fallback/migrate from legacy per-project storage:
+      const legacy = localStorage.getItem("lp-project-fav-envs");
+      if (legacy) {
+        const parsed = JSON.parse(legacy);
+        const set = new Set<string>();
+        Object.values(parsed).forEach((arr: any) => {
+          if (Array.isArray(arr)) arr.forEach((id) => set.add(id));
+        });
+        return Array.from(set);
+      }
+      return [];
+    } catch {
+      return [];
+    }
+  })());
+
+  function isEnvFavorite(envId: string): boolean {
+    return favoriteEnvIds.includes(envId);
+  }
+
+  function toggleEnvFavorite(envId: string) {
+    const current = [...favoriteEnvIds];
+    const idx = current.indexOf(envId);
+    if (idx >= 0) {
+      current.splice(idx, 1);
+    } else {
+      current.push(envId);
+    }
+    favoriteEnvIds = current;
+    try {
+      localStorage.setItem("lp-global-fav-envs", JSON.stringify(favoriteEnvIds));
+    } catch {
+      // ignore
+    }
+  }
+
+  let favoriteEnvs = $derived.by(() => {
+    return allEnvironments.filter((e) => isEnvFavorite(e.id));
+  });
+
+  // Sidebar environment variable expansion ("see key values at the left side")
+  let expandedEnvIds = $state<Set<string>>(new Set());
+  let envVariablesCache = $state<Map<string, VariableView[]>>(new Map());
+
+  // Environments Sidebar Search (All / Name / Key / Values)
+  let envSidebarSearchQuery = $state("");
+  let envSidebarSearchScope = $state<"all" | "name" | "key" | "values">("all");
+  let envVariablesLoading = $state(false);
+
+  async function ensureAllEnvVariablesLoaded() {
+    if (allEnvironments.length === 0) return;
+    const missing = allEnvironments.filter((e) => !envVariablesCache.has(e.id));
+    if (missing.length === 0) return;
+    envVariablesLoading = true;
+    try {
+      const results = await Promise.all(
+        missing.map(async (env) => {
+          try {
+            const vars = await api.listVariablesForScope("environment", env.id);
+            return { id: env.id, vars };
+          } catch {
+            return { id: env.id, vars: [] };
+          }
+        })
+      );
+      for (const res of results) {
+        envVariablesCache.set(res.id, res.vars);
+      }
+      envVariablesCache = new Map(envVariablesCache);
+    } finally {
+      envVariablesLoading = false;
+    }
+  }
+
+  let filteredSidebarEnvironments = $derived.by(() => {
+    const q = envSidebarSearchQuery.trim().toLowerCase();
+    if (!q) return allEnvironments;
+
+    return allEnvironments.filter((env) => {
+      const nameMatches = env.name.toLowerCase().includes(q);
+      if (envSidebarSearchScope === "name") {
+        return nameMatches;
+      }
+
+      const vars = envVariablesCache.get(env.id) || [];
+      const keyMatches = vars.some((v) => v.key.toLowerCase().includes(q));
+      if (envSidebarSearchScope === "key") {
+        return keyMatches;
+      }
+
+      const valMatches = vars.some((v) => (v.value || "").toLowerCase().includes(q));
+      if (envSidebarSearchScope === "values") {
+        return valMatches;
+      }
+
+      // "all"
+      return nameMatches || keyMatches || valMatches;
+    });
+  });
+
+  let filteredSidebarFavoriteEnvs = $derived.by(() => {
+    return filteredSidebarEnvironments.filter((e) => isEnvFavorite(e.id));
+  });
+
+  async function toggleEnvExpand(envId: string) {
+    const next = new Set(expandedEnvIds);
+    if (next.has(envId)) {
+      next.delete(envId);
+    } else {
+      next.add(envId);
+      if (!envVariablesCache.has(envId)) {
+        try {
+          const vars = await api.listVariablesForScope("environment", envId);
+          envVariablesCache.set(envId, vars);
+          envVariablesCache = new Map(envVariablesCache);
+        } catch {
+          // ignore
+        }
+      }
+    }
+    expandedEnvIds = next;
+  }
+
+  let filteredEnvironments = $derived.by(() => {
+    const q = envSearchQuery.trim().toLowerCase();
+    if (!q) return allEnvironments;
+    return allEnvironments.filter((e) => e.name.toLowerCase().includes(q));
+  });
+
+  let activeWorkspace = $derived.by(() => {
+    return workspaces.find((w) => w.id === activeWorkspaceId) ?? workspaces[0] ?? null;
+  });
+
+  function formatRelativeTime(iso: string): string {
+    try {
+      const diff = Date.now() - new Date(iso).getTime();
+      if (diff < 60000) return "Just now";
+      if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+      if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+      return new Date(iso).toLocaleDateString();
+    } catch {
+      return iso;
+    }
+  }
+
+  async function duplicateEnvironment(env: Environment) {
+    try {
+      const newEnv = await api.createEnvironment({
+        project_id: env.project_id,
+        name: `${env.name} Copy`
+      });
+      allEnvironments = [...allEnvironments, newEnv];
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  function openGlobalsTab() {
+    loadVariables();
+    activeScreen = "globals";
+  }
+
   let filteredProjectHistory = $derived.by(() => {
     const q = historySearchQuery.trim().toLocaleLowerCase();
     return projectHistory.filter((h) => {
@@ -1410,7 +1795,7 @@
 
   let aiConfigured = $state(false);
   let showAiPanel = $state(false);
-  let rightPanel = $state<"code" | "info" | null>(null);
+  let rightPanel = $state<"code" | "variables" | "info" | "ai" | "comments" | null>(null);
   let aiActiveTab = $state<"generate" | "source" | "settings">("generate");
   let aiPrompt = $state("");
   let aiGenerating = $state(false);
@@ -1502,6 +1887,9 @@
     id: string;
     name: string;
     method: string;
+    tabType?: "request" | "env" | "doc" | "spec" | "mock" | "dataset" | "flow";
+    envId?: string;
+    data?: any;
   }
 
   interface RequestDraft {
@@ -1540,6 +1928,17 @@
   }
 
   let openTabs = $state<RequestTab[]>([]);
+  let activeTabId = $state<string | null>(null);
+  let drawerVarSearch = $state("");
+  let globalsSearch = $state("");
+  let drawerFilteredVariables = $derived.by(() => {
+    const q = drawerVarSearch.trim().toLowerCase();
+    const envVars = (environmentVariables || []).map((v) => ({ ...v, scopeTag: "E" as const }));
+    const globVars = (projectVariables || []).map((v) => ({ ...v, scopeTag: "G" as const }));
+    const combined = [...envVars, ...globVars];
+    if (!q) return combined;
+    return combined.filter((v) => v.key.toLowerCase().includes(q) || v.value.toLowerCase().includes(q));
+  });
   const tabDrafts = new Map<string, RequestDraft>();
 
   $effect(() => {
@@ -1597,7 +1996,7 @@
   type SortDir = "asc" | "desc";
   let projectSortField = $state<ProjectSortField>("name");
   let projectSortDir = $state<SortDir>("asc");
-  let requestSortField = $state<RequestSortField>("name");
+  let requestSortField = $state<RequestSortField>("custom");
   let requestSortDir = $state<SortDir>("asc");
 
   function setProjectSortField(field: ProjectSortField) {
@@ -2028,61 +2427,65 @@
   // hydration, since it always reads from the (possibly slightly stale) object being assigned.
   let hydratedRequestId: string | null = null;
 
+  function hydrateRequestFields(req: RequestFull) {
+    editName = req.name;
+    editMethod = req.method;
+    editUrl = req.url;
+    editHeaders = withTrailingEmptyRow(req.headers.map((h) => ({ ...h })), () => ({ key: "", value: "", enabled: true, description: "" }));
+    editQueryParams = withTrailingEmptyRow(req.query_params.map((p) => ({ ...p })), () => ({ key: "", value: "", enabled: true }));
+    const parsedBody = parseBodyForEditing(req.body);
+    editBodyType = parsedBody.bodyType;
+    editBody = parsedBody.rawBody;
+    editGraphqlQuery = parsedBody.graphqlQuery;
+    editGraphqlVariables = parsedBody.graphqlVariables;
+    editFormDataItems = withTrailingEmptyRow(parsedBody.formDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
+    editUrlEncodedItems = withTrailingEmptyRow(parsedBody.urlEncodedItems, () => ({ key: "", value: "", enabled: true }));
+    editBinaryFilePath = parsedBody.binaryFilePath;
+    editDescription = req.description ?? "";
+
+    // A request with a body someone actually filled in opens straight to Body — better
+    // than always landing on Params and making the user go find it every time.
+    const bodyHasContent =
+      (parsedBody.bodyType === "raw" && parsedBody.rawBody.trim().length > 0) ||
+      (parsedBody.bodyType === "graphql" && parsedBody.graphqlQuery.trim().length > 0) ||
+      (parsedBody.bodyType === "form-data" && parsedBody.formDataItems.some((i) => i.key.trim())) ||
+      (parsedBody.bodyType === "x-www-form-urlencoded" && parsedBody.urlEncodedItems.some((i) => i.key.trim())) ||
+      (parsedBody.bodyType === "binary" && parsedBody.binaryFilePath.trim().length > 0);
+    activeEditorTab = bodyHasContent ? "body" : "params";
+
+    const auth = req.auth;
+    editAuthType = auth.type;
+    editAuthBearerToken = auth.type === "bearer" ? auth.token : "";
+    editAuthBasicUsername = auth.type === "basic" ? auth.username : "";
+    editAuthBasicPassword = auth.type === "basic" ? auth.password : "";
+    editAuthApiKeyKey = auth.type === "api_key" ? auth.key : "";
+    editAuthApiKeyValue = auth.type === "api_key" ? auth.value : "";
+    editAuthApiKeyLocation = auth.type === "api_key" ? auth.location : "header";
+
+    // Scripts
+    editPreScript = req.pre_request_script ?? "";
+    editPostScript = req.post_request_script ?? "";
+
+    // Settings
+    const settings = req.settings;
+    editTimeoutMs = settings?.timeout_ms ?? null;
+    editFollowRedirects = settings?.follow_redirects ?? true;
+    editMaxRedirects = settings?.max_redirects ?? 10;
+    editVerifySsl = settings?.verify_ssl ?? true;
+    editProxyUrl = settings?.proxy_url ?? "";
+    editHttpVersion = settings?.http_version ?? "";
+
+    snippet = "";
+    snippetError = "";
+    autoSaveStatus = "saved";
+    curlDetectedFeedback = "";
+  }
+
   $effect(() => {
     if (selectedRequest && selectedRequest.id !== hydratedRequestId) {
       hydratedRequestId = selectedRequest.id;
       if (!tabDrafts.has(selectedRequest.id)) {
-        editName = selectedRequest.name;
-        editMethod = selectedRequest.method;
-        editUrl = selectedRequest.url;
-        editHeaders = withTrailingEmptyRow(selectedRequest.headers.map((h) => ({ ...h })), () => ({ key: "", value: "", enabled: true, description: "" }));
-        editQueryParams = withTrailingEmptyRow(selectedRequest.query_params.map((p) => ({ ...p })), () => ({ key: "", value: "", enabled: true }));
-        const parsedBody = parseBodyForEditing(selectedRequest.body);
-        editBodyType = parsedBody.bodyType;
-        editBody = parsedBody.rawBody;
-        editGraphqlQuery = parsedBody.graphqlQuery;
-        editGraphqlVariables = parsedBody.graphqlVariables;
-        editFormDataItems = withTrailingEmptyRow(parsedBody.formDataItems, () => ({ key: "", value: "", enabled: true, is_file: false, file_path: null }));
-        editUrlEncodedItems = withTrailingEmptyRow(parsedBody.urlEncodedItems, () => ({ key: "", value: "", enabled: true }));
-        editBinaryFilePath = parsedBody.binaryFilePath;
-        editDescription = selectedRequest.description ?? "";
-
-        // A request with a body someone actually filled in opens straight to Body — better
-        // than always landing on Params and making the user go find it every time.
-        const bodyHasContent =
-          (parsedBody.bodyType === "raw" && parsedBody.rawBody.trim().length > 0) ||
-          (parsedBody.bodyType === "graphql" && parsedBody.graphqlQuery.trim().length > 0) ||
-          (parsedBody.bodyType === "form-data" && parsedBody.formDataItems.some((i) => i.key.trim())) ||
-          (parsedBody.bodyType === "x-www-form-urlencoded" && parsedBody.urlEncodedItems.some((i) => i.key.trim())) ||
-          (parsedBody.bodyType === "binary" && parsedBody.binaryFilePath.trim().length > 0);
-        activeEditorTab = bodyHasContent ? "body" : "params";
-
-        const auth = selectedRequest.auth;
-        editAuthType = auth.type;
-        editAuthBearerToken = auth.type === "bearer" ? auth.token : "";
-        editAuthBasicUsername = auth.type === "basic" ? auth.username : "";
-        editAuthBasicPassword = auth.type === "basic" ? auth.password : "";
-        editAuthApiKeyKey = auth.type === "api_key" ? auth.key : "";
-        editAuthApiKeyValue = auth.type === "api_key" ? auth.value : "";
-        editAuthApiKeyLocation = auth.type === "api_key" ? auth.location : "header";
-
-        // Scripts
-        editPreScript = selectedRequest.pre_request_script ?? "";
-        editPostScript = selectedRequest.post_request_script ?? "";
-
-        // Settings
-        const settings = selectedRequest.settings;
-        editTimeoutMs = settings?.timeout_ms ?? null;
-        editFollowRedirects = settings?.follow_redirects ?? true;
-        editMaxRedirects = settings?.max_redirects ?? 10;
-        editVerifySsl = settings?.verify_ssl ?? true;
-        editProxyUrl = settings?.proxy_url ?? "";
-        editHttpVersion = settings?.http_version ?? "";
-
-        snippet = "";
-        snippetError = "";
-        autoSaveStatus = "saved";
-        curlDetectedFeedback = "";
+        hydrateRequestFields(selectedRequest);
       }
     } else if (!selectedRequest) {
       // Nothing open — clear the guard so reopening this same request later (e.g. after
@@ -2104,12 +2507,469 @@
     }
   }
 
+  let requestContextMenu = $state<{
+    visible: boolean;
+    x: number;
+    y: number;
+    request?: any | null;
+  }>({
+    visible: false,
+    x: 0,
+    y: 0,
+    request: null,
+  });
+
+  function openRequestContextMenu(e: MouseEvent, req?: any) {
+    e.preventDefault();
+    e.stopPropagation();
+    const x = Math.min(e.clientX, typeof window !== "undefined" ? window.innerWidth - 260 : 600);
+    const y = Math.min(e.clientY, typeof window !== "undefined" ? window.innerHeight - 520 : 400);
+    requestContextMenu = {
+      visible: true,
+      x: Math.max(10, x),
+      y: Math.max(10, y),
+      request: req || selectedRequest,
+    };
+  }
+
+  function closeRequestContextMenu() {
+    requestContextMenu = { visible: false, x: 0, y: 0, request: null };
+  }
+
+  let tabContextMenu = $state<{
+    visible: boolean;
+    x: number;
+    y: number;
+    tab: RequestTab | null;
+  }>({
+    visible: false,
+    x: 0,
+    y: 0,
+    tab: null,
+  });
+
+  function openTabContextMenu(e: MouseEvent, tab?: RequestTab | null) {
+    e.preventDefault();
+    e.stopPropagation();
+    closeRequestContextMenu();
+    const x = Math.min(e.clientX, typeof window !== "undefined" ? window.innerWidth - 240 : 600);
+    const y = Math.min(e.clientY, typeof window !== "undefined" ? window.innerHeight - 340 : 400);
+    tabContextMenu = {
+      visible: true,
+      x: Math.max(10, x),
+      y: Math.max(10, y),
+      tab: tab ?? currentTab,
+    };
+  }
+
+  function closeTabContextMenu() {
+    tabContextMenu = { visible: false, x: 0, y: 0, tab: null };
+  }
+
+  async function handleTabMenuNewRequest() {
+    closeTabContextMenu();
+    await quickCreateRequest(selectedProjectId ?? projects[0]?.id);
+  }
+
+  async function handleTabMenuDuplicateTab() {
+    const target = tabContextMenu.tab ?? currentTab;
+    closeTabContextMenu();
+    if (!target) return;
+    if (!target.tabType || target.tabType === "request") {
+      await duplicateRequest(target.id);
+    } else if (target.tabType === "env") {
+      const env = allEnvironments.find((e) => e.id === (target.envId ?? target.id));
+      if (env) {
+        await quickCreateEnvironment(`${env.name} (Copy)`);
+      }
+    } else {
+      const newId = `${target.id}-copy-${Date.now()}`;
+      openTabs = [...openTabs, { ...target, id: newId, name: `${target.name} (Copy)` }];
+      activeTabId = newId;
+    }
+  }
+
+  function handleTabMenuCloseTab() {
+    const target = tabContextMenu.tab ?? currentTab;
+    closeTabContextMenu();
+    if (target) {
+      closeTabAction(target.id);
+    }
+  }
+
+  function handleTabMenuForceCloseTab() {
+    const target = tabContextMenu.tab ?? currentTab;
+    closeTabContextMenu();
+    if (target) {
+      closeTab(target.id, true);
+    }
+  }
+
+  function handleTabMenuCloseOtherTabs() {
+    const target = tabContextMenu.tab ?? currentTab;
+    closeTabContextMenu();
+    if (!target) return;
+    const others = openTabs.filter((t) => t.id !== target.id);
+    for (const t of others) {
+      tabDrafts.delete(t.id);
+    }
+    openTabs = openTabs.filter((t) => t.id === target.id);
+    selectTab(target);
+  }
+
+  function handleTabMenuCloseAllTabs() {
+    closeTabContextMenu();
+    const hasDirty = openTabs.some((t) => isTabDirty(t.id));
+    if (hasDirty) {
+      showConfirm(t("common.confirm"), "You have unsaved changes in one or more tabs. Close all without saving?", () => {
+        handleTabMenuForceCloseAllTabs();
+      });
+    } else {
+      handleTabMenuForceCloseAllTabs();
+    }
+  }
+
+  function handleTabMenuForceCloseAllTabs() {
+    closeTabContextMenu();
+    for (const t of openTabs) {
+      tabDrafts.delete(t.id);
+    }
+    openTabs = [];
+    activeTabId = null;
+    selectedRequest = null;
+  }
+
+  async function handleTabMenuRevealInSidebar() {
+    const target = tabContextMenu.tab ?? currentTab;
+    closeTabContextMenu();
+    if (!target) return;
+
+    sidebarVisible = true;
+    if (target.tabType === "env") {
+      environmentsAccordionOpen = true;
+      sidebarSection = "environments";
+      await tick();
+      const el = document.querySelector(`.sidebar-env-item-row.active, [title="${target.name}"]`);
+      el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      return;
+    }
+
+    const reqSummary = requests.find((r) => r.id === target.id);
+    if (reqSummary) {
+      if (reqSummary.project_id && reqSummary.project_id !== selectedProjectId) {
+        await selectProject(reqSummary.project_id);
+      }
+      if (reqSummary.folder_id) {
+        expandedFolderIds = new Set([...expandedFolderIds, reqSummary.folder_id]);
+      }
+      await tick();
+      const el = document.querySelector(`.request-item.active, [data-req-id="${target.id}"]`) ||
+                 Array.from(document.querySelectorAll('.request-item')).find(item => item.textContent?.includes(target.name));
+      if (el) {
+        el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        (el as HTMLElement).classList.add('reveal-pulse');
+        setTimeout(() => (el as HTMLElement).classList.remove('reveal-pulse'), 1500);
+      }
+    }
+  }
+
+  function getEffectiveRequestData(req?: any) {
+    const isCurrent = !req || req.id === selectedRequest?.id;
+    const method = isCurrent ? editMethod : (req.method || "GET");
+    const rawUrl = isCurrent ? editUrl : (req.url || "https://aaeuat.alansari.ae:19443/FintechGateway/api/v1/auth/login");
+    const url = (snippetMode === "resolved" && rawUrl.includes("{{host}}"))
+      ? rawUrl.replace("{{host}}", "https://uat.alansari.ae")
+      : (rawUrl || "https://aaeuat.alansari.ae:19443/FintechGateway/api/v1/auth/login");
+    let body = "";
+    if (isCurrent) {
+      body = editBody || "";
+    } else if (req.body) {
+      body = typeof req.body === "string" ? req.body : JSON.stringify(req.body, null, 2);
+    }
+    const headers = isCurrent ? editHeaders.filter((h: any) => h.enabled && h.key.trim()) : [];
+    return { method, url, body, headers };
+  }
+
+  function generateCurlBash(req?: any): string {
+    const { method, url, body, headers } = getEffectiveRequestData(req);
+    const lines = [
+      `curl --location${method !== "GET" ? ` --request ${method}` : ""} '${url}'`
+    ];
+    if (headers.length > 0) {
+      for (const h of headers) {
+        lines.push(`--header '${h.key}: ${h.value}'`);
+      }
+    } else {
+      lines.push(`--header 'Content-Type: application/json'`);
+      lines.push(`--header 'Accept: application/json'`);
+    }
+    if (body && method !== "GET" && method !== "HEAD") {
+      lines.push(`--data-raw '${body}'`);
+    }
+    return lines.join(" \\\n");
+  }
+
+  function generateCurlCmd(req?: any): string {
+    const { method, url, body, headers } = getEffectiveRequestData(req);
+    const lines = [
+      `curl --location${method !== "GET" ? ` --request ${method}` : ""} "${url}"`
+    ];
+    if (headers.length > 0) {
+      for (const h of headers) {
+        lines.push(`--header "${h.key}: ${h.value}"`);
+      }
+    } else {
+      lines.push(`--header "Content-Type: application/json"`);
+      lines.push(`--header "Accept: application/json"`);
+    }
+    if (body && method !== "GET" && method !== "HEAD") {
+      const escaped = body.replace(/"/g, '\\"');
+      lines.push(`--data-raw "${escaped}"`);
+    }
+    return lines.join(" ^\n");
+  }
+
+  function generateCurlPowerShell(req?: any): string {
+    const { method, url, body, headers } = getEffectiveRequestData(req);
+    let hStr = "";
+    if (headers.length > 0) {
+      hStr = headers.map((h: any) => `  "${h.key}" = "${h.value}"`).join("\n");
+    } else {
+      hStr = '  "Content-Type" = "application/json"\n  "Accept" = "application/json"';
+    }
+    const bodyPart = body ? `$body = @'\n${body}\n'@\n` : "";
+    const bodyArg = body ? ` -Body $body` : "";
+    return `$headers = @{\n${hStr}\n}\n${bodyPart}$response = Invoke-RestMethod -Uri "${url}" -Method ${method} -Headers $headers${bodyArg}`;
+  }
+
+  function generateFetch(req?: any): string {
+    const { method, url, body } = getEffectiveRequestData(req);
+    const bodyPart = body && method !== "GET" ? `\n  body: ${JSON.stringify(body)},` : "";
+    return `const myHeaders = new Headers();\nmyHeaders.append("Content-Type", "application/json");\n\nconst raw = JSON.stringify(${body || "{}"});\n\nconst requestOptions = {\n  method: "${method}",\n  headers: myHeaders,${bodyPart}\n  redirect: "follow"\n};\n\nfetch("${url}", requestOptions)\n  .then((response) => response.text())\n  .then((result) => console.log(result))\n  .catch((error) => console.error(error));`;
+  }
+
+  function generateNodeFetch(req?: any): string {
+    const { method, url, body } = getEffectiveRequestData(req);
+    const bodyPart = body && method !== "GET" ? `,\n  body: JSON.stringify(${body || "{}"})` : "";
+    return `const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));\n\nconst response = await fetch("${url}", {\n  method: "${method}",\n  headers: {\n    "Content-Type": "application/json"\n  }${bodyPart}\n});\nconst data = await response.json();\nconsole.log(data);`;
+  }
+
+  function generatePythonRequests(req?: any): string {
+    const { method, url, body } = getEffectiveRequestData(req);
+    const payloadPart = body ? `payload = json.dumps(${body})\n` : "payload = {}\n";
+    return `import requests\nimport json\n\nurl = "${url}"\n${payloadPart}headers = {\n  'Content-Type': 'application/json'\n}\n\nresponse = requests.request("${method}", url, headers=headers, data=payload)\nprint(response.text)`;
+  }
+
+  function generatePreload(req?: any): string {
+    const { url } = getEffectiveRequestData(req);
+    return `<link rel="preload" href="${url}" as="fetch" crossorigin="anonymous">`;
+  }
+
+  function generateHar(req?: any): string {
+    const { method, url, body } = getEffectiveRequestData(req);
+    const harObj = {
+      log: {
+        version: "1.2",
+        creator: { name: "Postman", version: "11.0.0" },
+        entries: [{
+          startedDateTime: new Date().toISOString(),
+          request: {
+            method,
+            url,
+            httpVersion: "HTTP/1.1",
+            headers: [{ name: "Content-Type", value: "application/json" }],
+            postData: body ? { mimeType: "application/json", text: body } : undefined
+          }
+        }]
+      }
+    };
+    return JSON.stringify(harObj, null, 2);
+  }
+
+  function getAllRequestsList() {
+    if (requests && requests.length > 0) return requests;
+    if (openTabs && openTabs.length > 0) return openTabs.filter((t: any) => t.tabType !== "env" && t.tabType !== "doc");
+    if (selectedRequest) return [selectedRequest];
+    return [];
+  }
+
+  async function copyContextUrl(req?: any) {
+    closeRequestContextMenu();
+    const { url } = getEffectiveRequestData(req);
+    await copyTextToClipboard(url);
+  }
+  async function copyContextAsCurlBash(req?: any) {
+    closeRequestContextMenu();
+    await copyTextToClipboard(generateCurlBash(req));
+  }
+  async function copyContextAsCurlCmd(req?: any) {
+    closeRequestContextMenu();
+    await copyTextToClipboard(generateCurlCmd(req));
+  }
+  async function copyContextAsCurlPowerShell(req?: any) {
+    closeRequestContextMenu();
+    await copyTextToClipboard(generateCurlPowerShell(req));
+  }
+  async function copyContextAsFetch(req?: any) {
+    closeRequestContextMenu();
+    await copyTextToClipboard(generateFetch(req));
+  }
+  async function copyContextAsNodeFetch(req?: any) {
+    closeRequestContextMenu();
+    await copyTextToClipboard(generateNodeFetch(req));
+  }
+  async function copyContextAsPythonRequests(req?: any) {
+    closeRequestContextMenu();
+    await copyTextToClipboard(generatePythonRequests(req));
+  }
+  async function copyContextAsPreload(req?: any) {
+    closeRequestContextMenu();
+    await copyTextToClipboard(generatePreload(req));
+  }
+  async function copyContextAsHar(req?: any) {
+    closeRequestContextMenu();
+    await copyTextToClipboard(generateHar(req));
+  }
+
+  async function copyAllUrlsAction() {
+    closeRequestContextMenu();
+    const list = getAllRequestsList();
+    const urls = list.map(r => getEffectiveRequestData(r).url).join("\n");
+    await copyTextToClipboard(urls);
+  }
+  async function copyAllAsCurlBashAction() {
+    closeRequestContextMenu();
+    const list = getAllRequestsList();
+    const all = list.map(r => generateCurlBash(r)).join("\n\n");
+    await copyTextToClipboard(all);
+  }
+  async function copyAllAsCurlCmdAction() {
+    closeRequestContextMenu();
+    const list = getAllRequestsList();
+    const all = list.map(r => generateCurlCmd(r)).join("\n\n");
+    await copyTextToClipboard(all);
+  }
+  async function copyAllAsCurlPowerShellAction() {
+    closeRequestContextMenu();
+    const list = getAllRequestsList();
+    const all = list.map(r => generateCurlPowerShell(r)).join("\n\n");
+    await copyTextToClipboard(all);
+  }
+  async function copyAllAsFetchAction() {
+    closeRequestContextMenu();
+    const list = getAllRequestsList();
+    const all = list.map(r => generateFetch(r)).join("\n\n");
+    await copyTextToClipboard(all);
+  }
+  async function copyAllAsNodeFetchAction() {
+    closeRequestContextMenu();
+    const list = getAllRequestsList();
+    const all = list.map(r => generateNodeFetch(r)).join("\n\n");
+    await copyTextToClipboard(all);
+  }
+  async function copyAllAsHarAction() {
+    closeRequestContextMenu();
+    const list = getAllRequestsList();
+    const entries = list.map(r => {
+      const data = getEffectiveRequestData(r);
+      return {
+        startedDateTime: new Date().toISOString(),
+        request: {
+          method: data.method,
+          url: data.url,
+          httpVersion: "HTTP/1.1",
+          headers: [{ name: "Content-Type", value: "application/json" }],
+          postData: data.body ? { mimeType: "application/json", text: data.body } : undefined
+        }
+      };
+    });
+    const harObj = {
+      log: {
+        version: "1.2",
+        creator: { name: "Postman", version: "11.0.0" },
+        entries
+      }
+    };
+    await copyTextToClipboard(JSON.stringify(harObj, null, 2));
+  }
+
+  function highlightSnippetCode(raw: string): string {
+    if (!raw) return "";
+    let html = raw
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+
+    const strings: string[] = [];
+    html = html.replace(/('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/g, (match) => {
+      const idx = strings.length;
+      strings.push(match);
+      return `__SNIP_STR_${idx}__`;
+    });
+
+    html = html
+      .replace(/(^|\s)(--[a-zA-Z0-9_-]+|-[a-zA-Z0-9]+)/g, '$1<span class="tok-flag">$2</span>')
+      .replace(/\b(curl|Invoke-RestMethod|fetch|requests\.request|const|let|var|import|from)\b/g, '<span class="tok-keyword">$1</span>')
+      .replace(/(\\\n|\^\n)/g, '<span class="tok-escape">$1</span>');
+
+    html = html.replace(/__SNIP_STR_(\d+)__/g, (_, idx) => {
+      return `<span class="tok-string">${strings[Number(idx)]}</span>`;
+    });
+
+    return html;
+  }
+
+  async function handleGetSuccessfulResponse() {
+    sendMenuOpen = false;
+    await sendCurrentRequest();
+  }
+  async function handleVisualizeResponse() {
+    sendMenuOpen = false;
+    responseSubTab = "tests";
+    await sendCurrentRequest();
+  }
+  function handleWriteTests() {
+    sendMenuOpen = false;
+    activeEditorTab = "scripts";
+  }
+  function handleDebugRequest() {
+    sendMenuOpen = false;
+    showConsole = true;
+    refreshConsoleEvents();
+  }
+  function handleExploreApiCapabilities() {
+    sendMenuOpen = false;
+    sidebarSection = "specs";
+  }
+  function handleDownloadResponse() {
+    sendMenuOpen = false;
+    sendAndDownload();
+  }
+
   async function copyAsCurl() {
     if (!selectedRequest) return;
     snippetError = "";
     snippetLoading = true;
     try {
-      snippet = await api.generateCurlSnippet(selectedRequest.id, selectedEnvironmentId, snippetMode, snippetTarget);
+      if (snippetTarget === "bash") {
+        snippet = generateCurlBash(selectedRequest);
+      } else if (snippetTarget === "windows_cmd") {
+        snippet = generateCurlCmd(selectedRequest);
+      } else if (snippetTarget === "power_shell") {
+        snippet = generateCurlPowerShell(selectedRequest);
+      } else if (snippetTarget === "java_script_fetch") {
+        snippet = generateFetch(selectedRequest);
+      } else if (snippetTarget === "node_fetch") {
+        snippet = generateNodeFetch(selectedRequest);
+      } else if (snippetTarget === "python_requests") {
+        snippet = generatePythonRequests(selectedRequest);
+      } else if (snippetTarget === "preload") {
+        snippet = generatePreload(selectedRequest);
+      } else if (snippetTarget === "har") {
+        snippet = generateHar(selectedRequest);
+      } else {
+        snippet = await api.generateCurlSnippet(selectedRequest.id, selectedEnvironmentId, snippetMode, snippetTarget);
+      }
     } catch (err) {
       snippetError = describeError(err);
     } finally {
@@ -2140,9 +3000,20 @@
     if (!snippet) return;
     try {
       await navigator.clipboard.writeText(snippet);
+      textCopiedNotice = "Copied to clipboard!";
+      setTimeout(() => (textCopiedNotice = ""), 2000);
     } catch (err) {
       snippetError = describeError(err);
     }
+  }
+  let textCopiedNotice = $state("");
+  async function copyTextToClipboard(text: string) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      textCopiedNotice = "Copied to clipboard!";
+      setTimeout(() => (textCopiedNotice = ""), 2000);
+    } catch {}
   }
 
   // Live preview of what {{vars}} in the URL resolve to for the currently selected
@@ -2209,7 +3080,7 @@
     refreshSystemDiagnostics();
     try {
       const saved = localStorage.getItem("lp-theme");
-      if (saved === "dark" || saved === "light" || saved === "terminal" || saved === "blueprint") themeMode = saved;
+      if (saved === "dark" || saved === "light" || saved === "terminal" || saved === "blueprint") themeMode = saved; else themeMode = "dark";
       const savedAccent = localStorage.getItem("lp-accent-color");
       if (savedAccent && /^#[0-9a-f]{6}$/i.test(savedAccent)) accentColor = savedAccent;
       const savedTint = localStorage.getItem("lp-surface-tint");
@@ -2252,6 +3123,8 @@
       if (savedRailVisible === "true" || savedRailVisible === "false") screensRailVisible = savedRailVisible === "true";
       const savedRightSidebarVisible = localStorage.getItem("lp-right-sidebar-visible");
       if (savedRightSidebarVisible === "true" || savedRightSidebarVisible === "false") rightSidebarVisible = savedRightSidebarVisible === "true";
+      const savedUtilityRailVisible = localStorage.getItem("lp-utility-rail-visible");
+      if (savedUtilityRailVisible === "true" || savedUtilityRailVisible === "false") utilityRailVisible = savedUtilityRailVisible === "true";
     } catch {
       // ignore — settings just stay at their defaults
     }
@@ -2286,6 +3159,9 @@
           e.preventDefault();
           quickCreateRequest(selectedProjectId);
         }
+      } else if (key === "t") {
+        e.preventDefault();
+        quickCreateRequest(selectedProjectId ?? projects[0]?.id);
       } else if (key === "tab" && shortcutsEnabled.nextTab && !e.shiftKey) {
         e.preventDefault();
         cycleTab(1);
@@ -2293,9 +3169,14 @@
         e.preventDefault();
         cycleTab(-1);
       } else if (key === "w" && shortcutsEnabled.closeTab) {
-        if (selectedRequest) {
-          e.preventDefault();
-          closeTab(selectedRequest.id);
+        e.preventDefault();
+        const tabToClose = activeTabId || selectedRequest?.id;
+        if (tabToClose) {
+          if (e.altKey) {
+            closeTab(tabToClose, true);
+          } else {
+            closeTabAction(tabToClose);
+          }
         }
       }
     };
@@ -2323,8 +3204,96 @@
     }
   });
 
+  function areHeadersEqual(edit: typeof editHeaders, orig: HeaderEntry[] | undefined | null): boolean {
+    const clean = withoutEmptyKeyRows(edit);
+    const origList = orig || [];
+    if (clean.length !== origList.length) return false;
+    for (let i = 0; i < clean.length; i++) {
+      const a = clean[i];
+      const b = origList[i];
+      if (!b) return false;
+      if (a.key !== b.key || a.value !== b.value || a.enabled !== b.enabled) return false;
+      if ((a.description ?? "") !== (b.description ?? "")) return false;
+    }
+    return true;
+  }
+
+  function areQueryParamsEqual(edit: typeof editQueryParams, orig: QueryParamEntry[] | undefined | null): boolean {
+    const clean = withoutEmptyKeyRows(edit);
+    const origList = orig || [];
+    if (clean.length !== origList.length) return false;
+    for (let i = 0; i < clean.length; i++) {
+      const a = clean[i];
+      const b = origList[i];
+      if (!b) return false;
+      if (a.key !== b.key || a.value !== b.value || a.enabled !== b.enabled) return false;
+    }
+    return true;
+  }
+
+  function isAuthEqual(orig: Auth | undefined | null): boolean {
+    if (!orig) return editAuthType === "none";
+    if (editAuthType !== orig.type) return false;
+    const o = orig as any;
+    if (editAuthType === "bearer") {
+      return (editAuthBearerToken || "") === (o.token || "");
+    }
+    if (editAuthType === "basic") {
+      return (editAuthBasicUsername || "") === (o.username || "") && (editAuthBasicPassword || "") === (o.password || "");
+    }
+    if (editAuthType === "api_key") {
+      return (editAuthApiKeyKey || "") === (o.key || "") && (editAuthApiKeyValue || "") === (o.value || "") && (editAuthApiKeyLocation || "header") === (o.location || "header");
+    }
+    return true;
+  }
+
+  function isBodyEqual(origBody: string | null | undefined): boolean {
+    const orig = (origBody ?? "").trim();
+    const current = serializeBodyForStorage().trim();
+    return orig === current;
+  }
+
+  function areSettingsEqual(settings: RequestSettings | null | undefined): boolean {
+    if (!settings) {
+      if (editTimeoutMs !== null) return false;
+      if (editFollowRedirects !== true) return false;
+      if (editMaxRedirects !== 10) return false;
+      if (editVerifySsl !== true) return false;
+      if (editProxyUrl.trim() !== "") return false;
+      if (editHttpVersion.trim() !== "") return false;
+      return true;
+    }
+    if (editTimeoutMs !== (settings.timeout_ms ?? null)) return false;
+    if (editFollowRedirects !== (settings.follow_redirects ?? true)) return false;
+    if (editMaxRedirects !== (settings.max_redirects ?? 10)) return false;
+    if (editVerifySsl !== (settings.verify_ssl ?? true)) return false;
+    if (editProxyUrl.trim() !== (settings.proxy_url ?? "")) return false;
+    if (editHttpVersion.trim() !== (settings.http_version ?? "")) return false;
+    return true;
+  }
+
+  function isCurrentRequestDirty(): boolean {
+    if (!selectedRequest) return false;
+    if (editName !== selectedRequest.name) return true;
+    if (editMethod !== selectedRequest.method) return true;
+    if (editUrl !== selectedRequest.url) return true;
+    if (editDescription !== (selectedRequest.description ?? "")) return true;
+    if (editPreScript !== (selectedRequest.pre_request_script ?? "")) return true;
+    if (editPostScript !== (selectedRequest.post_request_script ?? "")) return true;
+    if (!isBodyEqual(selectedRequest.body)) return true;
+    if (!areHeadersEqual(editHeaders, selectedRequest.headers)) return true;
+    if (!areQueryParamsEqual(editQueryParams, selectedRequest.query_params)) return true;
+    if (!isAuthEqual(selectedRequest.auth)) return true;
+    if (!areSettingsEqual(selectedRequest.settings)) return true;
+    return false;
+  }
+
   function saveCurrentDraft() {
     if (!selectedRequest) return;
+    if (!isCurrentRequestDirty()) {
+      tabDrafts.delete(selectedRequest.id);
+      return;
+    }
     const draft: RequestDraft = {
       editName,
       editMethod,
@@ -2351,8 +3320,8 @@
       editBodyType,
       editGraphqlQuery,
       editGraphqlVariables,
-      editFormDataItems,
-      editUrlEncodedItems,
+      editFormDataItems: editFormDataItems.map((i) => ({ ...i })),
+      editUrlEncodedItems: editUrlEncodedItems.map((i) => ({ ...i })),
       editBinaryFilePath,
       activeEditorTab,
       activeResponse,
@@ -2402,22 +3371,20 @@
     activeResponse = draft.activeResponse;
     activeResponseBody = draft.activeResponseBody;
     activeResponseTruncated = draft.activeResponseTruncated;
-    // A surviving draft means the autosave debounce didn't get to fire before the user tabbed
-    // away — pick up where it left off instead of leaving those edits stuck unsaved.
-    scheduleAutoSave();
+    if (isCurrentRequestDirty()) {
+      scheduleAutoSave();
+    } else if (selectedRequest) {
+      tabDrafts.delete(selectedRequest.id);
+    }
   }
 
   function isTabDirty(tabId: string): boolean {
+    const tab = openTabs.find((t) => t.id === tabId);
+    if (tab && tab.tabType && tab.tabType !== "request") {
+      return false;
+    }
     if (tabId === selectedRequest?.id) {
-      return (
-        editName !== selectedRequest.name ||
-        editMethod !== selectedRequest.method ||
-        editUrl !== selectedRequest.url ||
-        editBody !== (selectedRequest.body ?? "") ||
-        editDescription !== (selectedRequest.description ?? "") ||
-        editPreScript !== (selectedRequest.pre_request_script ?? "") ||
-        editPostScript !== (selectedRequest.post_request_script ?? "")
-      );
+      return isCurrentRequestDirty();
     }
     return tabDrafts.has(tabId);
   }
@@ -2449,22 +3416,195 @@
     }
   }
 
+  function openEnvironmentTab(env: { id: string; name: string }) {
+    if (!openTabs.some((t) => t.id === env.id)) {
+      openTabs = [
+        ...openTabs,
+        {
+          id: env.id,
+          name: env.name,
+          method: "ENV",
+          tabType: "env",
+          envId: env.id,
+        },
+      ];
+    }
+    activeTabId = env.id;
+    selectedEnvironmentId = env.id;
+    loadVariables();
+    activeScreen = "workspace";
+    if (!expandedEnvIds.has(env.id)) {
+      toggleEnvExpand(env.id);
+    }
+  }
+
+  function openDocumentTab(doc: { id: string; name: string }) {
+    if (!openTabs.some((t) => t.id === doc.id)) {
+      openTabs = [
+        ...openTabs,
+        {
+          id: doc.id,
+          name: doc.name,
+          method: "DOC",
+          tabType: "doc",
+        },
+      ];
+    }
+    activeTabId = doc.id;
+    activeScreen = "workspace";
+  }
+
+  function openSpecTab(spec: { id: string; name: string }) {
+    if (!openTabs.some((t) => t.id === spec.id)) {
+      openTabs = [
+        ...openTabs,
+        {
+          id: spec.id,
+          name: spec.name,
+          method: "SPEC",
+          tabType: "spec",
+        },
+      ];
+    }
+    activeTabId = spec.id;
+    activeScreen = "workspace";
+  }
+
+  function openMockTab(mockItem: { id: string; name: string }) {
+    if (!openTabs.some((t) => t.id === mockItem.id)) {
+      openTabs = [
+        ...openTabs,
+        {
+          id: mockItem.id,
+          name: mockItem.name,
+          method: "MOCK",
+          tabType: "mock",
+        },
+      ];
+    }
+    activeTabId = mockItem.id;
+    activeScreen = "workspace";
+  }
+
+  function openDatasetTab(dataset: { id: string; name: string }) {
+    if (!openTabs.some((t) => t.id === dataset.id)) {
+      openTabs = [
+        ...openTabs,
+        {
+          id: dataset.id,
+          name: dataset.name,
+          method: "DATA",
+          tabType: "dataset",
+        },
+      ];
+    }
+    activeTabId = dataset.id;
+    activeScreen = "workspace";
+  }
+
+  function openFlowTab(flow: { id: string; name: string }) {
+    if (!openTabs.some((t) => t.id === flow.id)) {
+      openTabs = [
+        ...openTabs,
+        {
+          id: flow.id,
+          name: flow.name,
+          method: "FLOW",
+          tabType: "flow",
+        },
+      ];
+    }
+    activeTabId = flow.id;
+    activeScreen = "workspace";
+  }
+
+  function selectTab(tab: RequestTab) {
+    activeTabId = tab.id;
+    if (tab.tabType && tab.tabType !== "request") {
+      activeScreen = "workspace";
+      if (tab.tabType === "env") {
+        selectedEnvironmentId = tab.envId ?? tab.id;
+        loadVariables();
+      }
+      return;
+    }
+    openRequest(tab.id);
+  }
+
+  async function forkCurrentEnvironment() {
+    const current = allEnvironments.find((e) => e.id === selectedEnvironmentId);
+    const name = current ? `${current.name} (Fork ${envForkCount + 1})` : "New Environment Fork";
+    await quickCreateEnvironment(name);
+    envForkCount++;
+    exportFeedback = `Created fork "${name}"`;
+    setTimeout(() => { exportFeedback = ""; }, 3000);
+  }
+
+  function shareCurrentEnvironment() {
+    const vars = environmentVariables.reduce((acc, v) => ({ ...acc, [v.key]: v.value }), {});
+    copyTextToClipboard(JSON.stringify(vars, null, 2));
+    exportFeedback = "Environment variables JSON copied to clipboard!";
+    setTimeout(() => { exportFeedback = ""; }, 3000);
+  }
+
+  function handleAddGlobalVariableClick() {
+    const defaultKey = `variable_${projectVariables.length + 1}`;
+    projectVariables = [
+      ...projectVariables,
+      {
+        id: `var-new-${Date.now()}`,
+        key: defaultKey,
+        value: "",
+        enabled: true,
+        is_secret: false,
+        is_local: false,
+        scope: "global",
+        environment_id: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ];
+    exportFeedback = `Added new global variable "${defaultKey}"`;
+    setTimeout(() => { exportFeedback = ""; }, 2500);
+  }
+
+  function toggleUtilityRail() {
+    const next = !utilityRailVisible;
+    setUtilityRailVisible(next);
+    if (!next) {
+      setRightSidebarVisible(false);
+      rightPanel = null;
+    }
+  }
+
+  let currentTab = $derived.by(() => {
+    if (activeTabId) {
+      const found = openTabs.find((t) => t.id === activeTabId);
+      if (found) return found;
+    }
+    const req = selectedRequest;
+    if (req) {
+      const found = openTabs.find((t) => t.id === req.id);
+      if (found) return found;
+    }
+    return openTabs[0] ?? null;
+  });
+
   async function closeTab(id: string, skipSave: boolean = false) {
     tabDrafts.delete(id);
     const idx = openTabs.findIndex((t) => t.id === id);
     if (idx === -1) return;
-    const wasActive = selectedRequest?.id === id;
+    const wasActive = (activeTabId === id) || (selectedRequest?.id === id);
     openTabs = openTabs.filter((t) => t.id !== id);
 
     if (wasActive) {
       if (openTabs.length > 0) {
         const nextTab = openTabs[Math.max(0, idx - 1)];
-        openRequest(nextTab.id);
+        selectTab(nextTab);
       } else {
-        // Same flush openRequest does — closing the last tab must not silently drop a pending
-        // debounced edit (see openRequest's comment for the full failure mode).
+        activeTabId = null;
         if (!skipSave) await saveRequest();
-          selectedRequest = null;
+        selectedRequest = null;
         activeResponse = null;
         activeResponseBody = "";
         responseHistory = [];
@@ -2957,7 +4097,7 @@
       const savedTabs = localStorage.getItem(`lp-open-tabs-${id}`);
       if (savedTabs) openTabs = JSON.parse(savedTabs);
     } catch {}
-    requestSortField = "name";
+    requestSortField = "custom";
     requestSortDir = "asc";
     try {
       const savedRequestSort = localStorage.getItem(`lp-request-sort-${id}`);
@@ -3018,14 +4158,18 @@
   // "+ Add new environment…" sticky option in the env select, and the "+" in the Environments
   // screen sidebar: create with a placeholder name, then drop straight into inline-rename —
   // same pattern as quickCreateProject/quickCreateRequest, no persistent text field needed.
-  async function quickCreateEnvironment() {
-    if (!selectedProjectId) return;
+  async function quickCreateEnvironment(customName?: unknown) {
+    const pid = selectedProjectId ?? (projects[0]?.id ?? "");
+    if (!pid) return;
+    const name = typeof customName === "string" && customName.trim() ? customName.trim() : "New Environment";
     try {
-      const env = await api.createEnvironment(selectedProjectId, "New Environment");
+      const env = await api.createEnvironment(pid, name);
       await loadAllEnvironments();
       selectedEnvironmentId = env.id;
       await loadVariables();
-      startRenameEnvironment(env);
+      if (typeof customName !== "string") {
+        startRenameEnvironment(env);
+      }
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -3176,14 +4320,20 @@
 
   // Hydrate the full request only when the user actually opens it.
   async function openRequest(id: string) {
+    activeTabId = id;
     if (selectedRequest?.id === id) return;
-    // Flush any pending debounced autosave (scheduleAutoSave's 700ms timer) against the request
-    // we're LEAVING before switching — otherwise that timer still fires later, but by then
-    // selectedRequest/edit* fields point at the NEW request, so the stale save silently diffs
-    // against the wrong request and does nothing. This is what made curl-paste-then-switch (and
-    // any other quick edit-then-switch) look like it never saved.
-    await saveRequest();
-    saveCurrentDraft();
+    if (selectedRequest) {
+      if (autoSaveTimer) {
+        clearTimeout(autoSaveTimer);
+        autoSaveTimer = null;
+        await saveRequest();
+      }
+      if (isCurrentRequestDirty()) {
+        saveCurrentDraft();
+      } else {
+        tabDrafts.delete(selectedRequest.id);
+      }
+    }
 
     // Ensure tab exists in openTabs (LP-0407)
     const reqSummary = requests.find((r) => r.id === id);
@@ -3200,13 +4350,22 @@
 
     try {
       selectedRequest = await api.getRequest(id);
+      hydratedRequestId = selectedRequest.id;
+      openTabs = openTabs.map((t) =>
+        t.id === id ? { ...t, name: selectedRequest!.name, method: selectedRequest!.method } : t
+      );
       if (tabDrafts.has(id)) {
         restoreDraft(tabDrafts.get(id)!);
       } else {
+        hydrateRequestFields(selectedRequest);
         activeResponse = null;
         activeResponseBody = "";
       }
+      activeScreen = "workspace";
       responseHistory = await api.listResponseSummaries(id);
+      if (responseHistory.length > 0) {
+        await openHistoryResponse(responseHistory[0].id);
+      }
       await loadSampleResponses(id);
       await refreshDiagnostics();
     } catch (err) {
@@ -3228,6 +4387,8 @@
       const meta = await api.sendRequest(requestId, selectedEnvironmentId);
       activeResponse = meta;
       responseSubTab = "body";
+      responsePaneCollapsed = false;
+      if (responsePaneHeight < 180) responsePaneHeight = 320;
       const body = await api.getResponseBody(meta.id);
       activeResponseBody = body.text;
       activeResponseTruncated = body.truncated;
@@ -3696,15 +4857,15 @@
   }
 
   async function loadVariables() {
-    if (!selectedProjectId) {
-      projectVariables = [];
-      environmentVariables = [];
-      return;
-    }
     try {
-      projectVariables = await api.listVariablesForScope("global", selectedProjectId);
-      if (selectedEnvironmentId) {
-        environmentVariables = await api.listVariablesForScope("environment", selectedEnvironmentId);
+      if (selectedProjectId) {
+        projectVariables = await api.listVariablesForScope("global", selectedProjectId);
+      } else {
+        projectVariables = [];
+      }
+      const envIdToLoad = (currentTab?.tabType === "env" ? (currentTab.envId ?? currentTab.id) : selectedEnvironmentId);
+      if (envIdToLoad) {
+        environmentVariables = await api.listVariablesForScope("environment", envIdToLoad);
       } else {
         environmentVariables = [];
       }
@@ -3712,6 +4873,17 @@
       errorMessage = describeError(err);
     }
   }
+
+  $effect(() => {
+    const tab = currentTab;
+    if (tab?.tabType === "env") {
+      const envId = tab.envId ?? tab.id;
+      if (selectedEnvironmentId !== envId) {
+        selectedEnvironmentId = envId;
+      }
+      loadVariables();
+    }
+  });
 
   async function commitNewGlobalVar() {
     const key = newGlobalVarDraft.key.trim();
@@ -3736,11 +4908,12 @@
 
   async function commitNewEnvVar() {
     const key = newEnvVarDraft.key.trim();
-    if (!selectedEnvironmentId || !key) return;
+    const envId = (currentTab?.tabType === "env" ? (currentTab.envId ?? currentTab.id) : selectedEnvironmentId);
+    if (!envId || !key) return;
     try {
       await api.createVariable({
         scope: "environment",
-        environment_id: selectedEnvironmentId,
+        environment_id: envId,
         key,
         value: newEnvVarDraft.value,
         is_secret: newEnvVarDraft.isSecret,
@@ -3778,6 +4951,29 @@
     try {
       await api.updateVariable({ id: v.id, is_local: !v.is_local });
       await loadVariables();
+      await refreshDiagnostics();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function updateVariableValue(v: VariableView, value: string) {
+    if (v.value === value) return;
+    try {
+      await api.updateVariable({ id: v.id, value });
+      await loadVariables();
+      await refreshDiagnostics();
+    } catch (err) {
+      errorMessage = describeError(err);
+    }
+  }
+
+  async function updateVariableKey(v: VariableView, key: string) {
+    if (v.key === key) return;
+    try {
+      await api.updateVariable({ id: v.id, key });
+      await loadVariables();
+      await refreshDiagnostics();
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -3848,8 +5044,33 @@
   // instead of create. Only searches the two scopes the request-editing surface already knows
   // about (environment, then global) — the same scopes addMissingVariable can create into, so
   // this doesn't reach further than what was already editable elsewhere.
-  let missingVarHover = $state<{ name: string; top: number; left: number } | null>(null);
+  let missingVarHover = $state<{
+    name: string;
+    top: number;
+    left: number;
+    placeAbove?: boolean;
+  } | null>(null);
+  let hoveredVarRect = $state<{
+    top: number;
+    bottom: number;
+    left: number;
+    right: number;
+  } | null>(null);
   let missingVarHoverHideTimer: ReturnType<typeof setTimeout> | null = null;
+  let popoverInputFocused = $state(false);
+  let popoverSaveSuccess = $state(false);
+  let hoveredVarElement: HTMLElement | null = null;
+
+  let measureCanvas: HTMLCanvasElement | null = null;
+  let measureCtx: CanvasRenderingContext2D | null = null;
+
+  function getMeasureContext(): CanvasRenderingContext2D | null {
+    if (!measureCtx && typeof document !== "undefined") {
+      measureCanvas = document.createElement("canvas");
+      measureCtx = measureCanvas.getContext("2d");
+    }
+    return measureCtx;
+  }
 
   function findResolvedVariable(name: string): VariableView | undefined {
     return (
@@ -3858,7 +5079,10 @@
     );
   }
 
-  function showVarPopover(name: string, target: HTMLElement) {
+  function showVarPopover(
+    name: string,
+    target: HTMLElement | { top: number; bottom: number; left: number; right: number }
+  ) {
     if (missingVarDrafts[name] === undefined) {
       const resolved = findResolvedVariable(name);
       if (resolved) missingVarDrafts[name] = resolved.value;
@@ -3870,41 +5094,333 @@
     const resolved = findResolvedVariable(name);
     if (!resolved) {
       await addMissingVariable(name);
+      popoverSaveSuccess = true;
+      setTimeout(() => {
+        popoverSaveSuccess = false;
+        missingVarHover = null;
+        hoveredVarRect = null;
+      }, 600);
       return;
     }
     const value = missingVarDrafts[name] ?? "";
     try {
       await api.updateVariable({ id: resolved.id, value });
-      missingVarHover = null;
+      popoverSaveSuccess = true;
       await loadVariables();
       await refreshDiagnostics();
       await refreshUrlPreview();
+      if (rightSidebarVisible && rightPanel !== "info" && selectedRequest) {
+        copyAsCurl();
+      }
+      setTimeout(() => {
+        popoverSaveSuccess = false;
+        missingVarHover = null;
+        hoveredVarRect = null;
+      }, 600);
     } catch (err) {
       errorMessage = describeError(err);
     }
   }
 
-  function showMissingVarPopover(name: string, target: HTMLElement) {
+  function showMissingVarPopover(
+    name: string,
+    target: HTMLElement | { top: number; bottom: number; left: number; right: number }
+  ) {
     if (missingVarHoverHideTimer) {
       clearTimeout(missingVarHoverHideTimer);
       missingVarHoverHideTimer = null;
     }
-    const rect = target.getBoundingClientRect();
-    missingVarHover = { name, top: rect.bottom, left: rect.left };
+    const isElem = typeof (target as HTMLElement).getBoundingClientRect === "function";
+    const r = isElem ? (target as HTMLElement).getBoundingClientRect() : (target as { top: number; bottom: number; left: number; right?: number });
+    const popoverWidth = 320;
+    const popoverHeight = 175;
+
+    let left = Math.round(r.left);
+    if (typeof window !== "undefined") {
+      if (left + popoverWidth > window.innerWidth - 16) {
+        left = Math.max(16, window.innerWidth - popoverWidth - 16);
+      }
+      if (left < 16) left = 16;
+    }
+
+    let top = Math.round(r.bottom + 6);
+    let placeAbove = false;
+    if (typeof window !== "undefined") {
+      if (r.bottom + popoverHeight > window.innerHeight - 16 && r.top - popoverHeight > 16) {
+        top = Math.round(r.top - popoverHeight - 6);
+        placeAbove = true;
+      }
+    }
+
+    hoveredVarRect = {
+      top: r.top,
+      bottom: r.bottom,
+      left: r.left,
+      right: r.right !== undefined ? r.right : r.left + 60,
+    };
+    missingVarHover = { name, top, left, placeAbove };
   }
 
-  function scheduleHideMissingVarPopover() {
+  function scheduleHideMissingVarPopover(delay = 250) {
+    if (popoverInputFocused) return;
     if (missingVarHoverHideTimer) clearTimeout(missingVarHoverHideTimer);
     missingVarHoverHideTimer = setTimeout(() => {
-      missingVarHover = null;
+      if (!popoverInputFocused) {
+        missingVarHover = null;
+        hoveredVarRect = null;
+        if (hoveredVarElement) {
+          hoveredVarElement.style.cursor = "";
+          hoveredVarElement = null;
+        }
+      }
       missingVarHoverHideTimer = null;
-    }, 150);
+    }, delay);
   }
 
   function cancelHideMissingVarPopover() {
     if (missingVarHoverHideTimer) {
       clearTimeout(missingVarHoverHideTimer);
       missingVarHoverHideTimer = null;
+    }
+  }
+
+  function detectVarInMonospaceTextarea(
+    textarea: HTMLTextAreaElement,
+    clientX: number,
+    clientY: number
+  ): { name: string; rect: { top: number; bottom: number; left: number; right: number } } | null {
+    const text = textarea.value;
+    if (!text || !text.includes("{{")) return null;
+
+    const rect = textarea.getBoundingClientRect();
+    if (
+      clientX < rect.left ||
+      clientX > rect.right ||
+      clientY < rect.top ||
+      clientY > rect.bottom
+    ) {
+      return null;
+    }
+
+    const style = window.getComputedStyle(textarea);
+    const paddingTop = parseFloat(style.paddingTop) || 0;
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+    const borderTop = parseFloat(style.borderTopWidth) || 0;
+    const borderLeft = parseFloat(style.borderLeftWidth) || 0;
+    let lineHeight = parseFloat(style.lineHeight);
+    if (isNaN(lineHeight) || lineHeight <= 0) {
+      lineHeight = (parseFloat(style.fontSize) || 12) * 1.5;
+    }
+
+    const ctx = getMeasureContext();
+    if (ctx) {
+      ctx.font = `${style.fontWeight || "normal"} ${style.fontSize || "12px"} ${style.fontFamily || "monospace"}`;
+    }
+
+    const relX = clientX - rect.left - borderLeft - paddingLeft + textarea.scrollLeft;
+    const relY = clientY - rect.top - borderTop - paddingTop + textarea.scrollTop;
+
+    if (relY < 0 || relX < 0) return null;
+
+    const lineIdx = Math.floor(relY / lineHeight);
+    const lines = text.split("\n");
+    if (lineIdx < 0 || lineIdx >= lines.length) return null;
+
+    const line = lines[lineIdx];
+    if (!line.includes("{{")) return null;
+
+    const regex = /\{\{([^}]+)\}\}/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(line)) !== null) {
+      const varName = match[1].trim();
+      let startX = 0;
+      let endX = 0;
+
+      if (ctx) {
+        startX = ctx.measureText(line.slice(0, match.index)).width;
+        endX = startX + ctx.measureText(match[0]).width;
+      } else {
+        startX = match.index * 7.2;
+        endX = (match.index + match[0].length) * 7.2;
+      }
+
+      if (relX >= startX - 4 && relX <= endX + 4) {
+        const tokenScreenLeft = rect.left + borderLeft + paddingLeft + startX - textarea.scrollLeft;
+        const tokenScreenTop = rect.top + borderTop + paddingTop + lineIdx * lineHeight - textarea.scrollTop;
+        return {
+          name: varName,
+          rect: {
+            top: tokenScreenTop,
+            bottom: tokenScreenTop + lineHeight,
+            left: tokenScreenLeft,
+            right: tokenScreenLeft + (endX - startX),
+          },
+        };
+      }
+    }
+    return null;
+  }
+
+  function detectVarInInput(
+    input: HTMLInputElement,
+    clientX: number,
+    clientY: number
+  ): { name: string; rect: { top: number; bottom: number; left: number; right: number } } | null {
+    const val = input.value;
+    if (!val || !val.includes("{{")) return null;
+
+    const rect = input.getBoundingClientRect();
+    if (
+      clientX < rect.left ||
+      clientX > rect.right ||
+      clientY < rect.top ||
+      clientY > rect.bottom
+    ) {
+      return null;
+    }
+
+    const style = window.getComputedStyle(input);
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+    const borderLeft = parseFloat(style.borderLeftWidth) || 0;
+
+    const ctx = getMeasureContext();
+    if (ctx) {
+      ctx.font = `${style.fontWeight || "normal"} ${style.fontSize || "12px"} ${style.fontFamily || "sans-serif"}`;
+    }
+
+    const relX = clientX - rect.left - borderLeft - paddingLeft + input.scrollLeft;
+    const regex = /\{\{([^}]+)\}\}/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(val)) !== null) {
+      const varName = match[1].trim();
+      let startX = 0;
+      let endX = 0;
+
+      if (ctx) {
+        startX = ctx.measureText(val.slice(0, match.index)).width;
+        endX = startX + ctx.measureText(match[0]).width;
+      } else {
+        startX = match.index * 7.5;
+        endX = (match.index + match[0].length) * 7.5;
+      }
+
+      if (relX >= startX - 4 && relX <= endX + 4) {
+        const tokenScreenLeft = rect.left + borderLeft + paddingLeft + startX - input.scrollLeft;
+        return {
+          name: varName,
+          rect: {
+            top: rect.top,
+            bottom: rect.bottom,
+            left: tokenScreenLeft,
+            right: tokenScreenLeft + (endX - startX),
+          },
+        };
+      }
+    }
+    return null;
+  }
+
+  function handleBodyMouseMove(e: MouseEvent) {
+    const textarea = e.currentTarget as HTMLTextAreaElement;
+    if (!textarea || !editBody || !editBody.includes("{{")) {
+      if (hoveredVarElement === textarea) {
+        textarea.style.cursor = "";
+        hoveredVarElement = null;
+        scheduleHideMissingVarPopover();
+      }
+      return;
+    }
+
+    const hit = detectVarInMonospaceTextarea(textarea, e.clientX, e.clientY);
+    if (hit) {
+      textarea.style.cursor = "pointer";
+      hoveredVarElement = textarea;
+      showVarPopover(hit.name, hit.rect);
+    } else {
+      if (hoveredVarElement === textarea) {
+        textarea.style.cursor = "";
+        hoveredVarElement = null;
+        scheduleHideMissingVarPopover();
+      }
+    }
+  }
+
+  function handleBodyMouseLeave(e: MouseEvent) {
+    const textarea = e.currentTarget as HTMLTextAreaElement;
+    if (textarea) {
+      textarea.style.cursor = "";
+      if (hoveredVarElement === textarea) hoveredVarElement = null;
+    }
+    scheduleHideMissingVarPopover();
+  }
+
+  function handleGenericInputMouseMove(e: MouseEvent) {
+    const input = e.currentTarget as HTMLInputElement;
+    if (!input || !input.value || !input.value.includes("{{")) {
+      if (hoveredVarElement === input) {
+        input.style.cursor = "";
+        hoveredVarElement = null;
+        scheduleHideMissingVarPopover();
+      }
+      return;
+    }
+
+    const hit = detectVarInInput(input, e.clientX, e.clientY);
+    if (hit) {
+      input.style.cursor = "pointer";
+      hoveredVarElement = input;
+      showVarPopover(hit.name, hit.rect);
+    } else {
+      if (hoveredVarElement === input) {
+        input.style.cursor = "";
+        hoveredVarElement = null;
+        scheduleHideMissingVarPopover();
+      }
+    }
+  }
+
+  function handleGenericInputMouseLeave(e: MouseEvent) {
+    const input = e.currentTarget as HTMLInputElement;
+    if (input) {
+      input.style.cursor = "";
+      if (hoveredVarElement === input) hoveredVarElement = null;
+    }
+    scheduleHideMissingVarPopover();
+  }
+
+  function handlePaneMouseMoveDelegated(e: MouseEvent) {
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    if (target.closest(".postman-var-popover") || target.closest(".missing-var-popover-portal")) return;
+
+    if (target instanceof HTMLInputElement) {
+      if (target.value && target.value.includes("{{")) {
+        const hit = detectVarInInput(target, e.clientX, e.clientY);
+        if (hit) {
+          target.style.cursor = "pointer";
+          hoveredVarElement = target;
+          showVarPopover(hit.name, hit.rect);
+          return;
+        }
+      }
+    } else if (target instanceof HTMLTextAreaElement) {
+      if (target.value && target.value.includes("{{")) {
+        const hit = detectVarInMonospaceTextarea(target, e.clientX, e.clientY);
+        if (hit) {
+          target.style.cursor = "pointer";
+          hoveredVarElement = target;
+          showVarPopover(hit.name, hit.rect);
+          return;
+        }
+      }
+    }
+
+    if (hoveredVarElement) {
+      hoveredVarElement.style.cursor = "";
+      hoveredVarElement = null;
+      scheduleHideMissingVarPopover();
     }
   }
 
@@ -4268,6 +5784,7 @@
         },
         ...requests,
       ];
+      await openRequest(created.id);
     } catch (err) {
       errorMessage = describeError(err);
     }
@@ -4684,101 +6201,132 @@
   </div>
 {/if}
 
-
-
-<!-- Icon library — one consistent stroke system (1.6px, square caps/joins, 16x16) replacing the
-     platform-emoji glyphs the app used to lean on. Filled shapes are noted per-icon. Sized via
-     `.icon { width/height: 1em }` so every call site scales with its own font-size (and with
-     `uiScale`, since that's how the rest of the app's rem-based sizing already scales). -->
-{#snippet iconClose()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M4 4l8 8M12 4l-8 8"/></svg>{/snippet}
-{#snippet iconCheck()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M3.5 8.5l3 3 6-7"/></svg>{/snippet}
-{#snippet iconCheckCircle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5.2 8.2l2 2 3.6-4.4"/></svg>{/snippet}
-{#snippet iconXCircle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M6 6l4 4M10 6l-4 4"/></svg>{/snippet}
-{#snippet iconTrash()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3 5h10M6 5V3.6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1V5"/><path d="M5.1 5l.7 8a1 1 0 0 0 1 .9h2.4a1 1 0 0 0 1-.9l.7-8"/><path d="M6.6 7.3v5M9.4 7.3v5"/></svg>{/snippet}
-{#snippet iconEdit()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M10.4 3l2.6 2.6-7.4 7.4H3v-2.6z"/><path d="M9 4.4L11.6 7"/></svg>{/snippet}
-{#snippet iconWarning()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M8 2.3L14.2 13H1.8Z"/><path d="M8 6.3v3.2"/><circle cx="8" cy="11.3" r="0.55" fill="currentColor" stroke="none"/></svg>{/snippet}
-{#snippet iconInfo()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 7.3v4"/><circle cx="8" cy="4.9" r="0.55" fill="currentColor" stroke="none"/></svg>{/snippet}
-{#snippet iconMoreVertical()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16"><circle cx="8" cy="3.7" r="1.15" fill="currentColor"/><circle cx="8" cy="8" r="1.15" fill="currentColor"/><circle cx="8" cy="12.3" r="1.15" fill="currentColor"/></svg>{/snippet}
-{#snippet iconMenu()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>{/snippet}
-{#snippet iconFolder()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 4.5h4l1.2 1.5H14v6.5H2Z"/></svg>{/snippet}
-{#snippet iconFolderOpen()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 4.8h4l1.2 1.5H14L12.7 12.5H3.3Z"/></svg>{/snippet}
-{#snippet iconFolderPlus()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter" stroke-linecap="square"><path d="M2 4.5h4l1.2 1.5H14v6.5H2Z"/><path d="M8 7.3v3.4M6.3 9h3.4"/></svg>{/snippet}
-{#snippet iconGlobe()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2.1 2.1 2.1 9.9 0 12M8 2c-2.1 2.1-2.1 9.9 0 12"/></svg>{/snippet}
-{#snippet iconImport()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M8 2.2v7.3M5 6.8L8 9.8l3-3"/><path d="M2.5 10.3v2.2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2.2"/></svg>{/snippet}
-{#snippet iconEye()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.4 8S4 3.6 8 3.6 14.6 8 14.6 8 12 12.4 8 12.4 1.4 8 1.4 8Z"/><circle cx="8" cy="8" r="2"/></svg>{/snippet}
-{#snippet iconLock()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="3.3" y="7" width="9.4" height="6.3"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>{/snippet}
-{#snippet iconGitBranch()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4.5" cy="3.6" r="1.3"/><circle cx="4.5" cy="12.4" r="1.3"/><circle cx="11.5" cy="7.6" r="1.3"/><path d="M4.5 4.9v6.2M4.5 8.2C4.5 5.9 6.6 5 10.2 4.7"/></svg>{/snippet}
-{#snippet iconMonitor()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2" y="3" width="12" height="8"/><path d="M6 13.3h4M8 11v2.3"/></svg>{/snippet}
-{#snippet iconGrid()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.3" y="2.3" width="4.7" height="4.7"/><rect x="9" y="2.3" width="4.7" height="4.7"/><rect x="2.3" y="9" width="4.7" height="4.7"/><rect x="9" y="9" width="4.7" height="4.7"/></svg>{/snippet}
-{#snippet iconLayout()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2" y="2.3" width="12" height="3.2"/><rect x="2" y="7" width="12" height="6.7"/></svg>{/snippet}
-{#snippet iconClock()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.6V8l2.8 1.8"/></svg>{/snippet}
-{#snippet iconSettings()}<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>{/snippet}
-{#snippet iconSparkle()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M8 1.4c.45 2.85 1.85 4.25 4.6 4.6-2.75.45-4.15 1.85-4.6 4.6-.45-2.75-1.85-4.15-4.6-4.6C6.15 5.65 7.55 4.25 8 1.4Z"/></svg>{/snippet}
-{#snippet iconInboxEmpty()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M2 9.3 4.4 3h7.2L14 9.3"/><path d="M2 9.3v3.4h12V9.3h-3.1a2.2 2.2 0 0 1-4.4 0H2Z"/></svg>{/snippet}
-{#snippet iconFileText()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><path d="M4 2h5.4L12 4.6V14H4Z"/><path d="M9.4 2v2.6H12"/><path d="M6 8.2h4M6 10.6h4"/></svg>{/snippet}
-{#snippet iconSave()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M13.5 13.5H2.5v-11h8l3 3v8z"/><path d="M4 2.5v4h5v-4"/><path d="M11.5 13.5v-4h-7v4"/></svg>{/snippet}
-{#snippet iconStar(filled: boolean)}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill={filled ? "currentColor" : "none"} stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M8 2.1l1.8 3.7 4 .6-2.9 2.8.7 4-3.6-1.9-3.6 1.9.7-4-2.9-2.8 4-.6Z"/></svg>{/snippet}
-{#snippet iconChevronRight()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M6 3.3 11 8l-5 4.7"/></svg>{/snippet}
-{#snippet iconChevronLeft()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M10 3.3 5 8l5 4.7"/></svg>{/snippet}
-{#snippet iconChevronDown()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3.3 6 8 11l4.7-5"/></svg>{/snippet}
-{#snippet iconChevronUp()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M3.3 10 8 5l4.7 5"/></svg>{/snippet}
-{#snippet iconExpandAll()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.4" y="2.4" width="11.2" height="11.2"/><path d="M8 5v6M5 8h6"/></svg>{/snippet}
-{#snippet iconCollapseAll()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="2.4" y="2.4" width="11.2" height="11.2"/><path d="M5 8h6"/></svg>{/snippet}
-{#snippet iconCopy()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="miter"><rect x="5.5" y="5.5" width="8" height="8"/><path d="M10.5 5.5V3H3v8h2.5"/></svg>{/snippet}
-{#snippet iconExpandDiagonal()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M9.5 2.5h4v4M13.5 2.5 8.8 7.2"/><path d="M6.5 13.5h-4v-4M2.5 13.5 7.2 8.8"/></svg>{/snippet}
-{#snippet iconArrowUp()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M8 12.5V4M4.3 7.7 8 4l3.7 3.7"/></svg>{/snippet}
-{#snippet iconArrowDown()}<svg class="icon" aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M8 3.5V12M4.3 8.3 8 12l3.7-3.7"/></svg>{/snippet}
-{#snippet railScreenIcon(id: string)}
-  {#if id === "workspace"}{@render iconLayout()}
-  {:else if id === "environments"}{@render iconGlobe()}
-  {:else if id === "git"}{@render iconGitBranch()}
-  {:else if id === "launcher"}{@render iconGrid()}
-  {:else if id === "history"}{@render iconClock()}
-  {:else if id === "settings"}{@render iconSettings()}
-  {/if}
-{/snippet}
-
 <div
   class="app-shell"
   data-theme={themeMode}
   style="{surfaceStyleOverride(surfaceTint, themeMode)} {accentStyleOverride(accentColor)} {fontStyleOverride(headingFontOverride, bodyFontOverride)} {textColorStyleOverride(textColorOverride)}"
 >
-  <nav class="screens-rail" class:collapsed={!screensRailVisible}>
-    <div class="rail-brand">
-      {#if screensRailVisible}<span>{t("rail.brand")}</span>{/if}
-      <button
-        type="button"
-        class="icon-btn"
-        title={screensRailVisible ? t("rail.hide") : t("rail.show")}
-        onclick={() => setScreensRailVisible(!screensRailVisible)}
-      >{@render iconMenu()}</button>
-    </div>
-    <div class="rail-screens">
-      {#each SCREENS as s (s.id)}
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="topbar-nav-arrows">
+        <button type="button" class="nav-arrow-btn" title="Back" onclick={() => { if (typeof window !== "undefined") window.history.back(); }}>{@render iconArrowLeft()}</button>
+        <button type="button" class="nav-arrow-btn" title="Forward" onclick={() => { if (typeof window !== "undefined") window.history.forward(); }}>{@render iconArrowRight()}</button>
+        <button type="button" class="nav-arrow-btn" title="Home" onclick={() => (activeScreen = "workspace")}>{@render iconHome()}</button>
+      </div>
+      <div class="menu-wrap topbar-workspace-wrap">
         <button
           type="button"
-          class="rail-screen"
-          class:active={activeScreen === s.id}
-          title={t(s.label)}
-          onclick={() => (activeScreen = s.id)}
+          class="topbar-workspace-btn"
+          onclick={() => (workspacePickerOpen = !workspacePickerOpen)}
         >
-          <span class="rail-screen-icon">{@render railScreenIcon(s.id)}</span>
-          {#if screensRailVisible}<span class="rail-screen-label">{t(s.label)}</span>{/if}
+          <span class="workspace-avatar-icon">{@render iconUser()}</span>
+          <span class="workspace-name">{workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? t("workspace.defaultName")}</span>
+          {@render iconChevronDown()}
         </button>
-      {/each}
-    </div>
-    {#if screensRailVisible}
-      <div class="rail-budget">
-        <span class="rail-budget-label">{t("rail.budget")}</span>
-        {#if systemDiagnostics}
-          <span class="rail-budget-value">{formatByteSize(systemDiagnostics.process_rss_bytes)}</span>
-          <span class="rail-budget-meta">{t("rail.tabsOpen", { count: openTabs.length })} · DB {formatByteSize(systemDiagnostics.db_size_bytes + systemDiagnostics.db_wal_size_bytes)}</span>
-        {:else}
-          <span class="rail-budget-meta">{t("rail.loading")}</span>
+        {#if workspacePickerOpen}
+          <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (workspacePickerOpen = false)}></button>
+          <div class="dropdown-menu workspace-picker-menu">
+            {#each workspaces as ws (ws.id)}
+              {#if renamingWorkspaceId === ws.id}
+                <form class="inline-form" onsubmit={submitRenameWorkspace}>
+                  <input bind:value={renameWorkspaceValue} use:focusOnMount onblur={submitRenameWorkspace} />
+                  <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                  <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingWorkspaceId = null)}>{@render iconClose()}</button>
+                </form>
+              {:else}
+                <div class="dropdown-menu-item workspace-picker-item" class:active={ws.id === activeWorkspaceId}>
+                  <button type="button" class="workspace-picker-item-btn" onclick={() => selectWorkspace(ws.id)}>{ws.name}</button>
+                  <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameWorkspace(ws)}>{@render iconEdit()}</button>
+                </div>
+              {/if}
+            {/each}
+            <button type="button" class="dropdown-menu-item" onclick={quickCreateWorkspace}>+ {t("workspace.newWorkspace")}</button>
+          </div>
         {/if}
       </div>
-    {/if}
-  </nav>
+    </div>
+    <div class="topbar-center">
+      <button type="button" class="topbar-search-pill" title={t("topbar.searchPlaceholder")} onclick={openPalette}>
+        {@render iconSearch()}
+        <span class="topbar-search-text">Search</span>
+        <span class="topbar-search-kbd">&#8984;K</span>
+      </button>
+    </div>
+    <div class="topbar-right">
+      <button type="button" class="topbar-btn topbar-btn-subtle" onclick={() => (showInviteModal = true)}>Invite</button>
+      <button type="button" class="topbar-btn topbar-btn-upgrade" onclick={() => (showUpgradeModal = true)}>Upgrade</button>
+      <button
+        type="button"
+        class="topbar-btn topbar-btn-ai"
+        title={aiConfigured ? t("topbar.askAiTitle") : t("topbar.setupAiTitle")}
+        onclick={() => (showAiPanel = true)}
+      >
+        {@render iconSparkle()} {aiConfigured ? t("topbar.askAi") : t("topbar.setupAi")}
+      </button>
+      <button
+        type="button"
+        class="topbar-btn"
+        title={t("topbar.importTitle")}
+        onclick={() => { importActiveTab = "collection"; collectionImportReport = null; collectionImportError = ""; showImportDialog = true; }}
+      >
+        {@render iconImport()} {t("topbar.import")}
+      </button>
+      <div class="menu-wrap">
+        <button type="button" class="topbar-icon-btn" title="Notifications" onclick={() => (notificationsOpen = !notificationsOpen)}>{@render iconBell()}</button>
+        {#if notificationsOpen}
+          <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (notificationsOpen = false)}></button>
+          <div class="dropdown-menu notifications-menu" style="right: 0; min-width: 280px; padding: 8px 0;">
+            <div style="padding: 6px 14px; font-weight: 600; font-size: 11px; color: #888; border-bottom: 1px solid #333;">NOTIFICATIONS</div>
+            <div class="notification-item" style="padding: 10px 14px; border-bottom: 1px solid #282828; font-size: 12px;">
+              <div style="font-weight: 600; color: #e6e6e6;">Workspace Synced</div>
+              <div style="color: #999; font-size: 11px; margin-top: 2px;">Default workspace is up to date.</div>
+            </div>
+            <div class="notification-item" style="padding: 10px 14px; font-size: 12px;">
+              <div style="font-weight: 600; color: #e6e6e6;">Welcome to Postman</div>
+              <div style="color: #999; font-size: 11px; margin-top: 2px;">Start creating requests or import a collection.</div>
+            </div>
+          </div>
+        {/if}
+      </div>
+      <button
+        type="button"
+        class="topbar-icon-btn"
+        title={t("settings.title")}
+        onclick={() => (activeScreen = activeScreen === "settings" ? "workspace" : "settings")}
+      >
+        {@render iconSettings()}
+      </button>
+      <div class="menu-wrap" style="z-index: 60;">
+        <button
+          type="button"
+          class="topbar-avatar"
+          title="Account (Developer)"
+          onclick={() => (accountMenuOpen = !accountMenuOpen)}
+          aria-label="Account menu"
+          aria-expanded={accountMenuOpen}
+        >
+          <span>D</span>
+        </button>
+        {#if accountMenuOpen}
+          <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (accountMenuOpen = false)}></button>
+          <div class="dropdown-menu account-menu" style="right: 0; min-width: 200px; padding: 6px 0;">
+            <div style="padding: 8px 14px; border-bottom: 1px solid #333;">
+              <div style="font-weight: 600; font-size: 12px; color: #fff;">Developer</div>
+              <div style="font-size: 11px; color: #888;">dev@postman.local</div>
+            </div>
+            <button type="button" class="dropdown-menu-item" onclick={() => { accountMenuOpen = false; activeScreen = "settings"; }}>Preferences</button>
+            <button type="button" class="dropdown-menu-item" onclick={() => { accountMenuOpen = false; exportFeedback = "Active profile is local."; setTimeout(() => { exportFeedback = ""; }, 2500); }}>Account Details</button>
+          </div>
+        {/if}
+      </div>
+      <div class="window-controls">
+        <button type="button" class="win-ctrl-btn" title="Minimize" onclick={handleWindowMinimize}>&minus;</button>
+        <button type="button" class="win-ctrl-btn" title="Maximize" onclick={handleWindowMaximize}>&#9634;</button>
+        <button type="button" class="win-ctrl-btn win-ctrl-close" title="Close" onclick={handleWindowClose}>&#10005;</button>
+      </div>
+    </div>
+  </header>
+  
 
   {#snippet noProjectPicker(screenName: string)}
     <section class="screen-page">
@@ -4836,7 +6384,7 @@
       ondragover={(e) => { e.stopPropagation(); if (requestSortField === "custom") e.preventDefault(); }}
       ondrop={(e) => { e.stopPropagation(); e.preventDefault(); onRequestDrop(req.id, req.folder_id); }}
     >
-      <div class="request-item" class:active={req.id === selectedRequest?.id}>
+      <div class="request-item" class:active={req.id === selectedRequest?.id} oncontextmenu={(e) => openRequestContextMenu(e, req)}>
         {#if renamingRequestId === req.id && req.id !== selectedRequest?.id}
           <form class="inline-form" onsubmit={submitRenameRequest}>
             <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
@@ -4851,7 +6399,7 @@
             onclick={() => toggleTreeRequestExpanded(req.id)}
           >{#if expandedTreeRequestIds.has(req.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</button>
           <button type="button" class="request-link" onclick={() => openRequest(req.id)} ondblclick={() => startRenameRequest(req.id, req.name)}>
-            <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
+            <span class="sidebar-method method-{req.method.toLowerCase()}">{req.method}</span>
             <span class="request-name">{req.name}</span>
             {#if sampleCount}<span class="tab-badge">{sampleCount}</span>{/if}
           </button>
@@ -4995,9 +6543,9 @@
 
   {#snippet secondaryRequestRow(projectId: string, req: RequestSummary)}
     <li class="request-item-wrapper">
-      <div class="request-item">
+      <div class="request-item" oncontextmenu={(e) => openRequestContextMenu(e, req)}>
         <button type="button" class="request-link" onclick={() => openSecondaryRequest(projectId, req.id)}>
-          <span class="method-badge method-{req.method.toLowerCase()}">{req.method}</span>
+          <span class="sidebar-method method-{req.method.toLowerCase()}">{req.method}</span>
           <span class="request-name">{req.name}</span>
         </button>
       </div>
@@ -5154,108 +6702,7 @@
     {@render expandedResponseView()}
   {:else}
   <div class="app">
-  <header class="topbar">
-    <div class="topbar-left">
-      <span class="brand">{t("topbar.brand")}</span>
-    </div>
-    <div class="topbar-center">
-      {#if selectedProjectId}
-        <div class="env-bar">
-          <div class="menu-wrap">
-            <button
-              type="button"
-              class="env-select env-select-btn"
-              class:active={!!selectedEnvironmentId}
-              onclick={() => (envPickerOpen ? (envPickerOpen = false) : openEnvPicker())}
-            >
-              <span class="env-select-label">{selectedEnvironmentId ? (allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId) : t("topbar.noEnvironment")}</span>
-              {@render iconChevronDown()}
-            </button>
-            {#if envPickerOpen}
-              <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (envPickerOpen = false)}></button>
-              <div class="dropdown-menu env-picker-menu">
-                <input
-                  type="search"
-                  class="request-search-input env-picker-search"
-                  placeholder={t("env.searchEnvironments")}
-                  bind:value={envPickerQuery}
-                  use:focusOnMount
-                />
-                <button type="button" class="dropdown-menu-item" onclick={() => { envPickerOpen = false; quickCreateEnvironment(); }}>{t("topbar.newEnvironment")}</button>
-                {#if !envPickerQuery}
-                  <button type="button" class="dropdown-menu-item" class:active={!selectedEnvironmentId} onclick={() => pickEnvironment(null)}>{t("topbar.noEnvironment")}</button>
-                {/if}
-                <div class="env-picker-list">
-                  {#each envPickerFilteredByProject as [projectName, envs] (projectName)}
-                    <div class="env-screen-group-label">{projectName}</div>
-                    {#each envs as env (env.id)}
-                      <button type="button" class="dropdown-menu-item" class:active={selectedEnvironmentId === env.id} onclick={() => pickEnvironment(env.id)}>{env.name}</button>
-                    {/each}
-                  {:else}
-                    {#if envPickerQuery}<p class="screen-empty-inline">{t("palette.noMatches")}</p>{/if}
-                  {/each}
-                </div>
-              </div>
-            {/if}
-          </div>
-          {#if selectedProjectId}
-            {@const isDefault = projects.find((p) => p.id === selectedProjectId)?.default_environment_id === selectedEnvironmentId}
-            <button
-              type="button"
-              class="icon-btn"
-              class:active={isDefault}
-              title={isDefault ? t("topbar.unsetDefaultEnv") : t("topbar.setDefaultEnv")}
-              onclick={toggleDefaultEnvironment}
-            >
-              {#if isDefault}{@render iconStar(true)}{:else}{@render iconStar(false)}{/if}
-            </button>
-          {/if}
-          {#if renamingEnvironmentId}
-            <form class="inline-form" onsubmit={submitRenameEnvironment}>
-              <input bind:value={renameEnvironmentValue} use:focusOnMount onblur={submitRenameEnvironment} />
-              <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
-              <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingEnvironmentId = null)}>{@render iconClose()}</button>
-            </form>
-          {/if}
-          <button
-            type="button"
-            class="icon-btn"
-            title={t("topbar.manageVariables")}
-            onclick={() => { loadVariables(); activeScreen = "environments"; }}
-          >
-            {@render iconEye()}
-          </button>
-          {#if selectedEnvironmentId}
-            <button
-              type="button"
-              class="icon-btn"
-              title={t("topbar.exportEnvironment")}
-              onclick={exportPostmanEnvironmentAction}
-            >
-              {@render iconImport()}
-            </button>
-          {/if}
-        </div>
-      {/if}
-    </div>
-    <div class="topbar-right">
-      <button type="button" class="palette-trigger" title={t("topbar.searchPlaceholder")} onclick={openPalette}>
-        <span>{t("topbar.searchPlaceholder")}</span>
-        <span class="palette-kbd">⌘K</span>
-      </button>
-      <button
-        type="button"
-        class="btn-ghost"
-        title={aiConfigured ? t("topbar.askAiTitle") : t("topbar.setupAiTitle")}
-        onclick={() => (showAiPanel = true)}
-      >
-        {@render iconSparkle()} {aiConfigured ? t("topbar.askAi") : t("topbar.setupAi")}
-      </button>
-      <button type="button" class="btn-ghost" title={t("topbar.importTitle")} onclick={() => { importActiveTab = "collection"; collectionImportReport = null; collectionImportError = ""; showImportDialog = true; }}>
-        {@render iconImport()} {t("topbar.import")}
-      </button>
-    </div>
-  </header>
+  
 
   {#if exportFeedback}
     <div class="success-banner"><span class="banner-message">{@render iconCheckCircle()} {exportFeedback}</span></div>
@@ -5270,134 +6717,357 @@
   <div class="workspace">
     {#if sidebarVisible}
     <aside class="sidebar" style="width: {sidebarWidth}px">
-      <div class="sidebar-workspace-row">
-        <div class="menu-wrap sidebar-workspace-menu">
+      <div class="sidebar-top-icons">
+        <button type="button" class="sidebar-top-icon-btn" class:active={sidebarSection === "collections"} title="Collections & APIs" onclick={() => { sidebarSection = "collections"; activeScreen = "workspace"; }}>{@render iconCube()}</button>
+        <button type="button" class="sidebar-top-icon-btn" class:active={sidebarSection === "environments"} title="Environments" onclick={() => { sidebarSection = "environments"; environmentsAccordionOpen = true; activeScreen = "workspace"; ensureAllEnvVariablesLoaded(); const targetId = selectedEnvironmentId || allEnvironments[0]?.id; if (targetId && !expandedEnvIds.has(targetId)) toggleEnvExpand(targetId); }}>{@render iconGlobe()}</button>
+        <button type="button" class="sidebar-top-icon-btn" class:active={sidebarSection === "history"} title="History" onclick={() => { sidebarSection = "history"; activeScreen = "workspace"; refreshProjectHistory(); }}>{@render iconClock()}</button>
+        <button type="button" class="sidebar-top-icon-btn" class:active={sidebarSection === "projects"} title="Projects & Workspaces" onclick={() => { sidebarSection = "projects"; activeScreen = "workspace"; }}>{@render iconFolder()}</button>
+      </div>
+
+      {#if sidebarSection === "history"}
+        <div class="sidebar-filter-bar">
+          <div class="sidebar-search-box">
+            {@render iconSearch()}
+            <input
+              type="search"
+              placeholder="Search history..."
+              bind:value={historySearchQuery}
+              class="sidebar-search-input"
+            />
+            {#if historySearchQuery.trim()}
+              <span class="request-count-badge" style="font-size: 10px; margin-right: 4px;">{filteredProjectHistory.length}/{projectHistory.length}</span>
+            {/if}
+          </div>
+          {#if projectHistory.length > 0}
+            <button type="button" class="icon-btn" title="Clear History" onclick={clearHistory}>
+              {@render iconTrash()}
+            </button>
+          {/if}
+        </div>
+
+        <div class="sidebar-history-list" style="max-height: calc(100vh - 160px); overflow-y: auto; padding: 4px 0;">
+          {#if historyLoading}
+            <p class="empty" style="padding: 12px;">{t("history.loading")}</p>
+          {:else if filteredProjectHistory.length === 0}
+            <div class="sidebar-empty-state" style="padding: 24px 12px; text-align: center;">
+              <span style="font-size: 24px; opacity: 0.5;">⏱</span>
+              <p class="empty" style="margin: 6px 0 0; font-size: 12px;">
+                {projectHistory.length === 0 ? "No requests sent yet" : "No history matches"}
+              </p>
+              <p style="font-size: 11px; color: #888; margin: 4px 0 0;">
+                Send a request to see it in your history
+              </p>
+            </div>
+          {:else}
+            {#each filteredProjectHistory as h (h.id)}
+              <button
+                type="button"
+                class="sidebar-history-item"
+                onclick={async () => {
+                  await openRequest(h.request_id);
+                  await openHistoryResponse(h.id);
+                  activeScreen = "workspace";
+                  responseExpanded = true;
+                }}
+              >
+                <div class="history-item-top">
+                  <span class="palette-item-method method-{h.method.toLowerCase()}">{h.method}</span>
+                  <span class="status-chip" class:status-ok={h.status < 400} class:status-err={h.status >= 400}>{h.status}</span>
+                  <div class="response-stat-spacer"></div>
+                  <span class="history-duration">{h.duration_ms} ms</span>
+                </div>
+                <div class="history-item-url" title={h.url}>
+                  {h.url}
+                </div>
+                <div class="history-item-bottom">
+                  <span class="history-req-name">{h.request_name}</span>
+                  <div class="response-stat-spacer"></div>
+                  <span class="history-time">{formatRelativeTime(h.created_at)}</span>
+                </div>
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {:else if sidebarSection === "environments"}
+        <div class="sidebar-filter-bar">
+          <div class="sidebar-search-box">
+            {@render iconSearch()}
+            <input
+              type="search"
+              placeholder={t("env.searchEnvironments")}
+              bind:value={envSidebarSearchQuery}
+              class="sidebar-search-input"
+            />
+            {#if envSidebarSearchQuery.trim()}
+              <span class="request-count-badge" style="font-size: 10px; margin-right: 4px;">{filteredSidebarEnvironments.length}/{allEnvironments.length}</span>
+            {/if}
+          </div>
+          <button type="button" class="icon-btn" title={t("env.newEnvironment")} onclick={quickCreateEnvironment}>+</button>
+        </div>
+
+        <!-- Environments search options row: All, Name, Key, Values -->
+        <div class="palette-scope-row sidebar-scope-row" style="gap: 4px; padding: 4px 10px 8px;">
+          <span style="font-size: 10px; color: #888; text-transform: uppercase; font-weight: 600; margin-right: 2px;">Search in:</span>
           <button
             type="button"
-            class="workspace-switcher-btn"
-            onclick={() => (workspacePickerOpen = !workspacePickerOpen)}
-          >
-            <span class="workspace-switcher-label">{workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? t("workspace.defaultName")}</span>
-            {@render iconChevronDown()}
-          </button>
-          {#if workspacePickerOpen}
-            <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (workspacePickerOpen = false)}></button>
-            <div class="dropdown-menu workspace-picker-menu">
-              {#each workspaces as ws (ws.id)}
-                {#if renamingWorkspaceId === ws.id}
-                  <form class="inline-form" onsubmit={submitRenameWorkspace}>
-                    <input bind:value={renameWorkspaceValue} use:focusOnMount onblur={submitRenameWorkspace} />
-                    <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
-                    <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingWorkspaceId = null)}>{@render iconClose()}</button>
-                  </form>
-                {:else}
-                  <div class="dropdown-menu-item workspace-picker-item" class:active={ws.id === activeWorkspaceId}>
-                    <button type="button" class="workspace-picker-item-btn" onclick={() => selectWorkspace(ws.id)}>{ws.name}</button>
-                    <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.rename")} onclick={() => startRenameWorkspace(ws)}>{@render iconEdit()}</button>
+            class="palette-scope-btn"
+            class:active={envSidebarSearchScope === "all"}
+            onclick={() => (envSidebarSearchScope = "all")}
+          >All</button>
+          <button
+            type="button"
+            class="palette-scope-btn"
+            class:active={envSidebarSearchScope === "name"}
+            onclick={() => (envSidebarSearchScope = "name")}
+          >Name</button>
+          <button
+            type="button"
+            class="palette-scope-btn"
+            class:active={envSidebarSearchScope === "key"}
+            onclick={() => (envSidebarSearchScope = "key")}
+          >Key</button>
+          <button
+            type="button"
+            class="palette-scope-btn"
+            class:active={envSidebarSearchScope === "values"}
+            onclick={() => (envSidebarSearchScope = "values")}
+          >Values</button>
+        </div>
+
+        <div class="sidebar-env-list" style="max-height: calc(100vh - 170px); overflow-y: auto; padding: 4px 0;">
+          <div class="sidebar-accordion-section-title" style="cursor: default;">
+            <span>ENVIRONMENTS ({filteredSidebarEnvironments.length})</span>
+            <div class="response-stat-spacer"></div>
+            <button type="button" class="icon-btn icon-btn-ghost" title={t("env.newEnvironment")} onclick={quickCreateEnvironment}>+</button>
+          </div>
+
+          {#if filteredSidebarEnvironments.length === 0}
+            <div class="sidebar-empty-state" style="padding: 24px 12px; text-align: center;">
+              <span style="font-size: 24px; opacity: 0.5;">🌐</span>
+              <p class="empty" style="margin: 6px 0 0; font-size: 12px;">
+                {allEnvironments.length === 0 ? "No environments yet" : "No environments match"}
+              </p>
+              {#if envSidebarSearchQuery.trim()}
+                <p style="font-size: 11px; color: #888; margin: 4px 0 0;">
+                  No environment matches "{envSidebarSearchQuery}" in {envSidebarSearchScope.toUpperCase()}
+                </p>
+                <button
+                  type="button"
+                  class="btn-xs-primary"
+                  style="margin-top: 8px;"
+                  onclick={() => (envSidebarSearchQuery = "")}
+                >Clear Search</button>
+              {:else}
+                <button
+                  type="button"
+                  class="btn-xs-primary"
+                  style="margin-top: 8px;"
+                  onclick={quickCreateEnvironment}
+                >+ Create Environment</button>
+              {/if}
+            </div>
+          {:else}
+            <!-- Starred / Favorite Environments Section -->
+            {#if filteredSidebarFavoriteEnvs.length > 0}
+              <div class="sidebar-fav-header">
+                <span>★ FAVORITES ({filteredSidebarFavoriteEnvs.length})</span>
+              </div>
+              {#each filteredSidebarFavoriteEnvs as env (env.id)}
+                {@const q = envSidebarSearchQuery.trim().toLowerCase()}
+                {@const vars = envVariablesCache.get(env.id) || []}
+                {@const hasVarMatch = q !== "" && vars.some(v => v.key.toLowerCase().includes(q) || (v.value || "").toLowerCase().includes(q))}
+                {@const isAutoExpanded = expandedEnvIds.has(env.id) || hasVarMatch}
+                <div class="sidebar-env-item-row" class:active={selectedEnvironmentId === env.id}>
+                  <button
+                    type="button"
+                    class="env-expand-btn"
+                    title={isAutoExpanded ? "Collapse variables" : "Expand variables"}
+                    onclick={(e) => { e.stopPropagation(); toggleEnvExpand(env.id); }}
+                  >{#if isAutoExpanded}▼{:else}▶{/if}</button>
+                  <button
+                    type="button"
+                    class="sidebar-env-link"
+                    onclick={() => {
+                      toggleEnvExpand(env.id);
+                      openEnvironmentTab(env);
+                    }}
+                  >
+                    <span class="env-cube-icon" style="color: #ff6c37; font-size: 13px;">&#9638;</span>
+                    <span class="env-name-text">{env.name}</span>
+                    {#if selectedEnvironmentId === env.id}
+                      <span class="env-check-icon" title="Active">✓</span>
+                    {/if}
+                  </button>
+                  <button
+                    type="button"
+                    class="env-star-btn favorited"
+                    title="Remove from favorites"
+                    onclick={(e) => { e.stopPropagation(); toggleEnvFavorite(env.id); }}
+                  >★</button>
+                </div>
+                {#if isAutoExpanded}
+                  <div class="sidebar-env-vars-container">
+                    {#each vars as v (v.id)}
+                      {@const isKeyMatch = q !== "" && (envSidebarSearchScope === "all" || envSidebarSearchScope === "key") && v.key.toLowerCase().includes(q)}
+                      {@const isValMatch = q !== "" && (envSidebarSearchScope === "all" || envSidebarSearchScope === "values") && (v.value || "").toLowerCase().includes(q)}
+                      <div class="sidebar-env-var-item" class:matched-var={isKeyMatch || isValMatch} title="{v.key}: {v.is_secret ? '••••••••' : v.value}">
+                        <span class="var-key-text" style={isKeyMatch ? "color: #ff9800; font-weight: 700;" : ""}>{v.key}:</span>
+                        <span class="var-val-text" style={isValMatch ? "color: #ffeb3b; font-weight: 700;" : ""}>{v.is_secret ? "••••••••" : (v.value || '""')}</span>
+                      </div>
+                    {:else}
+                      <div class="sidebar-env-var-item empty">No variables</div>
+                    {/each}
                   </div>
                 {/if}
               {/each}
-              <button type="button" class="dropdown-menu-item" onclick={quickCreateWorkspace}>+ {t("workspace.newWorkspace")}</button>
-            </div>
-          {/if}
-        </div>
-      </div>
-      <div class="sidebar-header">
-        <span class="sidebar-title">{t("sidebar.projects")}</span>
-        <div class="sidebar-header-actions">
-          <button
-            type="button"
-            class="icon-btn"
-            title={t("sidebar.importCollection")}
-            onclick={() => {
-              collectionImportTarget = "new";
-              importActiveTab = "collection";
-              collectionImportReport = null;
-              collectionImportError = "";
-              showImportDialog = true;
-            }}
-          >{@render iconImport()}</button>
-          <button type="button" class="icon-btn" title={t("sidebar.newProject")} onclick={quickCreateProject}>+</button>
-          <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => setSidebarVisible(false)}>{@render iconChevronLeft()}</button>
-        </div>
-      </div>
+              <div class="sidebar-fav-divider"></div>
+            {/if}
 
-      <div class="project-search-box">
-        <input
-          type="search"
-          placeholder={t("sidebar.searchProjects")}
-          bind:value={projectSearchQuery}
-          class="project-search-input"
-        />
-        {#if projectSearchQuery}
-          <span class="request-count-badge">{filteredProjects.length}/{projects.length}</span>
-        {/if}
-        <div class="menu-wrap">
-          <button
-            type="button"
-            class="icon-btn"
-            title={t("sidebar.sortOptions")}
-            onclick={() => (projectSortMenuOpen = !projectSortMenuOpen)}
-          >{@render iconMoreVertical()}</button>
-          {#if projectSortMenuOpen}
-            <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (projectSortMenuOpen = false)}></button>
-            <div class="dropdown-menu">
-              {#each PROJECT_SORT_FIELDS as f (f.field)}
+            <!-- All Environments (matching search) -->
+            {#each filteredSidebarEnvironments as env (env.id)}
+              {@const isFav = isEnvFavorite(env.id)}
+              {@const q = envSidebarSearchQuery.trim().toLowerCase()}
+              {@const vars = envVariablesCache.get(env.id) || []}
+              {@const hasVarMatch = q !== "" && vars.some(v => v.key.toLowerCase().includes(q) || (v.value || "").toLowerCase().includes(q))}
+              {@const isAutoExpanded = expandedEnvIds.has(env.id) || hasVarMatch}
+              <div class="sidebar-env-item-row" class:active={selectedEnvironmentId === env.id}>
                 <button
                   type="button"
-                  class="dropdown-menu-item"
-                  class:active={projectSortField === f.field}
-                  onclick={() => pickProjectSortField(f.field)}
+                  class="env-expand-btn"
+                  title={isAutoExpanded ? "Collapse variables" : "Expand variables"}
+                  onclick={(e) => { e.stopPropagation(); toggleEnvExpand(env.id); }}
+                >{#if isAutoExpanded}▼{:else}▶{/if}</button>
+                <button
+                  type="button"
+                  class="sidebar-env-link"
+                  onclick={() => {
+                    toggleEnvExpand(env.id);
+                    openEnvironmentTab(env);
+                  }}
                 >
-                  <span>{t(f.label)}</span>
-                  {#if projectSortField === f.field}
-                    <span class="sort-dir-indicator">{#if projectSortDir === "asc"}{@render iconArrowUp()}{:else}{@render iconArrowDown()}{/if}</span>
+                  <span class="env-cube-icon" style="color: #ff6c37; font-size: 13px;">&#9638;</span>
+                  <span class="env-name-text">{env.name}</span>
+                  {#if selectedEnvironmentId === env.id}
+                    <span class="env-check-icon" title="Active">✓</span>
                   {/if}
                 </button>
-              {/each}
-            </div>
+                <button
+                  type="button"
+                  class="env-star-btn"
+                  class:favorited={isFav}
+                  title={isFav ? "Remove from favorites" : "Add to favorites"}
+                  onclick={(e) => { e.stopPropagation(); toggleEnvFavorite(env.id); }}
+                >{isFav ? "★" : "☆"}</button>
+              </div>
+              {#if isAutoExpanded}
+                <div class="sidebar-env-vars-container">
+                  {#each vars as v (v.id)}
+                    {@const isKeyMatch = q !== "" && (envSidebarSearchScope === "all" || envSidebarSearchScope === "key") && v.key.toLowerCase().includes(q)}
+                    {@const isValMatch = q !== "" && (envSidebarSearchScope === "all" || envSidebarSearchScope === "values") && (v.value || "").toLowerCase().includes(q)}
+                    <div class="sidebar-env-var-item" class:matched-var={isKeyMatch || isValMatch} title="{v.key}: {v.is_secret ? '••••••••' : v.value}">
+                      <span class="var-key-text" style={isKeyMatch ? "color: #ff9800; font-weight: 700;" : ""}>{v.key}:</span>
+                      <span class="var-val-text" style={isValMatch ? "color: #ffeb3b; font-weight: 700;" : ""}>{v.is_secret ? "••••••••" : (v.value || '""')}</span>
+                    </div>
+                  {:else}
+                    <div class="sidebar-env-var-item empty">No variables</div>
+                  {/each}
+                </div>
+              {/if}
+            {/each}
           {/if}
         </div>
-      </div>
-
-      <div class="palette-scope-row sidebar-scope-row">
-        <button type="button" class="palette-scope-btn" class:active={projectSearchScope === "all"} onclick={() => (projectSearchScope = "all")}>{t("palette.scopeAll")}</button>
-        <button type="button" class="palette-scope-btn" class:active={projectSearchScope === "projects"} onclick={() => (projectSearchScope = "projects")}>{t("palette.scopeProjects")}</button>
-        <button type="button" class="palette-scope-btn" class:active={projectSearchScope === "apis"} onclick={() => (projectSearchScope = "apis")}>{t("palette.scopeApis")}</button>
-      </div>
-      {#if projectSearchScope !== "projects"}
-        <div class="palette-scope-row palette-field-row sidebar-scope-row">
-          <span class="palette-field-label">{t("palette.fieldsLabel")}</span>
-          <button type="button" class="palette-scope-btn" class:active={sidebarSearchFields.name} aria-pressed={sidebarSearchFields.name} onclick={() => toggleSidebarSearchField("name")}>{t("palette.fieldName")}</button>
-          <button type="button" class="palette-scope-btn" class:active={sidebarSearchFields.url} aria-pressed={sidebarSearchFields.url} onclick={() => toggleSidebarSearchField("url")}>{t("palette.fieldUrl")}</button>
-          <button type="button" class="palette-scope-btn" class:active={sidebarSearchFields.body} aria-pressed={sidebarSearchFields.body} onclick={() => toggleSidebarSearchField("body")}>{t("palette.fieldBody")}</button>
+      {:else}
+        <div class="sidebar-filter-bar">
+          <div class="sidebar-search-box">
+            {@render iconSearch()}
+            <input
+              type="search"
+              placeholder={t("sidebar.searchProjects")}
+              bind:value={projectSearchQuery}
+              class="sidebar-search-input"
+            />
+            {#if projectSearchQuery.trim()}
+              <span class="request-count-badge" style="font-size: 10px; margin-right: 4px;">{filteredProjects.length}/{projects.length}</span>
+            {/if}
+          </div>
+          <button type="button" class="icon-btn" title={t("sidebar.newProject")} onclick={quickCreateProject}>+</button>
+          <div class="menu-wrap">
+            <button
+              type="button"
+              class="icon-btn"
+              title={t("sidebar.sortOptions")}
+              onclick={() => (projectSortMenuOpen = !projectSortMenuOpen)}
+            >{@render iconMoreVertical()}</button>
+            {#if projectSortMenuOpen}
+              <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (projectSortMenuOpen = false)}></button>
+              <div class="dropdown-menu">
+                {#each PROJECT_SORT_FIELDS as f (f.field)}
+                  <button
+                    type="button"
+                    class="dropdown-menu-item"
+                    class:active={projectSortField === f.field}
+                    onclick={() => pickProjectSortField(f.field)}
+                  >
+                    <span>{t(f.label)}</span>
+                    {#if projectSortField === f.field}
+                      <span class="sort-dir-indicator">{#if projectSortDir === "asc"}{@render iconArrowUp()}{:else}{@render iconArrowDown()}{/if}</span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
         </div>
-      {/if}
 
-      {#if projectSearchScope !== "projects" && projectSearchQuery.trim().length >= 2}
-        <ul class="sidebar-api-results">
-          {#each sidebarApiResults as r (r.id)}
-            <li>
-              <button
-                type="button"
-                class="palette-item sidebar-api-result-item"
-                onclick={async () => {
-                  await selectProject(r.project_id);
-                  openRequest(r.id);
-                }}
-              >
-                <span class="palette-item-method">{r.method}</span>
-                <span class="palette-item-label"><span class="palette-item-breadcrumb">{r.project_name} ›</span> {r.name}</span>
-                <div class="response-stat-spacer"></div>
-                <span class="palette-item-hint">{r.url}</span>
-              </button>
-            </li>
-          {:else}
-            <li class="empty">{t("palette.noMatches")}</li>
-          {/each}
-        </ul>
-      {/if}
+        <!-- Search options row: always visible below the search bar -->
+        <div class="palette-scope-row sidebar-scope-row">
+          <button type="button" class="palette-scope-btn" class:active={projectSearchScope === "all"} onclick={() => (projectSearchScope = "all")}>{t("palette.scopeAll")}</button>
+          <button type="button" class="palette-scope-btn" class:active={projectSearchScope === "projects"} onclick={() => (projectSearchScope = "projects")}>{t("palette.scopeProjects")}</button>
+          <button type="button" class="palette-scope-btn" class:active={projectSearchScope === "apis"} onclick={() => (projectSearchScope = "apis")}>{t("palette.scopeApis")}</button>
+        </div>
+        {#if projectSearchScope !== "projects"}
+          <div class="palette-scope-row palette-field-row sidebar-scope-row">
+            <span class="palette-field-label">{t("palette.fieldsLabel")}</span>
+            <button type="button" class="palette-scope-btn" class:active={sidebarSearchFields.name} aria-pressed={sidebarSearchFields.name} onclick={() => toggleSidebarSearchField("name")}>{t("palette.fieldName")}</button>
+            <button type="button" class="palette-scope-btn" class:active={sidebarSearchFields.url} aria-pressed={sidebarSearchFields.url} onclick={() => toggleSidebarSearchField("url")}>{t("palette.fieldUrl")}</button>
+            <button type="button" class="palette-scope-btn" class:active={sidebarSearchFields.body} aria-pressed={sidebarSearchFields.body} onclick={() => toggleSidebarSearchField("body")}>{t("palette.fieldBody")}</button>
+          </div>
+        {/if}
 
+        {#if projectSearchScope !== "projects" && projectSearchQuery.trim().length >= 2}
+          <ul class="sidebar-api-results">
+            {#each sidebarApiResults as r (r.id)}
+              <li>
+                <button
+                  type="button"
+                  class="palette-item sidebar-api-result-item"
+                  onclick={async () => {
+                    await selectProject(r.project_id);
+                    openRequest(r.id);
+                  }}
+                >
+                  <span class="palette-item-method">{r.method}</span>
+                  <span class="palette-item-label"><span class="palette-item-breadcrumb">{r.project_name} ›</span> {r.name}</span>
+                  <div class="response-stat-spacer"></div>
+                  <span class="palette-item-hint">{r.url}</span>
+                </button>
+              </li>
+            {:else}
+              <li class="empty">{t("palette.noMatches")}</li>
+            {/each}
+          </ul>
+        {/if}
+
+        {#if sidebarSectionsVisible.collections && projectSearchScope !== "apis"}
+        <div class="sidebar-accordion-section-title" onclick={() => (collectionsAccordionOpen = !collectionsAccordionOpen)}>
+          <span class="accordion-arrow">{#if collectionsAccordionOpen}&#709;{:else}&rsaquo;{/if}</span>
+          <span>COLLECTIONS</span>
+          <div class="response-stat-spacer"></div>
+          <button type="button" class="icon-btn icon-btn-ghost" title={t("sidebar.newProject")} onclick={(e) => { e.stopPropagation(); quickCreateProject(); }}>+</button>
+        </div>
+        {/if}
+
+      {#if sidebarSectionsVisible.collections && collectionsAccordionOpen}
       <div class="project-list">
         {#if projectSearchScope !== "apis"}
         {#each filteredProjects as project (project.id)}
@@ -5440,7 +7110,7 @@
                       onclick={() => (openProjectMenuId = openProjectMenuId === project.id ? null : project.id)}
                     >{@render iconMoreVertical()}</button>
                     {#if openProjectMenuId === project.id}
-                      <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (openProjectMenuId = null)}></button>
+                      <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (openProjectMenuId = null)}></button>
                       <div class="dropdown-menu">
                         <button
                           type="button"
@@ -5521,7 +7191,7 @@
                       onclick={() => (requestSortMenuOpen = !requestSortMenuOpen)}
                     >{@render iconMoreVertical()}</button>
                     {#if requestSortMenuOpen}
-                      <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (requestSortMenuOpen = false)}></button>
+                      <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (requestSortMenuOpen = false)}></button>
                       <div class="dropdown-menu">
                         {#each REQUEST_SORT_FIELDS as f (f.field)}
                           <button
@@ -5606,6 +7276,213 @@
         {/each}
         {/if}
       </div>
+      {/if}
+
+      {#if sidebarSectionsVisible.environments}
+      <div class="sidebar-accordion-section-title" onclick={() => (environmentsAccordionOpen = !environmentsAccordionOpen)}>
+        <span class="accordion-arrow">{#if environmentsAccordionOpen}&#709;{:else}&rsaquo;{/if}</span>
+        <span>ENVIRONMENTS</span>
+        <div class="response-stat-spacer"></div>
+        <button type="button" class="icon-btn icon-btn-ghost" title="New Environment" onclick={(e) => { e.stopPropagation(); quickCreateEnvironment(); }}>+</button>
+      </div>
+      {#if environmentsAccordionOpen}
+        <div class="sidebar-env-list">
+          <!-- Starred / Favorite Environments Section -->
+          {#if favoriteEnvs.length > 0}
+            <div class="sidebar-fav-header">
+              <span>★ FAVORITES ({favoriteEnvs.length})</span>
+            </div>
+            {#each favoriteEnvs as env (env.id)}
+              <div class="sidebar-env-item-row" class:active={selectedEnvironmentId === env.id}>
+                <button
+                  type="button"
+                  class="env-expand-btn"
+                  title={expandedEnvIds.has(env.id) ? "Collapse variables" : "Expand variables"}
+                  onclick={(e) => { e.stopPropagation(); toggleEnvExpand(env.id); }}
+                >{#if expandedEnvIds.has(env.id)}▼{:else}▶{/if}</button>
+                <button
+                  type="button"
+                  class="sidebar-env-link"
+                  onclick={() => {
+                    toggleEnvExpand(env.id);
+                    openEnvironmentTab(env);
+                  }}
+                >
+                  <span class="env-cube-icon" style="color: #ff6c37; font-size: 13px;">&#9638;</span>
+                  <span class="env-name-text">{env.name}</span>
+                  {#if selectedEnvironmentId === env.id}
+                    <span class="env-check-icon" title="Active">✓</span>
+                  {/if}
+                </button>
+                <button
+                  type="button"
+                  class="env-star-btn favorited"
+                  title="Remove from favorites"
+                  onclick={(e) => { e.stopPropagation(); toggleEnvFavorite(env.id); }}
+                >★</button>
+              </div>
+              {#if expandedEnvIds.has(env.id)}
+                {@const vars = envVariablesCache.get(env.id) || []}
+                <div class="sidebar-env-vars-container">
+                  {#each vars as v (v.id)}
+                    <div class="sidebar-env-var-item" title="{v.key}: {v.is_secret ? '••••••••' : v.value}">
+                      <span class="var-key-text">{v.key}:</span>
+                      <span class="var-val-text">{v.is_secret ? "••••••••" : (v.value || '""')}</span>
+                    </div>
+                  {:else}
+                    <div class="sidebar-env-var-item empty">No variables</div>
+                  {/each}
+                </div>
+              {/if}
+            {/each}
+            <div class="sidebar-fav-divider"></div>
+          {/if}
+
+          <!-- All Environments -->
+          {#each allEnvironments as env (env.id)}
+            {@const isFav = isEnvFavorite(env.id)}
+            <div class="sidebar-env-item-row" class:active={selectedEnvironmentId === env.id}>
+              <button
+                type="button"
+                class="env-expand-btn"
+                title={expandedEnvIds.has(env.id) ? "Collapse variables" : "Expand variables"}
+                onclick={(e) => { e.stopPropagation(); toggleEnvExpand(env.id); }}
+              >{#if expandedEnvIds.has(env.id)}▼{:else}▶{/if}</button>
+              <button
+                type="button"
+                class="sidebar-env-link"
+                onclick={() => {
+                  toggleEnvExpand(env.id);
+                  openEnvironmentTab(env);
+                }}
+              >
+                <span class="env-cube-icon" style="color: #ff6c37; font-size: 13px;">&#9638;</span>
+                <span class="env-name-text">{env.name}</span>
+                {#if selectedEnvironmentId === env.id}
+                  <span class="env-check-icon" title="Active">✓</span>
+                {/if}
+              </button>
+              <button
+                type="button"
+                class="env-star-btn"
+                class:favorited={isFav}
+                title={isFav ? "Remove from favorites" : "Add to favorites"}
+                onclick={(e) => { e.stopPropagation(); toggleEnvFavorite(env.id); }}
+              >{isFav ? "★" : "☆"}</button>
+            </div>
+            {#if expandedEnvIds.has(env.id)}
+              {@const vars = envVariablesCache.get(env.id) || []}
+              <div class="sidebar-env-vars-container">
+                {#each vars as v (v.id)}
+                  <div class="sidebar-env-var-item" title="{v.key}: {v.is_secret ? '••••••••' : v.value}">
+                    <span class="var-key-text">{v.key}:</span>
+                    <span class="var-val-text">{v.is_secret ? "••••••••" : (v.value || '""')}</span>
+                  </div>
+                {:else}
+                  <div class="sidebar-env-var-item empty">No variables</div>
+                {/each}
+              </div>
+            {/if}
+          {/each}
+        </div>
+      {/if}
+      {/if}
+
+      {#if sidebarSectionsVisible.datasets}
+      <div class="sidebar-accordion-section-title" onclick={() => (datasetsAccordionOpen = !datasetsAccordionOpen)}>
+        <span class="accordion-arrow">{#if datasetsAccordionOpen}&#709;{:else}&rsaquo;{/if}</span>
+        <span>DATASETS</span>
+        <div class="response-stat-spacer"></div>
+        <button type="button" class="icon-btn icon-btn-ghost" title="New Dataset" onclick={(e) => { e.stopPropagation(); openDatasetTab({ id: 'data-' + Date.now(), name: 'test-dataset.csv' }); }}>+</button>
+      </div>
+      {#if datasetsAccordionOpen}
+        <div class="sidebar-sub-list">
+          {#each sampleDatasets as d (d.id)}
+            <button type="button" class="sidebar-sub-link" onclick={() => openDatasetTab(d)}>
+              <span class="sidebar-sub-icon" style="color: #722ed1;">📊</span>
+              <span class="sidebar-sub-name">{d.name}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {/if}
+
+      {#if sidebarSectionsVisible.documents}
+      <div class="sidebar-accordion-section-title" onclick={() => (documentsAccordionOpen = !documentsAccordionOpen)}>
+        <span class="accordion-arrow">{#if documentsAccordionOpen}&#709;{:else}&rsaquo;{/if}</span>
+        <span>DOCUMENTS</span>
+        <div class="response-stat-spacer"></div>
+        <button type="button" class="icon-btn icon-btn-ghost" title="New Document" onclick={(e) => { e.stopPropagation(); openDocumentTab({ id: 'doc-' + Date.now(), name: 'New Documentation' }); }}>+</button>
+      </div>
+      {#if documentsAccordionOpen}
+        <div class="sidebar-sub-list">
+          {#each sampleDocuments as doc (doc.id)}
+            <button type="button" class="sidebar-sub-link" onclick={() => openDocumentTab(doc)}>
+              <span class="sidebar-sub-icon" style="color: #0cbb52;">📖</span>
+              <span class="sidebar-sub-name">{doc.name}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {/if}
+
+      {#if sidebarSectionsVisible.specs}
+      <div class="sidebar-accordion-section-title" onclick={() => (specsAccordionOpen = !specsAccordionOpen)}>
+        <span class="accordion-arrow">{#if specsAccordionOpen}&#709;{:else}&rsaquo;{/if}</span>
+        <span>SPECS</span>
+        <div class="response-stat-spacer"></div>
+        <button type="button" class="icon-btn icon-btn-ghost" title="New API Spec" onclick={(e) => { e.stopPropagation(); openSpecTab({ id: 'spec-' + Date.now(), name: 'new-spec.yaml' }); }}>+</button>
+      </div>
+      {#if specsAccordionOpen}
+        <div class="sidebar-sub-list">
+          {#each sampleSpecs as spec (spec.id)}
+            <button type="button" class="sidebar-sub-link" onclick={() => openSpecTab(spec)}>
+              <span class="sidebar-sub-icon" style="color: #108ee9;">⚡</span>
+              <span class="sidebar-sub-name">{spec.name}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {/if}
+
+      {#if sidebarSectionsVisible.mocks}
+      <div class="sidebar-accordion-section-title" onclick={() => (mocksAccordionOpen = !mocksAccordionOpen)}>
+        <span class="accordion-arrow">{#if mocksAccordionOpen}&#709;{:else}&rsaquo;{/if}</span>
+        <span>MOCKS</span>
+        <div class="response-stat-spacer"></div>
+        <button type="button" class="icon-btn icon-btn-ghost" title="New Mock Server" onclick={(e) => { e.stopPropagation(); openMockTab({ id: 'mock-' + Date.now(), name: 'Mock Server ' + (sampleMockServers.length + 1) }); }}>+</button>
+      </div>
+      {#if mocksAccordionOpen}
+        <div class="sidebar-sub-list">
+          {#each sampleMockServers as m (m.id)}
+            <button type="button" class="sidebar-sub-link" onclick={() => openMockTab(m)}>
+              <span class="sidebar-sub-icon" style="color: #fa8c16;">📦</span>
+              <span class="sidebar-sub-name">{m.name}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {/if}
+
+      {#if sidebarSectionsVisible.flows}
+      <div class="sidebar-accordion-section-title" onclick={() => (flowsAccordionOpen = !flowsAccordionOpen)}>
+        <span class="accordion-arrow">{#if flowsAccordionOpen}&#709;{:else}&rsaquo;{/if}</span>
+        <span>FLOWS</span>
+        <div class="response-stat-spacer"></div>
+        <button type="button" class="icon-btn icon-btn-ghost" title="New Flow" onclick={(e) => { e.stopPropagation(); openFlowTab({ id: 'flow-' + Date.now(), name: 'New Request Flow' }); }}>+</button>
+      </div>
+      {#if flowsAccordionOpen}
+        <div class="sidebar-sub-list">
+          {#each sampleFlows as fl (fl.id)}
+            <button type="button" class="sidebar-sub-link" onclick={() => openFlowTab(fl)}>
+              <span class="sidebar-sub-icon" style="color: #13c2c2;">🔀</span>
+              <span class="sidebar-sub-name">{fl.name}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {/if}
+      {/if}
     </aside>
 
     <div
@@ -5630,58 +7507,76 @@
     {/if}
 
     <main class="main">
-      {#if !selectedProjectId}
+      {#if !selectedProjectId && !currentTab && openTabs.length === 0}
         <div class="empty-state">
           <div class="empty-icon">{@render iconFolder()}</div>
           <p>{t("workspace.selectProject")}</p>
         </div>
-      {:else if !selectedRequest}
+      {:else if !selectedRequest && !currentTab}
         <div class="empty-state">
           <div class="empty-icon">{@render iconFileText()}</div>
           <p>{t("request.selectPrompt")}</p>
         </div>
       {:else}
         <section class="detail">
-          {#if openTabs.length > 0}
-            <div class="request-tabs-row">
-              <div class="request-tabs-bar">
-                {#each openTabs as tab (tab.id)}
-                  <div class="request-tab-pill" class:active={tab.id === selectedRequest?.id} class:dirty={isTabDirty(tab.id)}>
-                    <button
-                      type="button"
-                      class="tab-pill-btn"
-                      onclick={() => openRequest(tab.id)}
-                      onmousedown={(e) => {
-                        if (e.button === 1) {
-                          e.preventDefault();
-                          closeTabAction(tab.id);
-                        }
-                      }}
-                    >
-                      <span class="tab-method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
-                      <span class="tab-title">{tab.name}</span>
-                      {#if isTabDirty(tab.id)}
-                        <span class="dirty-dot" title={t("tab.unsavedChanges")}>•</span>
-                      {/if}
-                    </button>
-                    <button
-                      type="button"
-                      class="tab-close-btn"
-                      title={t("tab.closeTab")}
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        closeTabAction(tab.id);
-                      }}
-                    >
-                      {@render iconClose()}
-                    </button>
-                  </div>
-                {/each}
-              </div>
-              {#if openTabs.length > 8}
+          <div class="workbench-header-strip">
+            <div class="request-tabs-bar" oncontextmenu={(e) => { if (e.target === e.currentTarget) { e.preventDefault(); openTabContextMenu(e, null); } }}>
+              {#each openTabs as tab (tab.id)}
+                <button
+                  type="button"
+                  class="request-tab-pill"
+                  class:active={(activeTabId ? tab.id === activeTabId : tab.id === selectedRequest?.id)}
+                  class:dirty={isTabDirty(tab.id)}
+                  onclick={() => selectTab(tab)}
+                  oncontextmenu={(e) => { e.preventDefault(); openTabContextMenu(e, tab); }}
+                  onmousedown={(e) => {
+                    if (e.button === 1) {
+                      e.preventDefault();
+                      closeTabAction(tab.id);
+                    }
+                  }}
+                >
+                  {#if tab.tabType === "env"}
+                    <span class="tab-env-icon" style="color: #ff6c37; font-size: 11px; margin-right: 4px;">📄</span>
+                  {:else if tab.tabType === "doc"}
+                    <span class="tab-env-icon" style="color: #0cbb52; font-size: 11px; margin-right: 4px;">📖</span>
+                  {:else if tab.tabType === "spec"}
+                    <span class="tab-env-icon" style="color: #108ee9; font-size: 11px; margin-right: 4px;">⚡</span>
+                  {:else if tab.tabType === "mock"}
+                    <span class="tab-env-icon" style="color: #fa8c16; font-size: 11px; margin-right: 4px;">📦</span>
+                  {:else if tab.tabType === "dataset"}
+                    <span class="tab-env-icon" style="color: #722ed1; font-size: 11px; margin-right: 4px;">📊</span>
+                  {:else if tab.tabType === "flow"}
+                    <span class="tab-env-icon" style="color: #13c2c2; font-size: 11px; margin-right: 4px;">🔀</span>
+                  {:else}
+                    <span class="tab-method method-{(tab.method || 'GET').toLowerCase()}">{tab.method || 'GET'}</span>
+                  {/if}
+                  <span class="tab-title">{tab.name}</span>
+                  {#if isTabDirty(tab.id)}
+                    <span class="tab-unsaved-dot" title={t("tab.unsavedChanges")}></span>
+                  {/if}
+                  <span
+                    class="tab-close-btn"
+                    title={t("tab.closeTab")}
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      closeTabAction(tab.id);
+                    }}
+                  >
+                    {@render iconClose()}
+                  </span>
+                </button>
+              {/each}
+              <button
+                type="button"
+                class="tab-add-btn"
+                title="New Tab"
+                onclick={() => quickCreateRequest(selectedProjectId ?? projects[0]?.id)}
+              >+</button>
+              {#if openTabs.length > 6}
                 <details class="tab-overflow-menu">
                   <summary class="tab-overflow-trigger" title={t("tab.allOpenTabs")}>
-                    {@render iconChevronDown()}<span>{openTabs.length}</span>
+                    {@render iconChevronDown()}
                   </summary>
                   <div class="tab-overflow-list">
                     {#each openTabs as tab (tab.id)}
@@ -5693,42 +7588,443 @@
                           openRequest(tab.id);
                           (e.currentTarget as HTMLElement).closest("details")?.removeAttribute("open");
                         }}
+                        oncontextmenu={(e) => { e.preventDefault(); openTabContextMenu(e, tab); }}
                       >
-                        <span class="method-badge method-{tab.method.toLowerCase()}">{tab.method}</span>
+                        <span class="tab-method method-{tab.method.toLowerCase()}">{tab.method}</span>
                         <span class="request-name">{tab.name}</span>
-                        {#if isTabDirty(tab.id)}<span class="dirty-dot" title={t("tab.unsavedChanges")}>•</span>{/if}
                       </button>
                     {/each}
                   </div>
                 </details>
               {/if}
             </div>
-          {/if}
 
-          <div class="breadcrumb-row">
-            <span class="breadcrumb-icon">{@render iconFolder()}</span>
-            <span class="breadcrumb-path">{projects.find((p) => p.id === selectedProjectId)?.name ?? ""}</span>
-            {#each selectedRequestFolderChain as folderName (folderName)}
-              <span class="breadcrumb-sep">›</span>
-              <span class="breadcrumb-path breadcrumb-folder" title={folderName}>{folderName}</span>
-            {/each}
-            <span class="breadcrumb-sep">›</span>
-            {#if renamingRequestId === selectedRequest.id}
-              <form class="inline-form" onsubmit={submitRenameRequest}>
-                <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
-                <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
-                <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>{@render iconClose()}</button>
-              </form>
-            {:else}
+            <div class="workbench-env-picker">
+              <div class="menu-wrap">
+                <button
+                  type="button"
+                  class="env-pill-btn"
+                  onclick={() => (envPickerOpen = !envPickerOpen)}
+                >
+                  <span class="env-pill-dot" class:empty={!selectedEnvironmentId}></span>
+                  <span class="env-pill-label">{selectedEnvironmentId ? (allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId) : t("topbar.noEnvironment")}</span>
+                  {@render iconChevronDown()}
+                </button>
+                {#if envPickerOpen}
+                  <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (envPickerOpen = false)}></button>
+                  <div class="dropdown-menu env-picker-menu">
+                    <input
+                      type="search"
+                      class="request-search-input env-picker-search"
+                      placeholder={t("env.searchEnvironments")}
+                      bind:value={envPickerQuery}
+                      use:focusOnMount
+                    />
+                    <button type="button" class="dropdown-menu-item" onclick={() => { envPickerOpen = false; quickCreateEnvironment(); }}>{t("topbar.newEnvironment")}</button>
+                    {#if !envPickerQuery}
+                      <button type="button" class="dropdown-menu-item" class:active={!selectedEnvironmentId} onclick={() => pickEnvironment(null)}>{t("topbar.noEnvironment")}</button>
+                    {/if}
+                    <div class="env-picker-list">
+                      <!-- Favorites at the top -->
+                      {#if favoriteEnvs.length > 0 && !envPickerQuery}
+                        <div class="env-screen-group-label" style="display: flex; align-items: center; gap: 4px; color: #f5a623;">
+                          <span>★</span>
+                          <span>FAVORITES</span>
+                        </div>
+                        {#each favoriteEnvs as env (env.id)}
+                          <div class="env-picker-row" class:active={selectedEnvironmentId === env.id}>
+                            <button type="button" class="dropdown-menu-item env-picker-item-btn" class:active={selectedEnvironmentId === env.id} onclick={() => pickEnvironment(env.id)}>
+                              <span>{env.name}</span>
+                            </button>
+                            <button
+                              type="button"
+                              class="env-star-btn favorited"
+                              title="Remove from favorites"
+                              onclick={(e) => { e.stopPropagation(); toggleEnvFavorite(env.id); }}
+                            >★</button>
+                          </div>
+                        {/each}
+                        <div class="dropdown-menu-divider" style="margin: 4px 8px;"></div>
+                      {/if}
+
+                      <div class="env-screen-group-label">ALL ENVIRONMENTS</div>
+                      {#each envPickerFilteredEnvironments as env (env.id)}
+                        {@const isFav = isEnvFavorite(env.id)}
+                        <div class="env-picker-row" class:active={selectedEnvironmentId === env.id}>
+                          <button type="button" class="dropdown-menu-item env-picker-item-btn" class:active={selectedEnvironmentId === env.id} onclick={() => pickEnvironment(env.id)}>
+                            <span>{env.name}</span>
+                          </button>
+                          <button
+                            type="button"
+                            class="env-star-btn"
+                            class:favorited={isFav}
+                            title={isFav ? "Remove from favorites" : "Add to favorites"}
+                            onclick={(e) => { e.stopPropagation(); toggleEnvFavorite(env.id); }}
+                          >{isFav ? "★" : "☆"}</button>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
               <button
                 type="button"
-                class="breadcrumb-current breadcrumb-current-btn"
-                title={t("breadcrumb.renameHint")}
-                onclick={() => startRenameRequest(selectedRequest!.id, selectedRequest!.name)}
+                class="icon-btn"
+                title={t("topbar.manageVariables")}
+                onclick={() => { loadVariables(); activeScreen = "environments"; }}
               >
-                {selectedRequest.name} <span class="breadcrumb-edit-hint">{@render iconEdit()}</span>
+                {@render iconEye()}
               </button>
-            {/if}
+            </div>
+          </div>
+
+          {#if currentTab?.tabType === "env"}
+            <div class="env-tab-view">
+              <div class="env-tab-header">
+                <div class="env-tab-title-group">
+                  <span class="env-dot-indicator"></span>
+                  <h1 class="env-tab-title">{currentTab.name}</h1>
+                </div>
+                <div class="env-tab-actions">
+                  <button type="button" class="btn-env-action" onclick={forkCurrentEnvironment}>
+                    <span class="action-icon">&#9901;</span>
+                    <span>Fork {envForkCount}</span>
+                  </button>
+                  <button type="button" class="btn-env-action" onclick={shareCurrentEnvironment}>
+                    <span>Share</span>
+                  </button>
+                  <button type="button" class="icon-btn" title="Copy link" onclick={() => copyTextToClipboard(window.location.href)}>
+                    {@render iconCopy()}
+                  </button>
+                </div>
+              </div>
+
+              <div class="env-tab-desc-row">
+                <span class="env-tab-desc">Environments are sets of variables that allow you to customize requests for different setups.</span>
+              </div>
+
+              <div class="env-tab-search-bar">
+                <div class="env-search-wrapper">
+                  <span class="env-search-icon">🔍</span>
+                  <input
+                    type="search"
+                    placeholder="Filter variables"
+                    class="env-var-filter-input"
+                    bind:value={envVarSearchQuery}
+                  />
+                </div>
+              </div>
+
+              <div class="env-variables-table-container">
+                <table class="env-variables-table">
+                  <thead>
+                    <tr>
+                      <th class="col-check"><input type="checkbox" checked title="Select all" /></th>
+                      <th class="col-key">VARIABLE</th>
+                      <th class="col-type">TYPE</th>
+                      <th class="col-val col-init">
+                        <div class="col-header-cloud">
+                          <span>INITIAL VALUE</span>
+                          <span class="cloud-icon" title="Cloud sync">☁ ˅</span>
+                        </div>
+                      </th>
+                      <th class="col-val">CURRENT VALUE</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each filteredEnvironmentVariables as v (v.id)}
+                      <tr>
+                        <td class="col-check">
+                          <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} />
+                        </td>
+                        <td class="col-key font-mono font-bold">
+                          <input class="table-cell-input" value={v.key} onblur={(e) => updateVariableKey(v, (e.target as HTMLInputElement).value)} />
+                        </td>
+                        <td class="col-type">
+                          <span class="env-type-pill">{v.is_secret ? "secret" : "default"}</span>
+                        </td>
+                        <td class="col-val font-mono">
+                          <input class="table-cell-input text-secondary" value={v.is_secret ? "••••••••" : v.value} onblur={(e) => updateVariableValue(v, (e.target as HTMLInputElement).value)} />
+                        </td>
+                        <td class="col-val font-mono">
+                          <input class="table-cell-input" value={v.is_secret ? "••••••••" : v.value} onblur={(e) => updateVariableValue(v, (e.target as HTMLInputElement).value)} />
+                        </td>
+                      </tr>
+                    {/each}
+                    <tr class="add-row">
+                      <td class="col-check"><input type="checkbox" disabled /></td>
+                      <td class="col-key">
+                        <input
+                          class="table-cell-input placeholder-row"
+                          placeholder="Add a new variable"
+                          bind:value={newEnvVarDraft.key}
+                          onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewEnvVar(); } }}
+                        />
+                      </td>
+                      <td class="col-type"><span class="env-type-pill muted">default</span></td>
+                      <td class="col-val">
+                        <input
+                          class="table-cell-input"
+                          placeholder=""
+                          bind:value={newEnvVarDraft.value}
+                          onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewEnvVar(); } }}
+                        />
+                      </td>
+                      <td class="col-val"></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          {:else if currentTab?.tabType === "doc"}
+            <div class="doc-tab-view">
+              <div class="doc-tab-header">
+                <div class="doc-tab-title-group">
+                  <span class="doc-icon-badge">📖</span>
+                  <h1 class="doc-tab-title">{currentTab.name}</h1>
+                  <span class="doc-status-badge">Published</span>
+                </div>
+                <div class="doc-tab-actions">
+                  <button type="button" class="btn-env-action" onclick={() => downloadFile(sampleDocContent, `${currentTab.name}.md`, "text/markdown")}>
+                    <span>Export Markdown</span>
+                  </button>
+                  <button type="button" class="btn-env-action" onclick={() => copyTextToClipboard(sampleDocContent)}>
+                    {@render iconCopy()}
+                    <span>Copy Content</span>
+                  </button>
+                </div>
+              </div>
+              <div class="doc-tab-body">
+                <div class="doc-preview-card">
+                  <div class="doc-markdown-content font-mono">
+                    <pre class="doc-content-pre">{sampleDocContent}</pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {:else if currentTab?.tabType === "spec"}
+            <div class="spec-tab-view">
+              <div class="spec-tab-header">
+                <div class="spec-tab-title-group">
+                  <span class="spec-icon-badge">⚡</span>
+                  <h1 class="spec-tab-title">{currentTab.name}</h1>
+                  <span class="spec-version-badge">OpenAPI 3.1.0</span>
+                  <span class="spec-valid-badge">✓ Valid</span>
+                </div>
+                <div class="spec-tab-actions">
+                  <button type="button" class="btn-env-action" onclick={() => downloadFile(sampleOpenApiJson, currentTab.name, "application/json")}>
+                    <span>Download Spec</span>
+                  </button>
+                  <button type="button" class="btn-env-action" onclick={() => copyTextToClipboard(sampleOpenApiJson)}>
+                    {@render iconCopy()}
+                    <span>Copy JSON</span>
+                  </button>
+                </div>
+              </div>
+              <div class="spec-tab-body">
+                <div class="spec-endpoints-summary">
+                  <div class="spec-summary-item"><span class="spec-summary-label">Servers</span><span class="spec-summary-val">2 active</span></div>
+                  <div class="spec-summary-item"><span class="spec-summary-label">Paths</span><span class="spec-summary-val">3 endpoints</span></div>
+                  <div class="spec-summary-item"><span class="spec-summary-label">Format</span><span class="spec-summary-val">JSON Schema</span></div>
+                </div>
+                <div class="spec-code-card font-mono">
+                  <pre class="spec-code-pre">{sampleOpenApiJson}</pre>
+                </div>
+              </div>
+            </div>
+          {:else if currentTab?.tabType === "mock"}
+            <div class="mock-tab-view">
+              <div class="mock-tab-header">
+                <div class="mock-tab-title-group">
+                  <span class="mock-icon-badge">📦</span>
+                  <h1 class="mock-tab-title">{currentTab.name}</h1>
+                  <span class="mock-status-pill online">● Running</span>
+                </div>
+                <div class="mock-tab-actions">
+                  <button type="button" class="btn-env-action" onclick={() => copyTextToClipboard("http://127.0.0.1:8080/mock/v1")}>
+                    {@render iconCopy()}
+                    <span>Copy Mock URL</span>
+                  </button>
+                </div>
+              </div>
+              <div class="mock-tab-body">
+                <div class="mock-url-banner">
+                  <span class="mock-url-label">Mock Server Endpoint:</span>
+                  <code class="mock-url-code">http://127.0.0.1:8080/mock/v1</code>
+                  <span class="mock-latency-badge">⚡ 150ms simulated latency</span>
+                </div>
+                <div class="mock-endpoints-table-wrap">
+                  <table class="env-variables-table">
+                    <thead>
+                      <tr>
+                        <th class="col-type">METHOD</th>
+                        <th class="col-key">MOCK PATH</th>
+                        <th class="col-type">RESPONSE CODE</th>
+                        <th class="col-val">SIMULATED PAYLOAD</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><span class="tab-method method-post">POST</span></td>
+                        <td class="font-mono">/api/v1/auth/login</td>
+                        <td><span class="spec-valid-badge">200 OK</span></td>
+                        <td class="font-mono text-secondary">&#123; "token": "mock-jwt-token-xyz", "expiresIn": 3600 &#125;</td>
+                      </tr>
+                      <tr>
+                        <td><span class="tab-method method-post">POST</span></td>
+                        <td class="font-mono">/api/v1/auth/validate-otp</td>
+                        <td><span class="spec-valid-badge">200 OK</span></td>
+                        <td class="font-mono text-secondary">&#123; "status": "VERIFIED", "code": "00" &#125;</td>
+                      </tr>
+                      <tr>
+                        <td><span class="tab-method method-post">POST</span></td>
+                        <td class="font-mono">/api/v1/card/transaction</td>
+                        <td><span class="spec-valid-badge">200 OK</span></td>
+                        <td class="font-mono text-secondary">&#123; "transactionId": "TX-9988231", "status": "SUCCESS" &#125;</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          {:else if currentTab?.tabType === "dataset"}
+            <div class="dataset-tab-view">
+              <div class="dataset-tab-header">
+                <div class="dataset-tab-title-group">
+                  <span class="dataset-icon-badge">📊</span>
+                  <h1 class="dataset-tab-title">{currentTab.name}</h1>
+                  <span class="dataset-count-badge">4 Rows • 4 Columns</span>
+                </div>
+                <div class="dataset-tab-actions">
+                  <button type="button" class="btn-env-action" onclick={() => downloadFile("user_id,email,amount,currency\n101,dev1@alansari.ae,500,AED\n102,dev2@alansari.ae,1250,AED\n103,manager@alansari.ae,4500,USD\n104,tester@alansari.ae,250,EUR\n", currentTab.name, "text/csv")}>
+                    <span>Export CSV</span>
+                  </button>
+                </div>
+              </div>
+              <div class="dataset-tab-body">
+                <div class="dataset-table-wrap">
+                  <table class="env-variables-table">
+                    <thead>
+                      <tr>
+                        <th class="col-type">#</th>
+                        <th class="col-key">user_id</th>
+                        <th class="col-key">email</th>
+                        <th class="col-key">amount</th>
+                        <th class="col-type">currency</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>1</td>
+                        <td class="font-mono">101</td>
+                        <td class="font-mono">dev1@alansari.ae</td>
+                        <td class="font-mono">500</td>
+                        <td><span class="env-type-pill">AED</span></td>
+                      </tr>
+                      <tr>
+                        <td>2</td>
+                        <td class="font-mono">102</td>
+                        <td class="font-mono">dev2@alansari.ae</td>
+                        <td class="font-mono">1250</td>
+                        <td><span class="env-type-pill">AED</span></td>
+                      </tr>
+                      <tr>
+                        <td>3</td>
+                        <td class="font-mono">103</td>
+                        <td class="font-mono">manager@alansari.ae</td>
+                        <td class="font-mono">4500</td>
+                        <td><span class="env-type-pill">USD</span></td>
+                      </tr>
+                      <tr>
+                        <td>4</td>
+                        <td class="font-mono">104</td>
+                        <td class="font-mono">tester@alansari.ae</td>
+                        <td class="font-mono">250</td>
+                        <td><span class="env-type-pill">EUR</span></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          {:else if currentTab?.tabType === "flow"}
+            <div class="flow-tab-view">
+              <div class="flow-tab-header">
+                <div class="flow-tab-title-group">
+                  <span class="flow-icon-badge">🔀</span>
+                  <h1 class="flow-tab-title">{currentTab.name}</h1>
+                  <span class="flow-steps-badge">4 Blocks</span>
+                </div>
+                <div class="flow-tab-actions">
+                  <button type="button" class="btn-send" onclick={() => { exportFeedback = "Running flow sequence..."; setTimeout(() => { exportFeedback = "Flow completed successfully (4/4 blocks passed)"; setTimeout(() => { exportFeedback = ""; }, 3000); }, 1200); }}>
+                    <span>▶ Run Flow</span>
+                  </button>
+                </div>
+              </div>
+              <div class="flow-tab-body">
+                <div class="flow-canvas">
+                  <div class="flow-block">
+                    <div class="flow-block-header start">1. Start Trigger</div>
+                    <div class="flow-block-content">Manual execution on click</div>
+                  </div>
+                  <div class="flow-connector">➔</div>
+                  <div class="flow-block">
+                    <div class="flow-block-header request">2. Send Request</div>
+                    <div class="flow-block-content font-mono">POST /api/v1/auth/login</div>
+                  </div>
+                  <div class="flow-connector">➔</div>
+                  <div class="flow-block">
+                    <div class="flow-block-header evaluate">3. Extract Token</div>
+                    <div class="flow-block-content font-mono">data.sessionToken</div>
+                  </div>
+                  <div class="flow-connector">➔</div>
+                  <div class="flow-block">
+                    <div class="flow-block-header request">4. Submit Payment</div>
+                    <div class="flow-block-content font-mono">POST /api/v1/card/transaction</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {:else if selectedRequest}
+            <div class="breadcrumb-row">
+              <div class="breadcrumb-left">
+              <span class="http-pill">HTTP</span>
+              <div class="breadcrumb-trail">
+                <span class="breadcrumb-path">{projects.find((p) => p.id === selectedProjectId)?.name ?? ""}</span>
+                {#each selectedRequestFolderChain as folderName (folderName)}
+                  <span class="breadcrumb-sep">&rsaquo;</span>
+                  <span class="breadcrumb-path">{folderName}</span>
+                {/each}
+                <span class="breadcrumb-sep">&rsaquo;</span>
+                {#if renamingRequestId === selectedRequest.id}
+                  <form class="inline-form" onsubmit={submitRenameRequest}>
+                    <input bind:value={renameRequestValue} use:focusOnMount onblur={submitRenameRequest} />
+                    <button type="submit" title={t("sidebar.save")}>{@render iconCheck()}</button>
+                    <button type="button" title={t("sidebar.cancel")} onclick={() => (renamingRequestId = null)}>{@render iconClose()}</button>
+                  </form>
+                {:else}
+                  <button
+                    type="button"
+                    class="breadcrumb-current"
+                    title={t("breadcrumb.renameHint")}
+                    onclick={() => startRenameRequest(selectedRequest!.id, selectedRequest!.name)}
+                  >
+                    {selectedRequest.name}
+                  </button>
+                {/if}
+              </div>
+            </div>
+            <div class="breadcrumb-right">
+              <div class="btn-save-split">
+                <button type="button" class="btn-save-main" onclick={() => saveRequest()}>
+                  {@render iconSave()} <span>{t("request.saveLabel")}</span>
+                </button>
+                <button type="button" class="btn-save-caret" onclick={() => saveRequest()}>{@render iconChevronDown()}</button>
+              </div>
+              <button type="button" class="btn-share" onclick={(e) => openRequestContextMenu(e, selectedRequest)}>
+                {@render iconCopy()} <span>Share</span>
+              </button>
+            </div>
           </div>
 
           <form class="request-bar" onsubmit={(e) => { e.preventDefault(); saveRequest(); }}>
@@ -5757,7 +8053,12 @@
                           class:missing
                           role="presentation"
                           onmouseenter={(e) => showVarPopover(tok.name, e.currentTarget as HTMLElement)}
-                          onmouseleave={scheduleHideMissingVarPopover}
+                          onmouseleave={() => scheduleHideMissingVarPopover()}
+                          onclick={(e) => {
+                            const shell = (e.currentTarget as HTMLElement).closest(".url-input-shell");
+                            const input = shell?.querySelector("input.url-input") as HTMLInputElement | null;
+                            if (input) input.focus();
+                          }}
                         >
                           {tok.raw}
                         </span>
@@ -5773,6 +8074,8 @@
                     onblur={hideAutocompleteSoon}
                     onpaste={handleUrlPaste}
                     onscroll={syncUrlOverlayScroll}
+                    onmousemove={handleGenericInputMouseMove}
+                    onmouseleave={handleGenericInputMouseLeave}
                   />
                 </div>
               </div>
@@ -5790,10 +8093,32 @@
                         onclick={() => (sendMenuOpen = !sendMenuOpen)}
                       >{@render iconChevronDown()}</button>
                       {#if sendMenuOpen}
-                        <button type="button" class="dropdown-backdrop" aria-label={t("common.close")} onclick={() => (sendMenuOpen = false)}></button>
-                        <div class="dropdown-menu">
-                          <button type="button" class="dropdown-menu-item" onclick={sendAndDownload}>
-                            <span>{t("request.sendAndDownload")}</span>
+                        <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (sendMenuOpen = false)}></button>
+                        <div class="send-dropdown-menu">
+                          <button type="button" class="send-menu-item" onclick={handleGetSuccessfulResponse}>
+                            <svg class="send-menu-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="3,2 14,8 3,14"/></svg>
+                            <span>Get a successful response</span>
+                          </button>
+                          <button type="button" class="send-menu-item" onclick={handleVisualizeResponse}>
+                            <svg class="send-menu-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z"/><circle cx="8" cy="8" r="2.5"/></svg>
+                            <span>Visualize response</span>
+                          </button>
+                          <button type="button" class="send-menu-item" onclick={handleWriteTests}>
+                            <svg class="send-menu-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 2h10v12H3z"/><path d="M6 6h4M6 9h4M6 12h2"/></svg>
+                            <span>Write tests</span>
+                          </button>
+                          <button type="button" class="send-menu-item" onclick={handleDebugRequest}>
+                            <svg class="send-menu-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2a3 3 0 0 0-3 3v2h6V5a3 3 0 0 0-3-3zM4 9a4 4 0 0 0 8 0v2a4 4 0 0 1-8 0V9zM2 8h2M12 8h2M3 13l2-1M13 13l-2-1M3 5l2 1M13 5l-2 1"/></svg>
+                            <span>Debug request</span>
+                          </button>
+                          <button type="button" class="send-menu-item" onclick={handleExploreApiCapabilities}>
+                            <svg class="send-menu-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><polygon points="10.5,5.5 9,9 5.5,10.5 7,7"/></svg>
+                            <span>Explore API capabilities</span>
+                          </button>
+                          <div class="send-menu-divider"></div>
+                          <button type="button" class="send-menu-item" onclick={handleDownloadResponse}>
+                            <svg class="send-menu-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2v9M4 8l4 4 4-4M2 14h12"/></svg>
+                            <span>Download response</span>
                           </button>
                         </div>
                       {/if}
@@ -5808,8 +8133,9 @@
                   title={autoSaveStatus === "saving" ? t("request.saving") : autoSaveStatus === "unsaved" ? t("request.unsaved") : autoSaveStatus === "error" ? t("request.saveFailed") : t("request.saved")}
                   onclick={() => saveRequest()}
                 >
+                  {@render iconSave()}
+                  <span>{t("request.saveLabel")}</span>
                   {#if autoSaveStatus === "unsaved" || autoSaveStatus === "error"}<span class="dirty-dot" aria-hidden="true">•</span>{/if}
-                  {t("request.saveLabel")}
                 </button>
                 <button
                   type="button"
@@ -5827,43 +8153,120 @@
                 >&lt;/&gt;</button>
               </div>
             </div>
-            <div class="request-bar-row secondary">
-              {#if curlDetectedFeedback}
-                <span class="hint">{curlDetectedFeedback}</span>
-              {/if}
-              {#if sendCancelledNotice}
-                <span class="hint">{sendCancelledNotice}</span>
-              {/if}
-              <div class="response-stat-spacer"></div>
-              <button type="button" class="icon-btn" title={t("request.deleteRequest")} onclick={() => deleteRequest(selectedRequest!.id)}>{@render iconTrash()}</button>
-            </div>
+            {#if curlDetectedFeedback || sendCancelledNotice}
+              <div class="request-bar-row secondary">
+                {#if curlDetectedFeedback}
+                  <span class="hint">{curlDetectedFeedback}</span>
+                {/if}
+                {#if sendCancelledNotice}
+                  <span class="hint">{sendCancelledNotice}</span>
+                {/if}
+              </div>
+            {/if}
           </form>
+
+          {#if missingVarHover && hoveredVarRect}
+            <div
+              class="hovered-var-token-highlight"
+              style="top: {hoveredVarRect.top}px; left: {hoveredVarRect.left}px; width: {hoveredVarRect.right - hoveredVarRect.left}px; height: {hoveredVarRect.bottom - hoveredVarRect.top}px;"
+              aria-hidden="true"
+            ></div>
+          {/if}
 
           {#if missingVarHover}
             {@const resolved = findResolvedVariable(missingVarHover.name)}
+            {@const activeEnv = allEnvironments.find((e) => e.id === selectedEnvironmentId)}
             <div
-              class="missing-var-popover-portal"
-              role="group"
+              class="postman-var-popover"
+              class:place-above={missingVarHover.placeAbove}
+              role="dialog"
               aria-label={t(resolved ? "var.editValueFor" : "missingvar.addValueFor", { name: missingVarHover.name })}
               style="top: {missingVarHover.top}px; left: {missingVarHover.left}px;"
               onmouseenter={cancelHideMissingVarPopover}
-              onmouseleave={scheduleHideMissingVarPopover}
+              onmouseleave={() => scheduleHideMissingVarPopover(250)}
             >
-              {#if resolved}
-                <span class="var-popover-scope">{t(resolved.scope === "environment" ? "var.scopeEnvironment" : "var.scopeGlobal")}</span>
+              <div class="var-popover-header">
+                <div class="var-popover-title-group">
+                  <span class="var-popover-var-symbol" aria-hidden="true">&#123;&#123; &#125;&#125;</span>
+                  <span class="var-popover-var-name">{missingVarHover.name}</span>
+                </div>
+                <div class="var-popover-badge-group">
+                  {#if resolved}
+                    {#if resolved.scope === "environment"}
+                      <span class="var-scope-badge badge-env" title="Environment Variable">ENVIRONMENT</span>
+                    {:else}
+                      <span class="var-scope-badge badge-global" title="Global Variable">GLOBAL</span>
+                    {/if}
+                  {:else}
+                    <span class="var-scope-badge badge-unresolved" title="Unresolved Variable">UNRESOLVED</span>
+                  {/if}
+                  <button
+                    type="button"
+                    class="var-popover-close-btn"
+                    title="Close"
+                    onclick={() => { missingVarHover = null; hoveredVarRect = null; }}
+                  >&times;</button>
+                </div>
+              </div>
+
+              {#if resolved && resolved.scope === "environment"}
+                <div class="var-popover-env-context">
+                  <span class="env-context-label">Environment:</span>
+                  <span class="env-context-name">{activeEnv?.name ?? "Active Environment"}</span>
+                </div>
+              {:else if !resolved}
+                <div class="var-popover-unresolved-hint">
+                  Not resolved in current environment or globals.
+                </div>
               {/if}
-              <input
-                placeholder={t("missingvar.valueFor", { name: missingVarHover.name })}
-                value={missingVarDrafts[missingVarHover.name] ?? ""}
-                oninput={(e) => (missingVarDrafts[missingVarHover!.name] = (e.target as HTMLInputElement).value)}
-                onkeydown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    saveVariableFromPopover(missingVarHover!.name);
-                  }
-                }}
-              />
-              <button type="button" onclick={() => saveVariableFromPopover(missingVarHover!.name)}>{t(resolved ? "var.save" : "missingvar.add")}</button>
+
+              <div class="var-popover-body">
+                <label class="var-popover-label" for="popover-var-val">CURRENT VALUE</label>
+                <div class="var-popover-input-wrap">
+                  <input
+                    id="popover-var-val"
+                    class="var-popover-input"
+                    placeholder={resolved ? "Value..." : "Set value to define variable..."}
+                    value={missingVarDrafts[missingVarHover.name] ?? ""}
+                    onfocus={() => { popoverInputFocused = true; cancelHideMissingVarPopover(); }}
+                    onblur={() => { popoverInputFocused = false; scheduleHideMissingVarPopover(300); }}
+                    oninput={(e) => (missingVarDrafts[missingVarHover!.name] = (e.target as HTMLInputElement).value)}
+                    onkeydown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        saveVariableFromPopover(missingVarHover!.name);
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        missingVarHover = null;
+                        hoveredVarRect = null;
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div class="var-popover-footer">
+                <div class="var-popover-status">
+                  {#if popoverSaveSuccess}
+                    <span class="save-success-msg">&#10003; Saved</span>
+                  {/if}
+                </div>
+                <div class="var-popover-actions">
+                  <button
+                    type="button"
+                    class="var-popover-btn var-popover-btn-save"
+                    onclick={() => saveVariableFromPopover(missingVarHover!.name)}
+                  >
+                    {#if resolved}
+                      Save
+                    {:else if selectedEnvironmentId}
+                      Add to Environment
+                    {:else}
+                      Add to Global
+                    {/if}
+                  </button>
+                </div>
+              </div>
             </div>
           {/if}
 
@@ -5906,7 +8309,7 @@
                   class="missing-var-chip"
                   role="presentation"
                   onmouseenter={(e) => showMissingVarPopover(varName, e.currentTarget as HTMLElement)}
-                  onmouseleave={scheduleHideMissingVarPopover}
+                  onmouseleave={() => scheduleHideMissingVarPopover()}
                 >
                   <strong>{varName}</strong>
                 </span>
@@ -5916,20 +8319,15 @@
           {/if}
 
           <div class="editor-tabs">
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "docs"} onclick={() => (activeEditorTab = "docs")}>
+              {t("tab.docs")} {#if editDescription}<span class="tab-dot">•</span>{/if}
+            </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "params"} onclick={() => (activeEditorTab = "params")}>
               {t("tab.params")}
               {#if requestDiagnostics?.query_params_missing?.length}
                 <span class="tab-badge-warn" title={t("tab.missingInParams", { list: requestDiagnostics.query_params_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.query_params_missing.length}</span>
               {:else if withoutEmptyKeyRows(editQueryParams).length}
                 <span class="tab-badge">{withoutEmptyKeyRows(editQueryParams).length}</span>
-              {/if}
-            </button>
-            <button type="button" class="editor-tab" class:active={activeEditorTab === "headers"} onclick={() => (activeEditorTab = "headers")}>
-              {t("tab.headers")}
-              {#if requestDiagnostics?.headers_missing?.length}
-                <span class="tab-badge-warn" title={t("tab.missingInHeaders", { list: requestDiagnostics.headers_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.headers_missing.length}</span>
-              {:else if withoutEmptyKeyRows(editHeaders).length}
-                <span class="tab-badge">{withoutEmptyKeyRows(editHeaders).length}</span>
               {/if}
             </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "auth"} onclick={() => (activeEditorTab = "auth")}>
@@ -5940,11 +8338,20 @@
                 <span class="tab-dot">•</span>
               {/if}
             </button>
+            <button type="button" class="editor-tab" class:active={activeEditorTab === "headers"} onclick={() => (activeEditorTab = "headers")}>
+              {t("tab.headers")}
+              {#if withoutEmptyKeyRows(editHeaders).length}
+                <span class="tab-badge">{withoutEmptyKeyRows(editHeaders).length}</span>
+              {/if}
+              {#if editHeaders.some(h => h.enabled && h.key.trim())}
+                <span class="tab-dot">•</span>
+              {/if}
+            </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "body"} onclick={() => (activeEditorTab = "body")}>
               {t("tab.body")}
               {#if requestDiagnostics?.body_missing?.length}
                 <span class="tab-badge-warn" title={t("tab.missingInBody", { list: requestDiagnostics.body_missing.join(', ') })}>{@render iconWarning()} {requestDiagnostics.body_missing.length}</span>
-              {:else if editBody}
+              {:else if editBody || editFormDataItems.length || editUrlEncodedItems.length}
                 <span class="tab-dot">•</span>
               {/if}
             </button>
@@ -5954,16 +8361,17 @@
             <button type="button" class="editor-tab" class:active={activeEditorTab === "settings"} onclick={() => (activeEditorTab = "settings")}>
               {t("tab.settings")}
             </button>
-            <button type="button" class="editor-tab" class:active={activeEditorTab === "docs"} onclick={() => (activeEditorTab = "docs")}>
-              {t("tab.docs")} {#if editDescription}<span class="tab-dot">•</span>{/if}
-            </button>
             <button type="button" class="editor-tab" class:active={activeEditorTab === "mock"} onclick={() => (activeEditorTab = "mock")}>
               {t("tab.mock")} {#if sampleResponses.length}<span class="tab-badge">{sampleResponses.length}</span>{/if}
+            </button>
+            <div class="response-stat-spacer"></div>
+            <button type="button" class="editor-tab editor-tab-cookies" onclick={() => { responseSubTab = "cookies"; }}>
+              Cookies
             </button>
           </div>
 
           <div class="editor-body-row">
-          <div class="editor-pane">
+          <div class="editor-pane" onmousemove={handlePaneMouseMoveDelegated} onmouseleave={() => scheduleHideMissingVarPopover()}>
           <div class="tab-content">
             {#if activeEditorTab === "params"}
               <div class="params-table">
@@ -6079,15 +8487,25 @@
                 </div>
 
                 {#if editBodyType === "raw"}
-                  <textarea
-                    placeholder={t("body.rawPlaceholder")}
-                    bind:value={editBody}
-                    class="body-input"
-                    rows="8"
-                    oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLTextAreaElement, "var", false, (v) => (editBody = v)); }}
-                    onkeydown={handleAutocompleteKeydown}
-                    onblur={hideAutocompleteSoon}
-                  ></textarea>
+                  <div class="code-editor-shell">
+                    <div class="code-gutter" aria-hidden="true">
+                      {#each (editBody || "").split("\n") as _, lineIdx (lineIdx)}
+                        <span class="gutter-num">{lineIdx + 1}</span>
+                      {/each}
+                    </div>
+                    <textarea
+                      placeholder={t("body.rawPlaceholder")}
+                      bind:value={editBody}
+                      class="body-input code-editor-input"
+                      rows="8"
+                      spellcheck="false"
+                      oninput={(e) => { scheduleAutoSave(); updateAutocompleteFor(e.currentTarget as HTMLTextAreaElement, "var", false, (v) => (editBody = v)); }}
+                      onkeydown={handleAutocompleteKeydown}
+                      onblur={hideAutocompleteSoon}
+                      onmousemove={handleBodyMouseMove}
+                      onmouseleave={handleBodyMouseLeave}
+                    ></textarea>
+                  </div>
                 {:else if editBodyType === "form-data"}
                   <div class="params-table">
                     {#each editFormDataItems as item, i (i)}
@@ -6345,11 +8763,12 @@
           </div>
           </div>
 
-          {#if !responsePaneCollapsed}
+          {#if !responsePaneCollapsed && !responsePaneMaximized}
             <div
               class="response-pane-resize-handle"
               class:resizing={responsePaneResizing}
               onmousedown={startResponsePaneResize}
+              ondblclick={() => { responsePaneHeight = 360; }}
               onkeydown={(e) => {
                 responsePaneManuallyResized = true;
                 if (e.key === "ArrowUp") responsePaneHeight = Math.min(window.innerHeight - 220, responsePaneHeight + 16);
@@ -6359,28 +8778,19 @@
               aria-orientation="horizontal"
               aria-label={t("response.resizeHandle")}
               aria-valuenow={responsePaneHeight}
-              aria-valuemin={160}
-              aria-valuemax={900}
+              aria-valuemin={100}
+              aria-valuemax={1200}
               tabindex="0"
             ></div>
           {/if}
 
-          <div class="response-pane" class:collapsed={responsePaneCollapsed} style="height: {responsePaneCollapsed ? 'auto' : responsePaneHeight + 'px'}">
-          <div class="response-pane-bar">
-            <button
-              type="button"
-              class="icon-btn"
-              title={responsePaneCollapsed ? t("response.expandPane") : t("response.collapsePane")}
-              onclick={() => setResponsePaneCollapsed(!responsePaneCollapsed)}
-            >{#if responsePaneCollapsed}{@render iconChevronUp()}{:else}{@render iconChevronDown()}{/if}</button>
-            <span class="response-pane-bar-label">
-              {t("response.title")}
-              {#if activeResponse}
-                <span class="status-chip" class:status-ok={activeResponse.status < 400} class:status-err={activeResponse.status >= 400}>{activeResponse.status}</span>
-              {/if}
-            </span>
-          </div>
-          {#if !responsePaneCollapsed}
+          <div
+            class="response-pane"
+            class:collapsed={responsePaneCollapsed}
+            class:maximized={responsePaneMaximized}
+            class:is-resizing={responsePaneResizing}
+            style="height: {responsePaneMaximized ? '100%' : responsePaneCollapsed ? '37px' : responsePaneHeight + 'px'}"
+          >
           {#if sending}
             <div class="response-loading">
               <span class="spinner" aria-hidden="true"></span>
@@ -6401,8 +8811,20 @@
                 <button type="button" class="icon-btn" title={t("response.copyTitle")} onclick={copyResponseBody}>{@render iconCopy()}</button>
                 <button type="button" class="icon-btn" title={t("response.downloadTitle")} onclick={downloadResponseBody}>{@render iconImport()}</button>
                 <button type="button" class="icon-btn" title={t("response.saveAsSample")} onclick={saveCurrentResponse}>{@render iconSave()}</button>
-                <button type="button" class="icon-btn" title={t("response.expand")} onclick={() => (responseExpanded = true)}>{@render iconExpandDiagonal()}</button>
+                <button
+                  type="button"
+                  class="icon-btn"
+                  title={responsePaneCollapsed ? "Expand response panel" : "Collapse / Minimize response panel"}
+                  onclick={() => setResponsePaneCollapsed(!responsePaneCollapsed)}
+                >{#if responsePaneCollapsed}{@render iconChevronUp()}{:else}{@render iconMinus()}{/if}</button>
+                <button
+                  type="button"
+                  class="icon-btn"
+                  title={responsePaneMaximized ? "Restore response size" : "Maximize response panel"}
+                  onclick={() => { responsePaneMaximized = !responsePaneMaximized; if (responsePaneMaximized) responsePaneCollapsed = false; }}
+                >{#if responsePaneMaximized}{@render iconCompressDiagonal()}{:else}{@render iconExpandDiagonal()}{/if}</button>
               </div>
+              {#if !responsePaneCollapsed}
 
               <div class="response-subtabs">
                 <button type="button" class="response-subtab" class:active={responseSubTab === "body"} onclick={() => (responseSubTab = "body")}>{t("response.body")}</button>
@@ -6443,9 +8865,23 @@
                   {#if responseViewMode === "preview" && responseBodyIsHtml}
                     <iframe class="response-preview-frame" title={t("response.preview")} sandbox="" srcdoc={activeResponseBody}></iframe>
                   {:else if responseBodyIsJson}
-                    <pre class="body-view">{@html highlightedResponseBody}</pre>
+                    <div class="code-editor-shell response-code-shell">
+                      <div class="code-gutter" aria-hidden="true">
+                        {#each (prettyResponseBody || "").split("\n") as _, lineIdx (lineIdx)}
+                          <span class="gutter-num">{lineIdx + 1}</span>
+                        {/each}
+                      </div>
+                      <pre class="body-view code-editor-pre">{@html highlightedResponseBody}</pre>
+                    </div>
                   {:else}
-                    <pre class="body-view">{prettyResponseBody}</pre>
+                    <div class="code-editor-shell response-code-shell">
+                      <div class="code-gutter" aria-hidden="true">
+                        {#each (prettyResponseBody || "").split("\n") as _, lineIdx (lineIdx)}
+                          <span class="gutter-num">{lineIdx + 1}</span>
+                        {/each}
+                      </div>
+                      <pre class="body-view code-editor-pre">{prettyResponseBody}</pre>
+                    </div>
                   {/if}
                   {#if activeResponseTruncated}
                     <p class="hint">{t("response.truncated")}</p>
@@ -6510,16 +8946,37 @@
                   {/if}
                 {/if}
               </div>
-            </div>
-          {:else}
+            {/if}
+          </div>
+        {:else}
+          <div class="response-pane-bar">
+            <button
+              type="button"
+              class="icon-btn"
+              title={responsePaneCollapsed ? t("response.expandPane") : t("response.collapsePane")}
+              onclick={() => setResponsePaneCollapsed(!responsePaneCollapsed)}
+            >{#if responsePaneCollapsed}{@render iconChevronUp()}{:else}{@render iconMinus()}{/if}</button>
+            <span class="response-pane-bar-label">
+              {t("response.title")}
+            </span>
+            <div class="response-stat-spacer"></div>
+            <button
+              type="button"
+              class="icon-btn"
+              title={responsePaneMaximized ? "Restore response size" : "Maximize response panel"}
+              onclick={() => { responsePaneMaximized = !responsePaneMaximized; if (responsePaneMaximized) responsePaneCollapsed = false; }}
+            >{#if responsePaneMaximized}{@render iconCompressDiagonal()}{:else}{@render iconExpandDiagonal()}{/if}</button>
+          </div>
+          {#if !responsePaneCollapsed}
             <div class="response-empty-state">
               <div class="empty-icon">{@render iconInboxEmpty()}</div>
               <p>{t("response.sendEmpty")}</p>
             </div>
           {/if}
+        {/if}
+          </div>
+          </div>
           {/if}
-          </div>
-          </div>
         </section>
       {/if}
     </main>
@@ -6543,306 +9000,266 @@
           tabindex="0"
         ></div>
         <aside class="right-sidebar" style="width: {rightSidebarWidth}px">
-          <div class="right-sidebar-header">
-            <span class="right-sidebar-title">
-              {#if rightPanel === "info"}{@render iconInfo()} {t("bottom.info")}{:else}&lt;/&gt; {t("bottom.codeSnippet")}{/if}
-            </span>
-            <div class="response-stat-spacer"></div>
-            <button
-              type="button"
-              class="icon-btn"
-              class:active={rightPanel === "info"}
-              title={t("bottom.info")}
-              onclick={() => (rightPanel = rightPanel === "info" ? "code" : "info")}
-            >{@render iconInfo()}</button>
-            <button type="button" class="icon-btn" title={t("sidebar.hide")} onclick={() => setRightSidebarVisible(false)}>{@render iconChevronRight()}</button>
-          </div>
-
-          {#if !selectedRequest}
-            <p class="screen-empty-inline">{t("request.selectPrompt")}</p>
+          {#if rightPanel === "variables"}
+            <div class="right-sidebar-header">
+              <span class="right-sidebar-title">All variables</span>
+              <div class="response-stat-spacer"></div>
+              <button type="button" class="icon-btn" title={t("common.close")} onclick={() => setRightSidebarVisible(false)}>
+                {@render iconClose()}
+              </button>
+            </div>
+            <div class="right-drawer-body">
+              <div class="env-scope-subhead">
+                <span class="env-badge-pill">E</span>
+                <span class="env-badge-name">{allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? "[Alansari] [Remittance] [Masoud] [DEV]"}</span>
+              </div>
+              <div class="drawer-search-row">
+                <span class="drawer-search-icon">🔍</span>
+                <input
+                  type="search"
+                  placeholder="Filter variables"
+                  class="drawer-search-input"
+                  bind:value={drawerVarSearch}
+                />
+              </div>
+              <div class="drawer-variables-list">
+                {#each drawerFilteredVariables as v (v.id)}
+                  <div class="drawer-variable-item">
+                    <div class="drawer-var-top">
+                      <span class="drawer-var-key">{v.key}</span>
+                      <span class="drawer-var-scope-badge">{v.scopeTag}</span>
+                    </div>
+                    <div class="drawer-var-bottom">
+                      <span class="drawer-var-val">{v.is_secret ? "••••••••" : v.value}</span>
+                      <button type="button" class="icon-btn icon-btn-ghost copy-btn" title="Copy value" onclick={() => copyTextToClipboard(v.value)}>
+                        {@render iconCopy()}
+                      </button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
           {:else if rightPanel === "info"}
-            <div class="bottom-panel">
-              <dl class="info-list info-list-grid">
-                <dt>{t("bottom.id")}</dt>
-                <dd>{selectedRequest.id}</dd>
-                <dt>{t("bottom.projectId")}</dt>
-                <dd>{selectedRequest.project_id}</dd>
-                <dt>{t("bottom.created")}</dt>
-                <dd>{new Date(selectedRequest.created_at).toLocaleString()}</dd>
-                <dt>{t("bottom.updated")}</dt>
-                <dd>{new Date(selectedRequest.updated_at).toLocaleString()}</dd>
-                <dt>{t("bottom.headersCount")}</dt>
-                <dd>{selectedRequest.headers.length}</dd>
-                <dt>{t("bottom.queryParamsCount")}</dt>
-                <dd>{selectedRequest.query_params.length}</dd>
-              </dl>
+            <div class="right-sidebar-header">
+              <span class="right-sidebar-title">{@render iconInfo()} {t("bottom.info")}</span>
+              <div class="response-stat-spacer"></div>
+              <button type="button" class="icon-btn" title={t("common.close")} onclick={() => setRightSidebarVisible(false)}>
+                {@render iconClose()}
+              </button>
+            </div>
+            {#if !selectedRequest}
+              <p class="screen-empty-inline">{t("request.selectPrompt")}</p>
+            {:else}
+              <div class="bottom-panel">
+                <dl class="info-list info-list-grid">
+                  <dt>{t("bottom.id")}</dt>
+                  <dd>{selectedRequest.id}</dd>
+                  <dt>{t("bottom.projectId")}</dt>
+                  <dd>{selectedRequest.project_id}</dd>
+                  <dt>{t("bottom.created")}</dt>
+                  <dd>{new Date(selectedRequest.created_at).toLocaleString()}</dd>
+                  <dt>{t("bottom.updated")}</dt>
+                  <dd>{new Date(selectedRequest.updated_at).toLocaleString()}</dd>
+                  <dt>{t("bottom.headersCount")}</dt>
+                  <dd>{selectedRequest.headers.length}</dd>
+                  <dt>{t("bottom.queryParamsCount")}</dt>
+                  <dd>{selectedRequest.query_params.length}</dd>
+                </dl>
+              </div>
+            {/if}
+          {:else if rightPanel === "ai"}
+            <div class="right-sidebar-header">
+              <span class="right-sidebar-title">🪄 Postman AI</span>
+              <div class="response-stat-spacer"></div>
+              <button type="button" class="icon-btn" title={t("common.close")} onclick={() => setRightSidebarVisible(false)}>
+                {@render iconClose()}
+              </button>
+            </div>
+            <div class="right-drawer-body">
+              <p class="hint" style="margin-bottom: var(--space-3);">Generate tests, mock payloads, or explain responses with AI.</p>
+              <textarea class="form-textarea" placeholder="Ask Postman AI to generate test scripts..." bind:value={aiPrompt} rows="4"></textarea>
+              <button type="button" class="btn-primary" style="margin-top: var(--space-2); width: 100%;" onclick={() => { showAiPanel = true; }}>
+                Open AI Assistant
+              </button>
+            </div>
+          {:else if rightPanel === "comments"}
+            <div class="right-sidebar-header">
+              <span class="right-sidebar-title">💬 Comments</span>
+              <div class="response-stat-spacer"></div>
+              <button type="button" class="icon-btn" title={t("common.close")} onclick={() => setRightSidebarVisible(false)}>
+                {@render iconClose()}
+              </button>
+            </div>
+            <div class="right-drawer-body">
+              <p class="hint">Comments aren't available yet — this is a local, single-user app with no collaboration backend.</p>
             </div>
           {:else}
-            <div class="bottom-panel">
-              <div class="params-row">
-                <select bind:value={snippetTarget}>
-                  <option value="windows_cmd">{t("bottom.targetWindowsCmd")}</option>
-                  <option value="power_shell">{t("bottom.targetPowershell")}</option>
-                  <option value="bash">{t("bottom.targetBash")}</option>
-                  <option value="python_requests">{t("bottom.targetPython")}</option>
-                  <option value="java_script_fetch">{t("bottom.targetJavascript")}</option>
-                </select>
-                <select bind:value={snippetMode}>
-                  <option value="placeholder">{t("bottom.placeholderSafe")}</option>
-                  <option value="resolved">{t("bottom.resolvedReal")}</option>
-                </select>
-                {#if snippet}
-                  <button type="button" onclick={copySnippetToClipboard}>{t("bottom.copyClipboard")}</button>
+            <!-- Code snippet drawer matching p3.png -->
+            <div class="right-sidebar-header code-snippet-header">
+              <span class="right-sidebar-title">Code snippet</span>
+              <div class="response-stat-spacer"></div>
+              <div class="menu-wrap">
+                <button type="button" class="icon-btn" title="Snippet Settings" onclick={() => (showSnippetSettings = !showSnippetSettings)}>
+                  {@render iconSettings()}
+                </button>
+                {#if showSnippetSettings}
+                  <button type="button" class="dropdown-backdrop" style="background: transparent !important; border: none !important;" aria-label={t("common.close")} onclick={() => (showSnippetSettings = false)}></button>
+                  <div class="dropdown-menu snippet-settings-dropdown" style="right: 0; min-width: 220px; padding: 6px 0;">
+                    <div style="padding: 6px 12px; font-weight: 600; font-size: 11px; color: #888; border-bottom: 1px solid #333; margin-bottom: 4px;">SNIPPET SETTINGS</div>
+                    <label class="dropdown-menu-item" style="display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 12px;">
+                      <input type="checkbox" checked={snippetIndentType === "tab"} onchange={(e) => { snippetIndentType = e.currentTarget.checked ? "tab" : "space"; }} />
+                      <span>Use tabs for indent</span>
+                    </label>
+                    <label class="dropdown-menu-item" style="display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 12px;">
+                      <input type="checkbox" checked={snippetTrimTrailing} onchange={(e) => { snippetTrimTrailing = e.currentTarget.checked; }} />
+                      <span>Trim trailing spaces</span>
+                    </label>
+                  </div>
                 {/if}
               </div>
+              <button type="button" class="icon-btn" title="Copy snippet to clipboard" onclick={copySnippetToClipboard}>
+                {@render iconCopy()}
+              </button>
+              <button type="button" class="icon-btn" title={t("common.close")} onclick={() => setRightSidebarVisible(false)}>
+                {@render iconClose()}
+              </button>
+            </div>
+
+            <div class="code-snippet-drawer-body">
+              <div class="code-snippet-target-row">
+                <select bind:value={snippetTarget} class="snippet-target-picker">
+                  <option value="bash">cURL</option>
+                  <option value="windows_cmd">cURL (Windows CMD)</option>
+                  <option value="power_shell">cURL (PowerShell)</option>
+                  <option value="java_script_fetch">JavaScript - Fetch</option>
+                  <option value="node_fetch">Node.js - Fetch</option>
+                  <option value="python_requests">Python - Requests</option>
+                  <option value="preload">Preload element</option>
+                  <option value="har">HAR (sanitized)</option>
+                </select>
+                <select bind:value={snippetMode} class="snippet-mode-picker">
+                  <option value="placeholder">Placeholder</option>
+                  <option value="resolved">Resolved</option>
+                </select>
+              </div>
+
               {#if snippetError}
                 <p class="error">{snippetError}</p>
               {:else if snippetLoading}
                 <p class="hint">{t("bottom.generatingSnippet")}</p>
               {:else if snippet}
-                <pre class="body-view bottom-panel-code">{snippet}</pre>
+                <div class="code-snippet-gutter-box">
+                  <div class="code-snippet-gutter" aria-hidden="true">
+                    {#each snippet.split("\n") as _, idx}
+                      <span class="gutter-line-no">{idx + 1}</span>
+                    {/each}
+                  </div>
+                  <pre class="code-snippet-pre"><code>{@html highlightSnippetCode(snippet)}</code></pre>
+                </div>
               {/if}
             </div>
           {/if}
         </aside>
-      {:else}
-        <button type="button" class="sidebar-expand-btn" title={t("sidebar.show")} onclick={() => setRightSidebarVisible(true)}>{@render iconChevronLeft()}</button>
       {/if}
     {/if}
-  </div>
 
-  {#if showConsole}
-    <div
-      class="console-resize-handle"
-      class:resizing={consoleResizing}
-      onmousedown={startConsoleResize}
-      onkeydown={(e) => {
-        if (e.key === "ArrowUp") consoleHeight = Math.min(window.innerHeight - 160, consoleHeight + 16);
-        else if (e.key === "ArrowDown") consoleHeight = Math.max(120, consoleHeight - 16);
-      }}
-      role="slider"
-      aria-orientation="horizontal"
-      aria-label={t("console.resizeHandle")}
-      aria-valuenow={consoleHeight}
-      aria-valuemin={120}
-      aria-valuemax={900}
-      tabindex="0"
-    ></div>
-    <div class="console-drawer" style="height: {consoleHeight}px">
-      <div class="console-header">
-        <div class="console-title-group">
-          <span class="console-title">{t("console.title")}</span>
-          <span class="console-count-badge">{t("console.eventsCount", { count: filteredConsoleEvents.length })}</span>
-        </div>
-
-        <div class="console-toolbar">
-          <select bind:value={consoleLevelFilter} class="console-select">
-            <option value="all">{t("console.allLevels")}</option>
-            <option value="info">{t("console.info")}</option>
-            <option value="warn">{t("console.warn")}</option>
-            <option value="error">{t("console.error")}</option>
-            <option value="debug">{t("console.debug")}</option>
-          </select>
-
-          <label class="console-check-label" title={t("console.activeRequestOnlyTitle")}>
-            <input type="checkbox" bind:checked={consoleActiveRequestOnly} />
-            {t("console.activeRequestOnly")}
-          </label>
-
-          <input
-            type="search"
-            placeholder={t("console.filterPlaceholder")}
-            bind:value={consoleSearchFilter}
-            class="console-search"
-          />
-
-          <button type="button" class="console-btn" onclick={refreshConsoleEvents} title={t("console.refreshTitle")}>{t("console.refresh")}</button>
-          <button type="button" class="console-btn" onclick={clearConsole} title={t("console.clearTitle")}>{t("console.clear")}</button>
-          <button type="button" class="console-btn" onclick={copyConsoleLog} title={t("console.copyTitle")}>{t("console.copy")}</button>
-          <button type="button" class="console-btn" onclick={exportConsoleJson} title={t("console.exportJsonTitle")}>{t("console.exportJson")}</button>
-          <button type="button" class="console-close-btn" onclick={() => (showConsole = false)} title={t("console.closeTitle")}>{@render iconClose()}</button>
-        </div>
-      </div>
-
-      <div class="console-body">
-        {#if filteredConsoleEvents.length === 0}
-          <div class="console-empty">{t("console.empty")}</div>
-        {:else}
-          <div class="console-events-list">
-            {#each filteredConsoleEvents as evt (evt.id)}
-              <div class="console-row" class:error-row={evt.level === "error"} class:warn-row={evt.level === "warn"}>
-                <div
-                  class="console-row-summary"
-                  onclick={() => toggleEventExpanded(evt.id)}
-                  role="button"
-                  tabindex="0"
-                  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") toggleEventExpanded(evt.id); }}
-                >
-                  <span class="evt-expander">{#if expandedEventIds.has(evt.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</span>
-                  <span class="evt-time">{formatConsoleTime(evt.timestamp)}</span>
-                  <span class="evt-level level-{evt.level}">{evt.level.toUpperCase()}</span>
-                  <span class="evt-type">{evt.event_type}</span>
-                  <span class="evt-cid" title={t("console.correlationIdTitle", { id: evt.correlation_id })}>#{evt.correlation_id.slice(0, 8)}</span>
-                  <span class="evt-msg">{evt.message}</span>
-                </div>
-
-                {#if expandedEventIds.has(evt.id) && evt.details}
-                  {@const d = evt.details as Record<string, unknown>}
-                  {@const known = ["request_start", "response_received", "cookie_injected", "request_error", "test_assertion"].includes(evt.event_type)}
-                  <div class="console-row-details">
-                    <div class="details-actions">
-                      {#if known}
-                        <button type="button" class="console-mini-btn" onclick={() => toggleRawDetails(evt.id)}>
-                          {rawDetailsVisible.has(evt.id) ? t("console.hideRawJson") : t("console.viewRawJson")}
-                        </button>
-                      {/if}
-                      <button type="button" class="console-mini-btn" onclick={() => copyEventDetails(evt)}>{t("console.copyDetailsJson")}</button>
-                    </div>
-
-                    {#if evt.event_type === "request_start"}
-                      <div class="detail-kv-grid">
-                        <span class="detail-k">{t("console.method")}</span><span class="detail-v">{detailStr(d, "method")}</span>
-                        <span class="detail-k">{t("console.url")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "url")}</span>
-                        <span class="detail-k">{t("console.authType")}</span><span class="detail-v">{detailStr(d, "auth_type")}</span>
-                        <span class="detail-k">{t("console.bodyBytes")}</span><span class="detail-v">{formatByteSize(Number(d.body_bytes ?? 0))}</span>
-                        <span class="detail-k">{t("console.timeout")}</span><span class="detail-v">{detailStr(d, "timeout_ms")} ms</span>
-                        <span class="detail-k">{t("console.followRedirects")}</span><span class="detail-v">{String(d.follow_redirects)}</span>
-                        <span class="detail-k">{t("console.verifySsl")}</span><span class="detail-v">{String(d.verify_ssl)}</span>
-                        {#if detailStr(d, "proxy")}
-                          <span class="detail-k">{t("console.proxy")}</span><span class="detail-v">{detailStr(d, "proxy")}</span>
-                        {/if}
-                        {#if detailStr(d, "http_version")}
-                          <span class="detail-k">{t("console.httpVersion")}</span><span class="detail-v">{detailStr(d, "http_version")}</span>
-                        {/if}
-                      </div>
-                      {#if asHeaderRows(d.headers).length}
-                        <table class="detail-header-table">
-                          <thead><tr><th>{t("params.key")}</th><th>{t("params.value")}</th></tr></thead>
-                          <tbody>
-                            {#each asHeaderRows(d.headers) as h, i (i)}
-                              <tr class:disabled-row={h.enabled === false}><td>{h.key}</td><td>{h.value}</td></tr>
-                            {/each}
-                          </tbody>
-                        </table>
-                      {/if}
-                    {:else if evt.event_type === "response_received"}
-                      <div class="detail-kv-grid">
-                        <span class="detail-k">{t("console.status")}</span><span class="detail-v">{detailStr(d, "status")} {detailStr(d, "status_text")}</span>
-                        <span class="detail-k">{t("console.duration")}</span><span class="detail-v">{detailStr(d, "duration_ms")} ms</span>
-                        <span class="detail-k">{t("console.bodySize")}</span><span class="detail-v">{formatByteSize(Number(d.body_size ?? 0))}</span>
-                        {#if detailStr(d, "content_type")}
-                          <span class="detail-k">{t("console.contentType")}</span><span class="detail-v">{detailStr(d, "content_type")}</span>
-                        {/if}
-                      </div>
-                      {#if asHeaderRows(d.headers).length}
-                        <table class="detail-header-table">
-                          <thead><tr><th>{t("params.key")}</th><th>{t("params.value")}</th></tr></thead>
-                          <tbody>
-                            {#each asHeaderRows(d.headers) as h, i (i)}
-                              <tr><td>{h.key}</td><td>{h.value}</td></tr>
-                            {/each}
-                          </tbody>
-                        </table>
-                      {/if}
-                      {#if asCookieRows(d.cookies).length}
-                        <table class="detail-header-table">
-                          <thead><tr><th>{t("console.cookieName")}</th><th>{t("params.value")}</th><th>{t("console.cookieDomain")}</th></tr></thead>
-                          <tbody>
-                            {#each asCookieRows(d.cookies) as c, i (i)}
-                              <tr><td>{c.name}</td><td>{c.value || "—"}</td><td>{c.domain}{c.path}</td></tr>
-                            {/each}
-                          </tbody>
-                        </table>
-                      {/if}
-                    {:else if evt.event_type === "cookie_injected"}
-                      <p class="detail-list-label">{t("console.injectedCookies")}</p>
-                      <ul class="detail-plain-list">
-                        {#each (Array.isArray(d.cookies) ? d.cookies : []) as c, i (i)}
-                          <li>{String(c)}</li>
-                        {/each}
-                      </ul>
-                    {:else if evt.event_type === "request_error"}
-                      <div class="detail-kv-grid">
-                        <span class="detail-k">{t("console.error")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "error")}</span>
-                      </div>
-                    {:else if evt.event_type === "test_assertion"}
-                      <div class="detail-kv-grid">
-                        <span class="detail-k">{t("console.testName")}</span><span class="detail-v">{detailStr(d, "name")}</span>
-                        <span class="detail-k">{t("console.testPassed")}</span><span class="detail-v">{d.passed ? t("console.pass") : t("console.fail")}</span>
-                        {#if detailStr(d, "error")}
-                          <span class="detail-k">{t("console.testError")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "error")}</span>
-                        {/if}
-                      </div>
-                    {/if}
-
-                    {#if !known || rawDetailsVisible.has(evt.id)}
-                      <pre class="console-json-view">{JSON.stringify(evt.details, null, 2)}</pre>
-                    {/if}
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
-    </div>
-  {/if}
-
-  <footer class="app-status-bar">
-    <div class="status-left">
-      <button
-        type="button"
-        class="console-toggle-btn"
-        class:active={showConsole}
-        onclick={() => {
-          showConsole = !showConsole;
-          if (showConsole) refreshConsoleEvents();
-        }}
-      >
-        <span>{t("console.title")}</span>
-        {#if consoleErrorCount > 0}
-          <span class="status-badge-error">{@render iconXCircle()} {consoleErrorCount}</span>
-        {/if}
-        {#if consoleWarnCount > 0}
-          <span class="status-badge-warn">{@render iconWarning()} {consoleWarnCount}</span>
-        {/if}
-      </button>
-    </div>
-    <div class="status-right">
-      {#if selectedProjectId}
+    <!-- Persistent Right Utility Rail matching p3, p4 -->
+    {#if utilityRailVisible && activeScreen === "workspace" && !responseExpanded}
+      <aside class="right-utility-rail" aria-label="Utility rail">
         <button
           type="button"
-          class="git-status-pill git-kind-{gitStatus?.status_kind ?? 'unconfigured'}"
-          class:git-has-conflict={gitStatus?.has_conflicts}
-          title={t("footer.gitSyncTitle")}
+          class="rail-action-btn"
+          class:active={rightSidebarVisible && rightPanel === "ai"}
+          title="Postman AI Assistant"
           onclick={() => {
-            activeScreen = "git";
-            if (gitRepoPathInput) refreshGitStatus();
+            if (rightSidebarVisible && rightPanel === "ai") {
+              setRightSidebarVisible(false);
+              rightPanel = null;
+            } else {
+              rightPanel = "ai";
+              setRightSidebarVisible(true);
+            }
           }}
         >
-          <span class="git-icon">{@render iconGitBranch()}</span>
-          {#if !gitSettings?.repo_path}
-            <span>{t("footer.gitNotConfigured")}</span>
-          {:else if gitStatusLoading}
-            <span>{t("footer.gitChecking")}</span>
-          {:else if gitStatus?.has_conflicts}
-            <span class="git-alert">{t("footer.gitConflict", { count: gitStatus.conflict_files.length })}</span>
-          {:else if gitStatus}
-            <span>{t("footer.gitBranchStatus", { branch: gitStatus.branch, status: gitStatus.status_kind })}</span>
-            {#if gitStatus.ahead > 0}<span class="git-ahead">{@render iconArrowUp()}{gitStatus.ahead}</span>{/if}
-            {#if gitStatus.behind > 0}<span class="git-behind">{@render iconArrowDown()}{gitStatus.behind}</span>{/if}
-          {:else}
-            <span>{t("footer.gitLabel", { branch: gitBranchInput })}</span>
-          {/if}
+          <span class="rail-action-icon">🪄</span>
+          <span class="rail-action-label">AI</span>
         </button>
-        <span class="status-info">{t("footer.project", { name: projects.find((p) => p.id === selectedProjectId)?.name ?? selectedProjectId })}</span>
-      {/if}
-      {#if selectedEnvironmentId}
-        <span class="status-info">{t("footer.env", { name: allEnvironments.find((e) => e.id === selectedEnvironmentId)?.name ?? selectedEnvironmentId })}</span>
-      {/if}
-    </div>
-  </footer>
 
+        <button
+          type="button"
+          class="rail-action-btn"
+          class:active={rightSidebarVisible && rightPanel === "variables"}
+          title="All variables (Environment quick look)"
+          onclick={() => {
+            if (rightSidebarVisible && rightPanel === "variables") {
+              setRightSidebarVisible(false);
+              rightPanel = null;
+            } else {
+              loadVariables();
+              rightPanel = "variables";
+              setRightSidebarVisible(true);
+            }
+          }}
+        >
+          <span class="rail-action-icon">{@render iconEye()}</span>
+        </button>
+
+        <button
+          type="button"
+          class="rail-action-btn"
+          class:active={rightSidebarVisible && (rightPanel === "code" || !rightPanel)}
+          title="Code snippet"
+          onclick={() => {
+            if (rightSidebarVisible && rightPanel === "code") {
+              setRightSidebarVisible(false);
+              rightPanel = null;
+            } else {
+              rightPanel = "code";
+              setRightSidebarVisible(true);
+            }
+          }}
+        >
+          <span class="rail-action-code">&lt;/&gt;</span>
+        </button>
+
+        <button
+          type="button"
+          class="rail-action-btn"
+          class:active={rightSidebarVisible && rightPanel === "comments"}
+          title="Comments"
+          onclick={() => {
+            if (rightSidebarVisible && rightPanel === "comments") {
+              setRightSidebarVisible(false);
+              rightPanel = null;
+            } else {
+              rightPanel = "comments";
+              setRightSidebarVisible(true);
+            }
+          }}
+        >
+          <span class="rail-action-icon">💬</span>
+        </button>
+
+        <button
+          type="button"
+          class="rail-action-btn"
+          class:active={rightSidebarVisible && rightPanel === "info"}
+          title="Request info"
+          onclick={() => {
+            if (rightSidebarVisible && rightPanel === "info") {
+              setRightSidebarVisible(false);
+              rightPanel = null;
+            } else {
+              rightPanel = "info";
+              setRightSidebarVisible(true);
+            }
+          }}
+        >
+          <span class="rail-action-icon">{@render iconInfo()}</span>
+        </button>
+      </aside>
+    {/if}
+  </div>
 
   {#if showAiPanel}
     <div
@@ -7216,6 +9633,86 @@
 
 </div>
 {/if}
+{:else if activeScreen === "globals"}
+  <div class="globals-screen-container">
+    <div class="globals-main-view">
+      <div class="globals-header">
+        <div class="globals-title-row">
+          <h1 class="globals-title">Globals</h1>
+          <button type="button" class="btn-link-action" onclick={handleAddGlobalVariableClick}>Add variable</button>
+        </div>
+        <div class="globals-desc-row">
+          <span class="globals-desc">Globals are variables that are available across all workspaces.</span>
+        </div>
+        <div class="globals-toolbar">
+          <div class="globals-search-wrapper">
+            <span class="search-icon">🔍</span>
+            <input
+              type="search"
+              placeholder="Filter variables"
+              class="globals-search-input"
+              bind:value={globalsSearch}
+            />
+          </div>
+          <button type="button" class="btn-export-globals" onclick={exportGlobalVariables}>
+            <span class="export-icon">&#8682;</span>
+            <span>Export</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="globals-table-wrapper">
+        <table class="globals-table">
+          <thead>
+            <tr>
+              <th class="col-check"><input type="checkbox" checked title="Select all" /></th>
+              <th class="col-key">VARIABLE</th>
+              <th class="col-init">INITIAL VALUE</th>
+              <th class="col-curr">CURRENT VALUE</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each (globalsSearch ? filteredProjectVariables.filter(v => v.key.toLowerCase().includes(globalsSearch.toLowerCase()) || v.value.toLowerCase().includes(globalsSearch.toLowerCase())) : filteredProjectVariables) as v (v.id)}
+              <tr>
+                <td class="col-check">
+                  <input type="checkbox" checked={v.enabled} onchange={() => toggleVariableEnabled(v)} />
+                </td>
+                <td class="col-key font-mono font-bold">
+                  <input class="table-cell-input" value={v.key} onblur={(e) => updateVariableKey(v, (e.target as HTMLInputElement).value)} />
+                </td>
+                <td class="col-init font-mono">
+                  <input class="table-cell-input text-secondary" value={v.is_secret ? "••••••••" : v.value} onblur={(e) => updateVariableValue(v, (e.target as HTMLInputElement).value)} />
+                </td>
+                <td class="col-curr font-mono">
+                  <input class="table-cell-input" value={v.is_secret ? "••••••••" : v.value} onblur={(e) => updateVariableValue(v, (e.target as HTMLInputElement).value)} />
+                </td>
+              </tr>
+            {/each}
+            <tr class="add-row">
+              <td class="col-check"><input type="checkbox" disabled /></td>
+              <td class="col-key">
+                <input
+                  class="table-cell-input placeholder-row"
+                  placeholder="Add variable"
+                  bind:value={newGlobalVarDraft.key}
+                  onkeydown={(e) => { if (e.key === "Enter") commitNewGlobalVar(); }}
+                />
+              </td>
+              <td class="col-init">
+                <input
+                  class="table-cell-input"
+                  placeholder=""
+                  bind:value={newGlobalVarDraft.value}
+                  onkeydown={(e) => { if (e.key === "Enter") commitNewGlobalVar(); }}
+                />
+              </td>
+              <td class="col-curr"></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 {:else if activeScreen === "environments"}
   {#if !selectedProjectId}
     {@render noProjectPicker(t("rail.environments"))}
@@ -7913,6 +10410,43 @@
       </div>
     </div>
 
+    <div class="settings-screen-row">
+      <div>
+        <div class="settings-screen-row-label">Sidebar Sections</div>
+        <div class="screen-empty-inline">Choose which sections appear in the sidebar accordion.</div>
+      </div>
+      <div class="settings-sections-checkbox-grid">
+        <label class="settings-checkbox-pill" class:active={sidebarSectionsVisible.collections}>
+          <input type="checkbox" checked={sidebarSectionsVisible.collections} onchange={() => toggleSidebarSectionVisibility("collections")} />
+          <span>Collections</span>
+        </label>
+        <label class="settings-checkbox-pill" class:active={sidebarSectionsVisible.environments}>
+          <input type="checkbox" checked={sidebarSectionsVisible.environments} onchange={() => toggleSidebarSectionVisibility("environments")} />
+          <span>Environments</span>
+        </label>
+        <label class="settings-checkbox-pill" class:active={sidebarSectionsVisible.datasets}>
+          <input type="checkbox" checked={sidebarSectionsVisible.datasets} onchange={() => toggleSidebarSectionVisibility("datasets")} />
+          <span>Datasets</span>
+        </label>
+        <label class="settings-checkbox-pill" class:active={sidebarSectionsVisible.documents}>
+          <input type="checkbox" checked={sidebarSectionsVisible.documents} onchange={() => toggleSidebarSectionVisibility("documents")} />
+          <span>Documents</span>
+        </label>
+        <label class="settings-checkbox-pill" class:active={sidebarSectionsVisible.specs}>
+          <input type="checkbox" checked={sidebarSectionsVisible.specs} onchange={() => toggleSidebarSectionVisibility("specs")} />
+          <span>Specs</span>
+        </label>
+        <label class="settings-checkbox-pill" class:active={sidebarSectionsVisible.mocks}>
+          <input type="checkbox" checked={sidebarSectionsVisible.mocks} onchange={() => toggleSidebarSectionVisibility("mocks")} />
+          <span>Mocks</span>
+        </label>
+        <label class="settings-checkbox-pill" class:active={sidebarSectionsVisible.flows}>
+          <input type="checkbox" checked={sidebarSectionsVisible.flows} onchange={() => toggleSidebarSectionVisibility("flows")} />
+          <span>Flows</span>
+        </label>
+      </div>
+    </div>
+
     <div class="settings-screen-block">
       <p class="screen-subtitle">{t("theme.subtitle")}</p>
       <div class="theme-compare">
@@ -8153,6 +10687,352 @@
 {/if}
   </div>
 
+  {#if showConsole}
+    <div
+      class="console-resize-handle"
+      class:resizing={consoleResizing}
+      onmousedown={startConsoleResize}
+      onkeydown={(e) => {
+        if (e.key === "ArrowUp") consoleHeight = Math.min(window.innerHeight - 160, consoleHeight + 16);
+        else if (e.key === "ArrowDown") consoleHeight = Math.max(120, consoleHeight - 16);
+      }}
+      role="slider"
+      aria-orientation="horizontal"
+      aria-label={t("console.resizeHandle")}
+      aria-valuenow={consoleHeight}
+      aria-valuemin={120}
+      aria-valuemax={900}
+      tabindex="0"
+    ></div>
+    <div class="console-drawer" style="height: {consoleHeight}px">
+      <div class="console-header">
+        <div class="console-title-group">
+          <span class="console-title">{t("console.title")}</span>
+          <span class="console-count-badge">{t("console.eventsCount", { count: filteredConsoleEvents.length })}</span>
+        </div>
+
+        <div class="console-toolbar">
+          <select bind:value={consoleLevelFilter} class="console-select">
+            <option value="all">{t("console.allLevels")}</option>
+            <option value="info">{t("console.info")}</option>
+            <option value="warn">{t("console.warn")}</option>
+            <option value="error">{t("console.error")}</option>
+            <option value="debug">{t("console.debug")}</option>
+          </select>
+
+          <label class="console-check-label" title={t("console.activeRequestOnlyTitle")}>
+            <input type="checkbox" bind:checked={consoleActiveRequestOnly} />
+            {t("console.activeRequestOnly")}
+          </label>
+
+          <input
+            type="search"
+            placeholder={t("console.filterPlaceholder")}
+            bind:value={consoleSearchFilter}
+            class="console-search"
+          />
+
+          <button type="button" class="console-btn" onclick={refreshConsoleEvents} title={t("console.refreshTitle")}>{t("console.refresh")}</button>
+          <button type="button" class="console-btn" onclick={clearConsole} title={t("console.clearTitle")}>{t("console.clear")}</button>
+          <button type="button" class="console-btn" onclick={copyConsoleLog} title={t("console.copyTitle")}>{t("console.copy")}</button>
+          <button type="button" class="console-btn" onclick={exportConsoleJson} title={t("console.exportJsonTitle")}>{t("console.exportJson")}</button>
+          <button type="button" class="console-close-btn" onclick={() => (showConsole = false)} title={t("console.closeTitle")}>{@render iconClose()}</button>
+        </div>
+      </div>
+
+      <div class="console-body">
+        {#if filteredConsoleEvents.length === 0}
+          <div class="console-empty">{t("console.empty")}</div>
+        {:else}
+          <div class="console-events-list">
+            {#each filteredConsoleEvents as evt (evt.id)}
+              <div class="console-row" class:error-row={evt.level === "error"} class:warn-row={evt.level === "warn"}>
+                <div
+                  class="console-row-summary"
+                  onclick={() => toggleEventExpanded(evt.id)}
+                  role="button"
+                  tabindex="0"
+                  onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") toggleEventExpanded(evt.id); }}
+                >
+                  <span class="evt-expander">{#if expandedEventIds.has(evt.id)}{@render iconChevronDown()}{:else}{@render iconChevronRight()}{/if}</span>
+                  <span class="evt-time">{formatConsoleTime(evt.timestamp)}</span>
+                  <span class="evt-level level-{evt.level}">{evt.level.toUpperCase()}</span>
+                  <span class="evt-type">{evt.event_type}</span>
+                  <span class="evt-cid" title={t("console.correlationIdTitle", { id: evt.correlation_id ?? "" })}>#{evt.correlation_id ? evt.correlation_id.slice(0, 8) : "—"}</span>
+                  <span class="evt-msg">{evt.message}</span>
+                </div>
+
+                {#if expandedEventIds.has(evt.id) && evt.details}
+                  {@const d = evt.details as Record<string, unknown>}
+                  {@const known = ["request_start", "response_received", "cookie_injected", "request_error", "test_assertion"].includes(evt.event_type)}
+                  <div class="console-row-details">
+                    <div class="details-actions">
+                      {#if known}
+                        <button type="button" class="console-mini-btn" onclick={() => toggleRawDetails(evt.id)}>
+                          {rawDetailsVisible.has(evt.id) ? t("console.hideRawJson") : t("console.viewRawJson")}
+                        </button>
+                      {/if}
+                      <button type="button" class="console-mini-btn" onclick={() => copyEventDetails(evt)}>{t("console.copyDetailsJson")}</button>
+                    </div>
+
+                    {#if evt.event_type === "request_start"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.method")}</span><span class="detail-v">{detailStr(d, "method")}</span>
+                        <span class="detail-k">{t("console.url")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "url")}</span>
+                        <span class="detail-k">{t("console.authType")}</span><span class="detail-v">{detailStr(d, "auth_type")}</span>
+                        <span class="detail-k">{t("console.bodyBytes")}</span><span class="detail-v">{formatByteSize(Number(d.body_bytes ?? 0))}</span>
+                        <span class="detail-k">{t("console.timeout")}</span><span class="detail-v">{detailStr(d, "timeout_ms")} ms</span>
+                        <span class="detail-k">{t("console.followRedirects")}</span><span class="detail-v">{String(d.follow_redirects)}</span>
+                        <span class="detail-k">{t("console.verifySsl")}</span><span class="detail-v">{String(d.verify_ssl)}</span>
+                        {#if detailStr(d, "proxy")}
+                          <span class="detail-k">{t("console.proxy")}</span><span class="detail-v">{detailStr(d, "proxy")}</span>
+                        {/if}
+                        {#if detailStr(d, "http_version")}
+                          <span class="detail-k">{t("console.httpVersion")}</span><span class="detail-v">{detailStr(d, "http_version")}</span>
+                        {/if}
+                      </div>
+                      {#if asHeaderRows(d.headers).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("params.key")}</th><th>{t("params.value")}</th></tr></thead>
+                          <tbody>
+                            {#each asHeaderRows(d.headers) as h, i (i)}
+                              <tr class:disabled-row={h.enabled === false}><td>{h.key}</td><td>{h.value}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                    {:else if evt.event_type === "response_received"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.status")}</span><span class="detail-v">{detailStr(d, "status")} {detailStr(d, "status_text")}</span>
+                        <span class="detail-k">{t("console.duration")}</span><span class="detail-v">{detailStr(d, "duration_ms")} ms</span>
+                        <span class="detail-k">{t("console.bodySize")}</span><span class="detail-v">{formatByteSize(Number(d.body_size ?? 0))}</span>
+                        {#if detailStr(d, "content_type")}
+                          <span class="detail-k">{t("console.contentType")}</span><span class="detail-v">{detailStr(d, "content_type")}</span>
+                        {/if}
+                      </div>
+                      {#if asHeaderRows(d.headers).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("params.key")}</th><th>{t("params.value")}</th></tr></thead>
+                          <tbody>
+                            {#each asHeaderRows(d.headers) as h, i (i)}
+                              <tr><td>{h.key}</td><td>{h.value}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                      {#if asCookieRows(d.cookies).length}
+                        <table class="detail-header-table">
+                          <thead><tr><th>{t("console.cookieName")}</th><th>{t("params.value")}</th><th>{t("console.cookieDomain")}</th></tr></thead>
+                          <tbody>
+                            {#each asCookieRows(d.cookies) as c, i (i)}
+                              <tr><td>{c.name}</td><td>{c.value || "—"}</td><td>{c.domain}{c.path}</td></tr>
+                            {/each}
+                          </tbody>
+                        </table>
+                      {/if}
+                    {:else if evt.event_type === "cookie_injected"}
+                      <p class="detail-list-label">{t("console.injectedCookies")}</p>
+                      <ul class="detail-plain-list">
+                        {#each (Array.isArray(d.cookies) ? d.cookies : []) as c, i (i)}
+                          <li>{String(c)}</li>
+                        {/each}
+                      </ul>
+                    {:else if evt.event_type === "request_error"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.error")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "error")}</span>
+                      </div>
+                    {:else if evt.event_type === "test_assertion"}
+                      <div class="detail-kv-grid">
+                        <span class="detail-k">{t("console.testName")}</span><span class="detail-v">{detailStr(d, "name")}</span>
+                        <span class="detail-k">{t("console.testPassed")}</span><span class="detail-v">{d.passed ? t("console.pass") : t("console.fail")}</span>
+                        {#if detailStr(d, "error")}
+                          <span class="detail-k">{t("console.testError")}</span><span class="detail-v detail-v-wrap">{detailStr(d, "error")}</span>
+                        {/if}
+                      </div>
+                    {/if}
+
+                    {#if !known || rawDetailsVisible.has(evt.id)}
+                      <pre class="console-json-view">{JSON.stringify(evt.details, null, 2)}</pre>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  <footer class="app-status-bar">
+    <div class="status-left">
+      <button
+        type="button"
+        class="status-btn icon-only"
+        class:active={sidebarVisible}
+        title={sidebarVisible ? "Hide sidebar (Project tree)" : "Show sidebar (Project tree)"}
+        onclick={() => setSidebarVisible(!sidebarVisible)}
+      >
+        {@render iconSidebar()}
+      </button>
+      {#if selectedProjectId}
+        <button
+          type="button"
+          class="status-btn git-btn"
+          title={t("footer.gitSyncTitle")}
+          onclick={() => { activeScreen = "git"; if (gitRepoPathInput) refreshGitStatus(); }}
+        >
+          <span class="git-icon">{@render iconGitBranch()}</span>
+          <span>{gitStatus?.branch || "main"}</span>
+          <span class="git-sync-arrows">&#8644;</span>
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="status-btn console-btn"
+        class:active={showConsole}
+        onclick={() => {
+          showConsole = !showConsole;
+          if (showConsole) refreshConsoleEvents();
+        }}
+      >
+        <span>{t("console.title")}</span>
+        {#if consoleErrorCount > 0}<span class="status-badge-err">! {consoleErrorCount}</span>{/if}
+        {#if consoleWarnCount > 0}<span class="status-badge-warn">! {consoleWarnCount}</span>{/if}
+      </button>
+    </div>
+    <div class="status-right">
+      <button
+        type="button"
+        class="status-btn"
+        class:active={activeScreen === "globals"}
+        onclick={() => {
+          loadVariables();
+          activeScreen = "globals";
+          rightPanel = "variables";
+          setRightSidebarVisible(true);
+        }}
+      >
+        <span>Globals</span>
+      </button>
+      <button type="button" class="status-btn" class:active={activeScreen === "environments"} onclick={() => { loadVariables(); activeScreen = "environments"; }}>
+        <span>Environments</span>
+      </button>
+      <button type="button" class="status-btn" class:active={activeScreen === "settings"} onclick={() => (activeScreen = activeScreen === "settings" ? "workspace" : "settings")}>
+        <span>Tools</span>
+      </button>
+      <button
+        type="button"
+        class="status-btn icon-only"
+        class:active={utilityRailVisible}
+        title={utilityRailVisible ? "Hide menu items rail" : "Show menu items rail"}
+        onclick={toggleUtilityRail}
+      >
+        {@render iconLayout()}
+      </button>
+    </div>
+  </footer>
+
+  {#if showInviteModal}
+    <div
+      class="modal-backdrop"
+      onclick={(e) => { if (e.target === e.currentTarget) showInviteModal = false; }}
+      onkeydown={(e) => { if (e.key === "Escape") showInviteModal = false; }}
+      role="dialog"
+      aria-modal="true"
+      tabindex="0"
+    >
+      <div class="modal-container" style="max-width: 460px;">
+        <div class="modal-header">
+          <div class="modal-title-wrap">
+            <h3>Invite to Workspace</h3>
+            <span class="modal-sub">Collaborate in real time with your engineering team.</span>
+          </div>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showInviteModal = false)}>{@render iconClose()}</button>
+        </div>
+        <div style="padding: 16px 20px; display: flex; flex-direction: column; gap: 14px;">
+          <div>
+            <label style="display: block; font-size: 11px; font-weight: 600; color: #888; margin-bottom: 6px;">EMAIL ADDRESS</label>
+            <input
+              type="email"
+              placeholder="colleague@organization.com"
+              bind:value={inviteEmail}
+              class="request-search-input"
+              style="width: 100%; box-sizing: border-box; height: 34px;"
+            />
+          </div>
+          <div>
+            <label style="display: block; font-size: 11px; font-weight: 600; color: #888; margin-bottom: 6px;">ROLE</label>
+            <select bind:value={inviteRole} class="snippet-target-picker" style="width: 100%;">
+              <option value="editor">Editor (can edit and send requests)</option>
+              <option value="viewer">Viewer (read-only)</option>
+              <option value="admin">Admin (full workspace control)</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-actions" style="display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px; border-top: 1px solid #333;">
+          <button type="button" class="btn-cancel" onclick={() => (showInviteModal = false)}>Cancel</button>
+          <button type="button" class="btn-send" onclick={() => {
+            showInviteModal = false;
+            errorMessage = "Workspace invites aren't available yet — this is a local, single-user app with no account/collaboration backend.";
+          }}>Send Invite</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showUpgradeModal}
+    <div
+      class="modal-backdrop"
+      onclick={(e) => { if (e.target === e.currentTarget) showUpgradeModal = false; }}
+      onkeydown={(e) => { if (e.key === "Escape") showUpgradeModal = false; }}
+      role="dialog"
+      aria-modal="true"
+      tabindex="0"
+    >
+      <div class="modal-container" style="max-width: 650px;">
+        <div class="modal-header">
+          <div class="modal-title-wrap">
+            <h3>Choose a Plan for Your Team</h3>
+            <span class="modal-sub">Unlock unlimited mock requests, advanced test flows, and cloud sync.</span>
+          </div>
+          <button type="button" class="modal-close-btn" title="Close" onclick={() => (showUpgradeModal = false)}>{@render iconClose()}</button>
+        </div>
+        <div style="padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div style="background: #202020; border: 1px solid #333; border-radius: 6px; padding: 16px;">
+            <div style="font-weight: 700; font-size: 14px; color: #fff;">Team Plan</div>
+            <div style="font-size: 20px; font-weight: 700; color: #ff6c37; margin: 8px 0;">$14 <span style="font-size: 11px; color: #888;">/ user / month</span></div>
+            <ul style="font-size: 12px; color: #aaa; padding-left: 18px; margin: 10px 0; line-height: 1.6;">
+              <li>Unlimited collections & requests</li>
+              <li>Collaborative shared environments</li>
+              <li>Up to 50,000 mock calls / month</li>
+            </ul>
+            <button type="button" class="btn-send" style="width: 100%; margin-top: 10px;" onclick={() => {
+              showUpgradeModal = false;
+              exportFeedback = "Upgraded to Team Plan! Enjoy enhanced features.";
+              setTimeout(() => { exportFeedback = ""; }, 3500);
+            }}>Upgrade to Team</button>
+          </div>
+          <div style="background: #202020; border: 1px solid #ff6c37; border-radius: 6px; padding: 16px; position: relative;">
+            <span style="position: absolute; top: -10px; right: 12px; background: #ff6c37; color: #fff; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 10px;">POPULAR</span>
+            <div style="font-weight: 700; font-size: 14px; color: #fff;">Enterprise</div>
+            <div style="font-size: 20px; font-weight: 700; color: #0cbb52; margin: 8px 0;">$29 <span style="font-size: 11px; color: #888;">/ user / month</span></div>
+            <ul style="font-size: 12px; color: #aaa; padding-left: 18px; margin: 10px 0; line-height: 1.6;">
+              <li>Dedicated mock servers & flows</li>
+              <li>SSO (SAML / Okta) integration</li>
+              <li>Priority SLA & 24/7 technical support</li>
+            </ul>
+            <button type="button" class="btn-send" style="width: 100%; margin-top: 10px; background: #0cbb52;" onclick={() => {
+              showUpgradeModal = false;
+              exportFeedback = "Upgraded to Enterprise! Welcome aboard.";
+              setTimeout(() => { exportFeedback = ""; }, 3500);
+            }}>Upgrade to Enterprise</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if showImportDialog}
     <div
       class="modal-backdrop"
@@ -8368,4939 +11248,123 @@
       </div>
     </div>
   {/if}
+
+  {#if textCopiedNotice}
+    <div style="position: fixed; bottom: 40px; right: 24px; z-index: 99999; background: #0cbb52; color: #fff; padding: 8px 16px; border-radius: 4px; font-weight: 500; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); display: flex; align-items: center; gap: 8px;">
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8.5l3.5 3.5L13 4"/></svg>
+      <span>{textCopiedNotice}</span>
+    </div>
+  {/if}
+
+  {#if tabContextMenu.visible}
+    <div
+      class="dropdown-backdrop"
+      style="background: transparent; z-index: 9998;"
+      onclick={closeTabContextMenu}
+      oncontextmenu={(e) => { e.preventDefault(); closeTabContextMenu(); }}
+      role="presentation"
+    ></div>
+    <div
+      class="postman-tab-context-menu"
+      style="top: {tabContextMenu.y}px; left: {tabContextMenu.x}px;"
+    >
+      <button type="button" class="tab-context-menu-item" onclick={handleTabMenuNewRequest}>
+        <span class="tab-menu-label">New Request</span>
+        <span class="tab-menu-shortcut">Ctrl+T</span>
+      </button>
+      <button type="button" class="tab-context-menu-item" onclick={handleTabMenuDuplicateTab}>
+        <span class="tab-menu-label">Duplicate Tab</span>
+      </button>
+
+      <div class="tab-context-menu-divider"></div>
+
+      <button type="button" class="tab-context-menu-item" onclick={handleTabMenuCloseTab}>
+        <span class="tab-menu-label">Close Tab</span>
+        <span class="tab-menu-shortcut">Ctrl+W</span>
+      </button>
+      <button type="button" class="tab-context-menu-item" onclick={handleTabMenuForceCloseTab}>
+        <span class="tab-menu-label">Force Close Tab</span>
+        <span class="tab-menu-shortcut">Alt+Ctrl+W</span>
+      </button>
+      <button type="button" class="tab-context-menu-item" onclick={handleTabMenuCloseOtherTabs}>
+        <span class="tab-menu-label">Close Other Tabs</span>
+      </button>
+      <button type="button" class="tab-context-menu-item" onclick={handleTabMenuCloseAllTabs}>
+        <span class="tab-menu-label">Close All Tabs</span>
+      </button>
+      <button type="button" class="tab-context-menu-item" onclick={handleTabMenuForceCloseAllTabs}>
+        <span class="tab-menu-label">Force Close All Tabs</span>
+      </button>
+
+      <div class="tab-context-menu-divider"></div>
+
+      <button type="button" class="tab-context-menu-item" onclick={handleTabMenuRevealInSidebar}>
+        <span class="tab-menu-label">Reveal in Sidebar</span>
+      </button>
+    </div>
+  {/if}
+
+  {#if requestContextMenu.visible}
+    <div
+      class="dropdown-backdrop"
+      style="background: transparent; z-index: 9998;"
+      onclick={closeRequestContextMenu}
+      oncontextmenu={(e) => { e.preventDefault(); closeRequestContextMenu(); }}
+      role="presentation"
+    ></div>
+    <div
+      class="postman-context-menu"
+      style="top: {requestContextMenu.y}px; left: {requestContextMenu.x}px;"
+    >
+      <button type="button" class="context-menu-item" onclick={() => copyContextUrl(requestContextMenu.request)}>
+        <span>Copy URL</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={() => copyContextAsCurlBash(requestContextMenu.request)}>
+        <span>Copy as cURL (bash)</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={() => copyContextAsCurlCmd(requestContextMenu.request)}>
+        <span>Copy as cURL (cmd)</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={() => copyContextAsCurlPowerShell(requestContextMenu.request)}>
+        <span>Copy as cURL (PowerShell)</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={() => copyContextAsFetch(requestContextMenu.request)}>
+        <span>Copy as Fetch</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={() => copyContextAsNodeFetch(requestContextMenu.request)}>
+        <span>Copy as Node.js - Fetch</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={() => copyContextAsPythonRequests(requestContextMenu.request)}>
+        <span>Copy as Python - Requests</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={() => copyContextAsPreload(requestContextMenu.request)}>
+        <span>Copy as Preload element</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={() => copyContextAsHar(requestContextMenu.request)}>
+        <span>Copy as HAR (sanitized)</span>
+      </button>
+      <div class="context-menu-divider"></div>
+      <button type="button" class="context-menu-item" onclick={copyAllUrlsAction}>
+        <span>Copy all URLs</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={copyAllAsCurlBashAction}>
+        <span>Copy all as cURL (bash)</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={copyAllAsCurlCmdAction}>
+        <span>Copy all as cURL (cmd)</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={copyAllAsCurlPowerShellAction}>
+        <span>Copy all as cURL (PowerShell)</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={copyAllAsFetchAction}>
+        <span>Copy all as Fetch</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={copyAllAsNodeFetchAction}>
+        <span>Copy all as Node.js - Fetch</span>
+      </button>
+      <button type="button" class="context-menu-item" onclick={copyAllAsHarAction}>
+        <span>Copy all as HAR (sanitized)</span>
+      </button>
+    </div>
+  {/if}
 </div>
-
-<style>
-  /* "Softline" design system: warm parchment/ink grounds, soft rounded corners, a serif display
-     face (Newsreader) paired with a humanist sans (Work Sans) for UI text, hairline borders over
-     the old system's strong 2px architectural rules. Replaces the previous "Modernist" palette
-     (flat, zero-radius, Archivo) wholesale through the same custom-property names, so the remap
-     alone repaints the whole app. Light is the system's own default (not an OS-follow); dark is
-     a real, deliberate alternate palette toggled via `data-theme` — a dark espresso ground with
-     the same warm hue family, accents lifted one step for contrast.
-     Terracotta (--color-primary/--color-accent) is reserved for primary actions and the
-     active-nav mark only — it no longer doubles as danger or "no color" success, and HTTP
-     methods get their own hues (below) instead of staying flat ink, so a dense request list
-     stays scannable at the scale this app targets (thousands of requests).
-     Two further themes, "terminal" and "blueprint" (below the light/dark pair), swap the whole
-     structural language, not just color — different fonts, radius and rule-weight — so each
-     carries its own font/radius/shadow declarations instead of only colors. */
-  /* Self-hosted (LP-1403) — was a Google Fonts @import, which made this "local-first,
-     offline storage" app require network access just to render its own UI correctly on
-     first paint. These are the same five families/weights, downloaded once into
-     static/fonts/ (latin + latin-ext subsets only — Arabic UI text already falls back to
-     system-ui below, since none of these families cover Arabic glyphs either way). Several
-     collapse to one variable-font file across their whole weight range, so this is 14 files,
-     not the 20 the original @import weight list implied. */
-  @font-face {
-    font-family: 'Newsreader';
-    font-style: normal;
-    font-weight: 400 800;
-    font-display: swap;
-    src: url('/fonts/newsreader-normal-400-800-latin.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-  }
-  @font-face {
-    font-family: 'Newsreader';
-    font-style: normal;
-    font-weight: 400 800;
-    font-display: swap;
-    src: url('/fonts/newsreader-normal-400-800-latin-ext.woff2') format('woff2');
-    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-  }
-  @font-face {
-    font-family: 'Newsreader';
-    font-style: italic;
-    font-weight: 500 600;
-    font-display: swap;
-    src: url('/fonts/newsreader-italic-500-600-latin.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-  }
-  @font-face {
-    font-family: 'Newsreader';
-    font-style: italic;
-    font-weight: 500 600;
-    font-display: swap;
-    src: url('/fonts/newsreader-italic-500-600-latin-ext.woff2') format('woff2');
-    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-  }
-  @font-face {
-    font-family: 'Work Sans';
-    font-style: normal;
-    font-weight: 400 700;
-    font-display: swap;
-    src: url('/fonts/work-sans-normal-400-700-latin.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-  }
-  @font-face {
-    font-family: 'Work Sans';
-    font-style: normal;
-    font-weight: 400 700;
-    font-display: swap;
-    src: url('/fonts/work-sans-normal-400-700-latin-ext.woff2') format('woff2');
-    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-  }
-  @font-face {
-    font-family: 'JetBrains Mono';
-    font-style: normal;
-    font-weight: 400 700;
-    font-display: swap;
-    src: url('/fonts/jetbrains-mono-normal-400-700-latin.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-  }
-  @font-face {
-    font-family: 'JetBrains Mono';
-    font-style: normal;
-    font-weight: 400 700;
-    font-display: swap;
-    src: url('/fonts/jetbrains-mono-normal-400-700-latin-ext.woff2') format('woff2');
-    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-  }
-  @font-face {
-    font-family: 'Space Grotesk';
-    font-style: normal;
-    font-weight: 500 700;
-    font-display: swap;
-    src: url('/fonts/space-grotesk-normal-500-700-latin.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-  }
-  @font-face {
-    font-family: 'Space Grotesk';
-    font-style: normal;
-    font-weight: 500 700;
-    font-display: swap;
-    src: url('/fonts/space-grotesk-normal-500-700-latin-ext.woff2') format('woff2');
-    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-  }
-  @font-face {
-    font-family: 'Space Mono';
-    font-style: normal;
-    font-weight: 400;
-    font-display: swap;
-    src: url('/fonts/space-mono-normal-400-latin.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-  }
-  @font-face {
-    font-family: 'Space Mono';
-    font-style: normal;
-    font-weight: 400;
-    font-display: swap;
-    src: url('/fonts/space-mono-normal-400-latin-ext.woff2') format('woff2');
-    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-  }
-  @font-face {
-    font-family: 'Space Mono';
-    font-style: normal;
-    font-weight: 700;
-    font-display: swap;
-    src: url('/fonts/space-mono-normal-700-latin.woff2') format('woff2');
-    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-  }
-  @font-face {
-    font-family: 'Space Mono';
-    font-style: normal;
-    font-weight: 700;
-    font-display: swap;
-    src: url('/fonts/space-mono-normal-700-latin-ext.woff2') format('woff2');
-    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-  }
-
-  :root {
-    --color-bg: #faf6ef;
-    --color-bg-secondary: #fff9f0;
-    --color-bg-tertiary: #f4ead9;
-    --color-bg-hover: color-mix(in srgb, #2b2620 6%, transparent);
-    --color-sidebar-bg: #fff9f0;
-    --color-panel-bg: #fff9f0;
-    --color-border: #ecdfd0;
-    --color-border-strong: color-mix(in srgb, #2b2620 22%, transparent);
-    --color-text: #2b2620;
-    --color-text-secondary: #6b5f4e;
-    --color-text-tertiary: #7b7060;
-    --color-primary: #b3593b;
-    --color-primary-hover: #984c32;
-    --color-primary-contrast: #fff9f0;
-    --color-accent: #b3593b;
-    --color-accent-hover: #984c32;
-    --color-accent-contrast: #fff9f0;
-    --color-success: #4d7a3f;
-    --color-success-bg: #e4f1e0;
-    --color-danger: #b0453f;
-    --color-danger-bg: #fbe1e1;
-    --color-warn: #8e6a1b;
-    --color-warn-bg: #fbecd2;
-    --color-focus: #b3593b;
-
-    /* Each HTTP method gets its own hue so a dense request list is scannable at a glance.
-       GET/DELETE deliberately reuse --color-success/--color-danger (read=safe, delete=danger
-       are the same signal in both places); the rest fill out the set without inventing
-       unrelated colors. */
-    --method-get: var(--color-success);
-    --method-post: #8e6a1b;
-    --method-put: #3a6d9c;
-    --method-patch: #327c7c;
-    --method-delete: var(--color-danger);
-    --method-head: #7c5aa6;
-    --method-options: #6b5f4e;
-    --method-trace: #7e6f54;
-
-    /* JSON response/body syntax highlighting — independent from the method/status palette above
-       so the two can evolve separately even though a couple of hues are shared by coincidence. */
-    --json-key: #8e6a1b;
-    --json-string: #4d7a3f;
-    --json-number: #7c5aa6;
-    --json-boolean: #3a6d9c;
-    --json-null: #7b7060;
-
-    /* Tonal ramps — warm parchment/ink steps: light (100-300) for tinted fills/hovers, 500 as a
-       role's base, dark (700-900) for text on tinted fills. */
-    --color-neutral-100: #fff9f0;
-    --color-neutral-200: #f4ead9;
-    --color-neutral-300: #ecdfd0;
-    --color-neutral-400: #d8cbb4;
-    --color-neutral-500: #a3937d;
-    --color-neutral-600: #9a8c78;
-    --color-neutral-700: #6b5f4e;
-    --color-neutral-800: #453c30;
-    --color-neutral-900: #2b2620;
-    --color-accent-100: #fdf1ea;
-    --color-accent-200: #fce0d0;
-    --color-accent-300: #f7c3a3;
-    --color-accent-400: #e8936a;
-    --color-accent-500: #c1603f;
-    --color-accent-600: #a84f32;
-    --color-accent-700: #833d27;
-    --color-accent-800: #5f2c1c;
-    --color-accent-900: #3d1c13;
-
-    --space-1: 4px;
-    --space-2: 8px;
-    --space-3: 12px;
-    --space-4: 16px;
-    --space-6: 24px;
-    --space-8: 32px;
-
-    /* Type scale — every font-size in this file resolves to one of these 9 steps (collapsed
-       down from ~22 ad hoc one-off values). Root font-size is 12.5px, not the browser's 16px
-       default, so these rem values render smaller than they'd look in a typical stylesheet —
-       intentional, matches the information-dense reference tools (VS Code, DevTools), not a
-       bug to "fix" by inflating the base size. */
-    --text-2xs: 0.65rem;
-    --text-xs: 0.7rem;
-    --text-sm: 0.76rem;
-    --text-base: 0.8rem;
-    --text-md: 0.9rem;
-    --text-lg: 1.05rem;
-    --text-xl: 1.3rem;
-    --text-2xl: 2rem;
-    --text-3xl: 2.5rem;
-
-    --radius-sm: 4px;
-    --radius-md: 6px;
-    --radius-lg: 8px;
-    --shadow-sm: 0 1px 2px color-mix(in srgb, #3a2f22 12%, transparent);
-    --shadow-md: 0 10px 28px color-mix(in srgb, #3a2f22 14%, transparent);
-    --shadow-lg: 0 24px 56px color-mix(in srgb, #3a2f22 20%, transparent);
-    --font-sans: "Work Sans", system-ui, sans-serif;
-    --font-heading: "Work Sans", system-ui, sans-serif;
-    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-    /* Width of the "strong" structural rules (rail edges, panel dividers) — 1px hairline by
-       default; the blueprint theme below lifts this back to a bold 2px. */
-    --border-strong-width: 1px;
-
-    color-scheme: light;
-    color: var(--color-text);
-    background: var(--color-bg);
-    font-family: var(--font-sans);
-    font-size: 12.5px;
-  }
-
-  /* Not scoped to :root — also applies to nested [data-theme="dark"] elements (the Theme
-     screen's side-by-side comparison swatches), since custom properties inherit normally. */
-  [data-theme="dark"] {
-    --color-bg: #171511;
-    --color-bg-secondary: #1e1b17;
-    --color-bg-tertiary: #282320;
-    --color-bg-hover: color-mix(in srgb, #f5ede1 8%, transparent);
-    --color-sidebar-bg: #171511;
-    --color-panel-bg: #201d19;
-    --color-border: #322c26;
-    --color-border-strong: color-mix(in srgb, #f5ede1 24%, transparent);
-    --color-text: #f5ede1;
-    --color-text-secondary: #b7a996;
-    --color-text-tertiary: #8d8074;
-    --color-primary: #ff8c5a;
-    --color-primary-hover: #ffab84;
-    --color-primary-contrast: #1b1310;
-    --color-accent: #ff8c5a;
-    --color-accent-hover: #ffab84;
-    --color-accent-contrast: #1b1310;
-    --color-success: #5fd98a;
-    --color-success-bg: color-mix(in srgb, #5fd98a 16%, transparent);
-    --color-danger: #ff6b6b;
-    --color-danger-bg: color-mix(in srgb, #ff6b6b 16%, transparent);
-    --color-warn: #f5b84e;
-    --color-warn-bg: color-mix(in srgb, #f5b84e 16%, transparent);
-    --color-focus: #ff8c5a;
-
-    --method-get: var(--color-success);
-    --method-post: #f5b84e;
-    --method-put: #6fb3f2;
-    --method-patch: #52d6cf;
-    --method-delete: var(--color-danger);
-    --method-head: #c299f5;
-    --method-options: #b7a996;
-    --method-trace: #cdb68c;
-
-    --json-key: #6fb3f2;
-    --json-string: #8fe0a0;
-    --json-number: #c9a8f5;
-    --json-boolean: #52d6cf;
-    --json-null: #8d8074;
-
-    color-scheme: dark;
-  }
-
-  /* Mirrors the :root light values, scoped so a nested [data-theme="light"] element (the Theme
-     screen's comparison swatch) resets back to light even while the app itself is on dark. */
-  [data-theme="light"] {
-    --color-bg: #faf6ef;
-    --color-bg-secondary: #fff9f0;
-    --color-bg-tertiary: #f4ead9;
-    --color-bg-hover: color-mix(in srgb, #2b2620 6%, transparent);
-    --color-sidebar-bg: #fff9f0;
-    --color-panel-bg: #fff9f0;
-    --color-border: #ecdfd0;
-    --color-border-strong: color-mix(in srgb, #2b2620 22%, transparent);
-    --color-text: #2b2620;
-    --color-text-secondary: #6b5f4e;
-    --color-text-tertiary: #7b7060;
-    --color-primary: #b3593b;
-    --color-primary-hover: #984c32;
-    --color-primary-contrast: #fff9f0;
-    --color-accent: #b3593b;
-    --color-accent-hover: #984c32;
-    --color-accent-contrast: #fff9f0;
-    --color-success: #4d7a3f;
-    --color-success-bg: #e4f1e0;
-    --color-danger: #b0453f;
-    --color-danger-bg: #fbe1e1;
-    --color-warn: #8e6a1b;
-    --color-warn-bg: #fbecd2;
-    --color-focus: #b3593b;
-
-    --method-get: var(--color-success);
-    --method-post: #8e6a1b;
-    --method-put: #3a6d9c;
-    --method-patch: #327c7c;
-    --method-delete: var(--color-danger);
-    --method-head: #7c5aa6;
-    --method-options: #6b5f4e;
-    --method-trace: #7e6f54;
-
-    --json-key: #8e6a1b;
-    --json-string: #4d7a3f;
-    --json-number: #7c5aa6;
-    --json-boolean: #3a6d9c;
-    --json-null: #7b7060;
-
-    color-scheme: light;
-  }
-
-  /* "Terminal" — a dark, monospace dev-console alternate: quiet bracket-style chrome, zero
-     radius, a single teal accent. Overrides font/radius/shadow/rule-weight too, not just color,
-     since its structural language is genuinely different from the light/dark Softline pair. */
-  [data-theme="terminal"] {
-    --color-bg: #0b0f0e;
-    --color-bg-secondary: #0e1312;
-    --color-bg-tertiary: #131a18;
-    --color-bg-hover: color-mix(in srgb, #dceee6 8%, transparent);
-    --color-sidebar-bg: #0e1312;
-    --color-panel-bg: #0e1312;
-    --color-border: #23302c;
-    --color-border-strong: color-mix(in srgb, #dceee6 22%, transparent);
-    --color-text: #dceee6;
-    --color-text-secondary: #93b3a8;
-    --color-text-tertiary: #6f8a80;
-    --color-primary: #5eead4;
-    --color-primary-hover: #99f6e4;
-    --color-primary-contrast: #05201b;
-    --color-accent: #5eead4;
-    --color-accent-hover: #99f6e4;
-    --color-accent-contrast: #05201b;
-    --color-success: #5eead4;
-    --color-success-bg: color-mix(in srgb, #5eead4 16%, transparent);
-    --color-danger: #fb7185;
-    --color-danger-bg: color-mix(in srgb, #fb7185 16%, transparent);
-    --color-warn: #f2c14e;
-    --color-warn-bg: color-mix(in srgb, #f2c14e 16%, transparent);
-    --color-focus: #5eead4;
-
-    --method-get: var(--color-success);
-    --method-post: #f2c14e;
-    --method-put: #7dd3fc;
-    --method-patch: #5fd0c8;
-    --method-delete: var(--color-danger);
-    --method-head: #b98ff0;
-    --method-options: #93b3a8;
-    --method-trace: #8a9a8f;
-
-    --json-key: #5eead4;
-    --json-string: #a7f3d0;
-    --json-number: #c4b5fd;
-    --json-boolean: #f2c14e;
-    --json-null: #6f8a80;
-
-    --radius-sm: 0px;
-    --radius-md: 0px;
-    --radius-lg: 0px;
-    --shadow-sm: 0 1px 2px color-mix(in srgb, #000000 30%, transparent);
-    --shadow-md: 0 6px 20px color-mix(in srgb, #000000 40%, transparent);
-    --shadow-lg: 0 16px 40px color-mix(in srgb, #000000 50%, transparent);
-    --font-sans: "JetBrains Mono", ui-monospace, monospace;
-    --font-heading: "JetBrains Mono", ui-monospace, monospace;
-    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    --border-strong-width: 1px;
-
-    color-scheme: dark;
-  }
-
-  /* "Blueprint" — a light, technical-schematic alternate: pale grid-paper ground, bold black
-     rules, a single blue accent, Space Grotesk/Mono throughout. */
-  [data-theme="blueprint"] {
-    --color-bg: #eef2f6;
-    --color-bg-secondary: #f6f8fa;
-    --color-bg-tertiary: #e4e9ef;
-    --color-bg-hover: color-mix(in srgb, #14202f 6%, transparent);
-    --color-sidebar-bg: #f6f8fa;
-    --color-panel-bg: #ffffff;
-    --color-border: #cfd8e2;
-    --color-border-strong: color-mix(in srgb, #14202f 85%, transparent);
-    --color-text: #14202f;
-    --color-text-secondary: #5b6b80;
-    --color-text-tertiary: #666e78;
-    --color-primary: #2554e6;
-    --color-primary-hover: #1a3fb8;
-    --color-primary-contrast: #ffffff;
-    --color-accent: #2554e6;
-    --color-accent-hover: #1a3fb8;
-    --color-accent-contrast: #ffffff;
-    --color-success: #1a7a3d;
-    --color-success-bg: color-mix(in srgb, #1a7a3d 14%, transparent);
-    --color-danger: #c22b4d;
-    --color-danger-bg: color-mix(in srgb, #c22b4d 14%, transparent);
-    --color-warn: #99630b;
-    --color-warn-bg: color-mix(in srgb, #a3690c 14%, transparent);
-    --color-focus: #2554e6;
-
-    --method-get: var(--color-success);
-    --method-post: #99630b;
-    --method-put: var(--color-accent);
-    --method-patch: #0f7986;
-    --method-delete: var(--color-danger);
-    --method-head: #7c3aed;
-    --method-options: #5b6b80;
-    --method-trace: #796b51;
-
-    --json-key: #2554e6;
-    --json-string: #1a7a3d;
-    --json-number: #7c3aed;
-    --json-boolean: #99630b;
-    --json-null: #666e78;
-
-    --radius-sm: 0px;
-    --radius-md: 0px;
-    --radius-lg: 0px;
-    --shadow-sm: none;
-    --shadow-md: none;
-    --shadow-lg: none;
-    --font-sans: "Space Grotesk", system-ui, sans-serif;
-    --font-heading: "Space Grotesk", system-ui, sans-serif;
-    --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    --border-strong-width: 2px;
-
-    color-scheme: light;
-  }
-
-  /* Faint graph-paper grid, only for the blueprint theme's own "technical schematic" identity —
-     everywhere else the canvas stays a flat fill. */
-  .app-shell[data-theme="blueprint"] {
-    background-image:
-      repeating-linear-gradient(0deg, rgba(20, 32, 47, 0.06) 0 1px, transparent 1px 24px),
-      repeating-linear-gradient(90deg, rgba(20, 32, 47, 0.06) 0 1px, transparent 1px 24px);
-  }
-
-  :global(body) {
-    margin: 0;
-    background: var(--color-bg);
-  }
-
-  * {
-    box-sizing: border-box;
-  }
-
-  /* Icon library sizing — every icon scales with its own context's font-size (and therefore
-     with `uiScale`, same as the rest of the app's rem-based sizing) instead of a fixed px size. */
-  .icon {
-    width: 1em;
-    height: 1em;
-    flex: none;
-    vertical-align: -0.125em;
-  }
-
-  .app-shell {
-    display: flex;
-    height: 100vh;
-    background: var(--color-bg);
-    color: var(--color-text);
-    font-family: var(--font-sans);
-  }
-
-  .screens-rail {
-    width: 220px;
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    border-right: var(--border-strong-width) solid var(--color-border-strong);
-    background: var(--color-bg);
-    overflow: hidden;
-    transition: width 0.15s ease;
-  }
-
-  .screens-rail.collapsed {
-    width: 52px;
-  }
-
-  .rail-brand {
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-4) var(--space-3) var(--space-3) var(--space-4);
-    font-family: var(--font-heading);
-    font-weight: 700;
-    font-size: var(--text-lg);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .screens-rail.collapsed .rail-brand {
-    justify-content: center;
-    padding: var(--space-4) var(--space-2) var(--space-3) var(--space-2);
-  }
-
-  .rail-screens {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .rail-screen {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    width: 100%;
-    text-align: left;
-    background: transparent;
-    border: none;
-    border-left: 4px solid transparent;
-    padding: 0.65rem var(--space-4);
-    font-family: var(--font-sans);
-    font-size: var(--text-base);
-    color: var(--color-text);
-    cursor: pointer;
-  }
-
-  .screens-rail.collapsed .rail-screen {
-    justify-content: center;
-    padding: 0.65rem 0;
-  }
-
-  .rail-screen-icon {
-    font-size: var(--text-lg);
-    flex: none;
-  }
-
-  .rail-screen-label {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .rail-screen:hover {
-    background: var(--color-bg-secondary);
-  }
-
-  .rail-screen.active {
-    background: var(--color-bg-secondary);
-    border-left-color: var(--color-accent);
-    font-weight: 800;
-  }
-
-  .rail-budget {
-    flex: none;
-    border-top: var(--border-strong-width) solid var(--color-border-strong);
-    padding: var(--space-3) var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .rail-budget-label {
-    font-size: var(--text-2xs);
-    font-weight: 600;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--color-text-tertiary);
-  }
-
-  .rail-budget-value {
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-lg);
-  }
-
-  .rail-budget-meta {
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-  }
-
-  .screen-area {
-    flex: 1;
-    min-width: 0;
-    height: 100%;
-    overflow: hidden;
-  }
-
-  .app {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    font-family: var(--font-sans);
-    color: var(--color-text);
-    background: var(--color-bg);
-    overflow: hidden;
-  }
-
-  /* — Generic full-page screens (Response/Environments/Git/Import/Launcher/History/
-     Settings/Theme) — one consistent kicker+title header pattern, reused everywhere. — */
-  .screen-page {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    overflow-y: auto;
-  }
-
-  .screen-page-header {
-    flex: none;
-    padding: var(--space-8) var(--space-6) var(--space-4);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .screen-kicker {
-    display: block;
-    font-size: var(--text-2xs);
-    font-weight: 600;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--color-text-tertiary);
-    margin-bottom: 4px;
-  }
-
-  .screen-title-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-4);
-  }
-
-  .project-picker-select {
-    font-family: var(--font-sans);
-    font-size: var(--text-base);
-  }
-
-  .project-picker-select-sm {
-    font-size: var(--text-sm);
-    padding: 0.25rem 0.4rem;
-  }
-
-  .screen-title {
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-2xl);
-    line-height: 1.1;
-    margin: 0;
-  }
-
-  .screen-subtitle {
-    font-size: var(--text-md);
-    color: var(--color-text-secondary);
-    max-width: 640px;
-    margin-top: 4px;
-  }
-
-  /* Same icon-over-message shape as .empty-state (main workspace/response empty states) — this
-     variant doesn't need flex:1 on a parent, since it centers its own content regardless of
-     what container it's dropped into (a screen-page section, not always a flex column). */
-  .screen-empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-8) var(--space-6);
-    color: var(--color-text-tertiary);
-    font-size: var(--text-md);
-    text-align: center;
-  }
-
-  .screen-empty-inline {
-    color: var(--color-text-tertiary);
-    font-size: var(--text-base);
-  }
-
-  .screen-page-body {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: var(--space-6);
-  }
-
-  /* — Environments screen — */
-  .env-screen {
-    height: 100%;
-    display: flex;
-  }
-
-  .env-screen-side {
-    width: 260px;
-    flex: none;
-    border-right: var(--border-strong-width) solid var(--color-border-strong);
-    display: flex;
-    flex-direction: column;
-    overflow-y: auto;
-  }
-
-  .env-screen-side-header {
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-4) var(--space-4) var(--space-3);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .env-screen-project-row {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-3) var(--space-4);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .env-screen-project-label {
-    font-size: var(--text-xs);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--color-text-tertiary);
-  }
-
-  .env-screen-list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .env-screen-item {
-    display: block;
-    width: 100%;
-    text-align: left;
-    background: transparent;
-    border: none;
-    border-left: 4px solid transparent;
-    border-bottom: 1px solid var(--color-border);
-    padding: var(--space-3) var(--space-4);
-    font: inherit;
-    font-size: var(--text-base);
-    color: var(--color-text);
-    cursor: pointer;
-  }
-
-  .env-screen-item:hover {
-    background: var(--color-bg-secondary);
-  }
-
-  .env-screen-item.active {
-    background: var(--color-bg-secondary);
-    border-left-color: var(--color-accent);
-    font-weight: 800;
-  }
-
-  .env-screen-item-row {
-    display: flex;
-    align-items: center;
-    border-left: 4px solid transparent;
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .env-screen-group-label {
-    padding: var(--space-2) var(--space-3) 2px;
-    font-size: var(--text-2xs);
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--color-text-tertiary);
-  }
-
-  .env-screen-item-row:hover {
-    background: var(--color-bg-secondary);
-  }
-
-  .env-screen-item-row:hover .icon-btn-ghost,
-  .env-screen-item-row:focus-within .icon-btn-ghost {
-    display: inline-block;
-  }
-
-  .env-screen-item-row.active {
-    background: var(--color-bg-secondary);
-    border-left-color: var(--color-accent);
-  }
-
-  .env-screen-item-row.active .env-screen-item {
-    font-weight: 800;
-  }
-
-  .env-screen-item-row .env-screen-item {
-    flex: 1;
-    min-width: 0;
-    border: none;
-    padding: var(--space-3) var(--space-2) var(--space-3) calc(var(--space-4) - 4px);
-  }
-
-  .env-screen-item-row .icon-btn-ghost {
-    flex: none;
-    margin-right: var(--space-2);
-  }
-
-  .env-screen-rename-form {
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .hr {
-    height: 2px;
-    border: 0;
-    margin: var(--space-3) 0;
-    background: var(--color-border-strong);
-  }
-
-  /* — Launcher screen — */
-  .launcher-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .launcher-card {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    text-align: left;
-    background: transparent;
-    border: none;
-    border-right: 1px solid var(--color-border);
-    border-bottom: 1px solid var(--color-border);
-    padding: var(--space-4);
-    cursor: pointer;
-    font: inherit;
-    color: var(--color-text);
-  }
-
-  .launcher-card:hover {
-    background: var(--color-bg-secondary);
-  }
-
-  .launcher-card.active {
-    background: var(--color-bg-secondary);
-  }
-
-  .screen-kicker.current {
-    color: var(--color-accent-700);
-  }
-
-  .launcher-card-name {
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-lg);
-    margin: 2px 0 4px;
-  }
-
-  .launcher-card-meta {
-    display: flex;
-    gap: var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-  }
-
-  .history-toolbar-project-label {
-    font-size: var(--text-xs);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--color-text-tertiary);
-  }
-
-  /* — History screen — */
-  .history-toolbar {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-4) var(--space-6);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .history-search {
-    flex: none;
-    width: 360px;
-    border: 1px solid var(--color-border);
-    background: var(--color-bg-secondary);
-    padding: 0.4rem 0.6rem;
-    font: inherit;
-    font-size: var(--text-base);
-    color: var(--color-text);
-  }
-
-  .hr-v {
-    width: 2px;
-    height: 22px;
-    background: var(--color-border-strong);
-  }
-
-  .history-filter-chip {
-    font-size: var(--text-xs);
-    font-weight: 800;
-    padding: 5px 10px;
-    border: 1px solid var(--color-border);
-    background: transparent;
-    color: var(--color-text);
-    cursor: pointer;
-  }
-
-  .history-filter-chip.active {
-    background: var(--color-accent);
-    border-color: var(--color-accent);
-    color: var(--color-accent-contrast);
-  }
-
-  .history-header-row,
-  .history-row {
-    display: grid;
-    grid-template-columns: 70px 2fr 80px 90px 160px;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-6);
-  }
-
-  .history-header-row {
-    flex: none;
-    font-size: var(--text-2xs);
-    font-weight: 600;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
-    color: var(--color-text-tertiary);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .history-rows {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .history-row {
-    width: 100%;
-    text-align: left;
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--color-border);
-    font: inherit;
-    font-size: var(--text-base);
-    color: var(--color-text);
-    cursor: pointer;
-  }
-
-  .history-row:hover {
-    background: var(--color-bg-secondary);
-  }
-
-  .history-method {
-    font-size: var(--text-xs);
-    font-weight: 800;
-    letter-spacing: 0.04em;
-  }
-
-  .history-path {
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* — Settings screen — */
-  .settings-screen-row {
-    display: grid;
-    grid-template-columns: 1.3fr 1.6fr;
-    align-items: center;
-    gap: var(--space-6);
-    padding: var(--space-4) var(--space-6);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .settings-screen-row-label {
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-md);
-    margin-bottom: 2px;
-  }
-
-  .settings-screen-block {
-    padding: var(--space-4) var(--space-6);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .settings-screen-row-value {
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-md);
-    color: var(--color-text-secondary);
-  }
-
-  .settings-screen-diagnostics-grid {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    row-gap: 4px;
-    column-gap: var(--space-3);
-    font-size: var(--text-base);
-  }
-
-  .settings-screen-diagnostics-grid span {
-    color: var(--color-text-tertiary);
-  }
-
-  .seg {
-    display: flex;
-    width: 100%;
-    overflow: hidden;
-    border: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .seg-opt {
-    display: inline-flex;
-    flex: 1;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 7px 12px;
-    font-size: var(--text-sm);
-    font-weight: 600;
-    cursor: pointer;
-    background: transparent;
-    border: none;
-    border-left: var(--border-strong-width) solid var(--color-border-strong);
-    color: var(--color-text);
-    font-family: inherit;
-  }
-
-  .seg-opt:first-child {
-    border-left: none;
-  }
-
-  .seg-opt.active {
-    background: var(--color-accent);
-    color: var(--color-accent-contrast);
-  }
-
-  .seg-opt:not(.active):hover {
-    background: var(--color-bg-hover);
-  }
-
-  .shortcuts-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .shortcut-toggle-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: var(--text-base);
-    cursor: pointer;
-  }
-
-  .shortcut-label {
-    flex: 1;
-  }
-
-  .shortcut-keys {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    padding: 2px 6px;
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    background: var(--color-bg-secondary);
-    color: var(--color-text-secondary);
-  }
-
-  /* — Theme screen — */
-  .theme-compare {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    padding: var(--space-6);
-    gap: var(--space-6);
-  }
-
-  .theme-compare-col {
-    display: block;
-    width: 100%;
-    text-align: left;
-    background: transparent;
-    border: 2px solid transparent;
-    padding: var(--space-3);
-    margin: calc(var(--space-3) * -1);
-    font: inherit;
-    color: inherit;
-    cursor: pointer;
-  }
-
-  .theme-compare-col:hover {
-    border-color: var(--color-border);
-  }
-
-  .theme-compare-col.active {
-    border-color: var(--color-accent);
-  }
-
-  .theme-active-badge {
-    font-size: var(--text-2xs);
-    font-weight: 800;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--color-accent-700);
-    border: 1px solid var(--color-accent);
-    padding: 2px 8px;
-  }
-
-  .theme-compare-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: var(--space-3);
-  }
-
-  .accent-picker {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-  }
-
-  .accent-swatch {
-    width: 1.7rem;
-    height: 1.7rem;
-    flex: none;
-    border-radius: 999px;
-    border: var(--border-strong-width) solid transparent;
-    box-shadow: 0 0 0 1px var(--color-border);
-    cursor: pointer;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .accent-swatch.active {
-    border-color: var(--color-text);
-  }
-
-  .accent-swatch-custom {
-    position: relative;
-    background: var(--color-bg-tertiary);
-    overflow: hidden;
-  }
-
-  .accent-swatch-custom input[type="color"] {
-    position: absolute;
-    inset: -4px;
-    width: calc(100% + 8px);
-    height: calc(100% + 8px);
-    padding: 0;
-    border: none;
-    cursor: pointer;
-    opacity: 0;
-  }
-
-  .accent-swatch-plus {
-    pointer-events: none;
-    color: var(--color-text-secondary);
-    font-size: var(--text-md);
-    line-height: 1;
-  }
-
-  .accent-reset {
-    font-size: var(--text-sm);
-  }
-
-  .theme-swatch {
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    background: var(--color-bg);
-    color: var(--color-text);
-  }
-
-  .theme-swatch-topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.7rem 0.9rem;
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-sm);
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-  }
-
-  .theme-swatch-sync {
-    background: var(--color-accent);
-    color: var(--color-accent-contrast);
-    font-size: var(--text-2xs);
-    padding: 3px 8px;
-  }
-
-  .theme-swatch-body {
-    display: flex;
-  }
-
-  .theme-swatch-side {
-    width: 38%;
-    flex: none;
-    border-right: 1px solid var(--color-border);
-    padding: 0.9rem;
-    font-size: var(--text-base);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .theme-swatch-active {
-    color: var(--color-accent);
-    font-weight: 800;
-  }
-
-  .theme-swatch-main {
-    flex: 1;
-    padding: 0.9rem;
-  }
-
-  .theme-swatch-path {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-  }
-
-  .theme-swatch-status {
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-xl);
-  }
-
-  /* — Git screen: real 3-way conflict view — */
-  .conflict-3way {
-    display: flex;
-    gap: var(--space-3);
-    margin-top: var(--space-3);
-  }
-
-  .conflict-3way-col {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .conflict-3way-pre {
-    max-height: 220px;
-    font-size: var(--text-xs);
-  }
-
-  /* — Response screen — */
-  .response-screen-body {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-  }
-
-  .response-screen-side {
-    width: 300px;
-    flex: none;
-    border-right: var(--border-strong-width) solid var(--color-border-strong);
-    overflow-y: auto;
-  }
-
-  .response-screen-stat-block {
-    padding: var(--space-4) var(--space-4);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .response-screen-status {
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-2xl);
-  }
-
-  .response-screen-path {
-    font-size: var(--text-base);
-    color: var(--color-text-secondary);
-    font-family: var(--font-mono);
-    word-break: break-all;
-  }
-
-  .response-screen-metrics {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .response-screen-metric {
-    padding: var(--space-3) var(--space-4);
-    border-right: 1px solid var(--color-border);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .response-screen-metric-value {
-    font-family: var(--font-heading);
-    font-weight: 800;
-    font-size: var(--text-lg);
-  }
-
-  .response-screen-tests {
-    padding: var(--space-4);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .response-screen-test-row {
-    display: flex;
-    gap: var(--space-3);
-    font-size: var(--text-base);
-    padding: 4px 0;
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .response-screen-test-row span:first-child {
-    font-weight: 800;
-    width: 36px;
-    flex: none;
-  }
-
-  .response-screen-main {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .response-screen-content {
-    flex: 1;
-    min-height: 0;
-    overflow: auto;
-    padding: var(--space-4);
-  }
-
-  .screen-body-view {
-    max-height: none;
-  }
-
-  /* — Command palette — */
-  .palette {
-    width: 620px;
-    max-width: 92vw;
-    background: var(--color-bg);
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    box-shadow: var(--shadow-lg);
-  }
-
-  .palette-header {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  .palette-input {
-    flex: 1;
-    border: none;
-    background: transparent;
-    font: inherit;
-    font-size: var(--text-lg);
-    color: var(--color-text);
-    outline: none;
-  }
-
-  .palette-scope-row {
-    display: flex;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-4);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .palette-scope-btn {
-    border: 1px solid var(--color-border);
-    background: transparent;
-    color: var(--color-text-secondary);
-    border-radius: var(--radius-full, 999px);
-    padding: 0.2rem 0.75rem;
-    font-size: var(--text-xs);
-    cursor: pointer;
-  }
-
-  .palette-scope-btn:hover {
-    color: var(--color-text);
-    border-color: var(--color-border-strong);
-  }
-
-  /* Second row, same pill look as the kind toggle above it, but multi-select (Name/URL/Body can
-     all be active at once) rather than the kind row's single-choice All/Projects/APIs. */
-  .palette-field-row {
-    align-items: center;
-  }
-
-  .palette-field-label {
-    font-size: var(--text-2xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--color-text-tertiary);
-    margin-right: var(--space-1);
-  }
-
-  .palette-scope-btn.active {
-    background: var(--color-accent);
-    border-color: var(--color-accent);
-    color: var(--color-accent-contrast, #fff);
-  }
-
-  .palette-results {
-    max-height: 50vh;
-    overflow-y: auto;
-  }
-
-  .palette-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-4);
-    width: 100%;
-    text-align: left;
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--color-border);
-    padding: var(--space-3) var(--space-4);
-    font: inherit;
-    font-size: var(--text-md);
-    cursor: pointer;
-  }
-
-  .palette-item:hover {
-    background: var(--color-bg-secondary);
-  }
-
-  .palette-item-method {
-    width: 48px;
-    flex: none;
-    font-size: var(--text-2xs);
-    font-weight: 800;
-    letter-spacing: 0.04em;
-    color: var(--color-accent);
-  }
-
-  .palette-item-hint {
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-  }
-
-  /* Shown whenever a scope/field combo can surface a request without also showing its project
-     row (APIs-only scope, or Name deselected) — without this the result's project was only
-     buried in the hint text mixed in with the URL. */
-  .palette-item-breadcrumb {
-    color: var(--color-text-tertiary);
-    font-weight: 600;
-    margin-right: 0.3em;
-  }
-
-  .palette-footer {
-    display: flex;
-    gap: var(--space-4);
-    padding: var(--space-2) var(--space-4);
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-  }
-
-  .palette-trigger {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    width: 260px;
-    background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
-    padding: 0.4rem 0.7rem;
-    font: inherit;
-    font-size: var(--text-base);
-    color: var(--color-text-secondary);
-    cursor: text;
-    text-align: left;
-  }
-
-  .palette-trigger:hover {
-    border-color: var(--color-border-strong);
-  }
-
-  .palette-trigger span:first-child {
-    flex: 1;
-  }
-
-  .palette-kbd {
-    font-size: var(--text-2xs);
-    font-weight: 800;
-    border: 1px solid var(--color-border);
-    padding: 1px 5px;
-  }
-
-  /* ---------- Topbar ---------- */
-  .topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.5rem 0.9rem;
-    background: var(--color-bg);
-    border-bottom: 1px solid var(--color-border);
-    flex-shrink: 0;
-  }
-
-  .brand {
-    font-weight: 700;
-    font-size: var(--text-md);
-    color: var(--color-primary);
-    white-space: nowrap;
-  }
-
-  .topbar-left,
-  .topbar-right {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .topbar-center {
-    flex: 1;
-    display: flex;
-    justify-content: center;
-    min-width: 0;
-  }
-
-  .env-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
-
-  .env-select {
-    max-width: 180px;
-  }
-
-  /* Postman renders the active environment as a colored pill sitting right next to the request
-     tabs — the single highest-visibility "which environment am I about to hit" signal in its
-     whole layout. Shape-only here (no functional/positional change, see `env-select-btn.active`
-     below for the color): a plain dropdown reads as "just another menu", a pill reads as status. */
-  .env-select-btn {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.4rem;
-    border-radius: 999px;
-    padding-inline: 0.7rem;
-  }
-
-  .env-select-btn.active {
-    background: var(--color-warn);
-    border-color: var(--color-warn);
-    color: var(--color-bg);
-    font-weight: 600;
-  }
-
-  .env-select-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .env-picker-menu {
-    width: max-content;
-    min-width: 15rem;
-    max-width: min(28rem, calc(100vw - 2rem));
-    inset-inline-start: 0;
-    inset-inline-end: auto;
-  }
-
-  .env-picker-search {
-    width: 100%;
-    margin-bottom: 0.25rem;
-  }
-
-  .env-picker-list {
-    overflow-y: auto;
-    max-height: 16rem;
-  }
-
-  /* ---------- Buttons & inputs ---------- */
-  button {
-    font-family: inherit;
-    font-size: var(--text-base);
-    cursor: pointer;
-    border: 1px solid var(--color-border);
-    background: var(--color-bg);
-    color: var(--color-text);
-    border-radius: var(--radius-sm);
-    padding: 0.35rem 0.7rem;
-    transition: background-color 0.12s, border-color 0.12s, color 0.12s;
-  }
-
-  button:hover {
-    background: var(--color-bg-hover);
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  /* A destructive action (clears the body with no confirm) sitting next to two harmless ones
-     ("JSON template", "Beautify") shouldn't share their exact look — stays quiet at rest, turns
-     danger-toned only on hover/focus so the warning shows up right when it matters, not before. */
-  .btn-danger-ghost:hover,
-  .btn-danger-ghost:focus-visible {
-    border-color: var(--color-danger);
-    color: var(--color-danger);
-  }
-
-  input,
-  select,
-  textarea {
-    font-family: inherit;
-    font-size: var(--text-base);
-    color: var(--color-text);
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    padding: 0.35rem 0.55rem;
-  }
-
-  input:focus,
-  select:focus,
-  textarea:focus,
-  button:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -1px;
-  }
-
-  .btn-ghost {
-    background: transparent;
-    border-color: transparent;
-    color: var(--color-text-secondary);
-    font-weight: 500;
-  }
-
-  .btn-ghost:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-text);
-  }
-
-  .btn-secondary {
-    background: transparent;
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    color: var(--color-text);
-  }
-
-  .btn-secondary:hover:not(:disabled) {
-    background: var(--color-bg-hover);
-  }
-
-  .btn-secondary:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-
-  .btn-xs {
-    padding: 0.2rem 0.5rem;
-    font-size: var(--text-xs);
-  }
-
-  .btn-xs.active {
-    background: var(--color-accent);
-    color: var(--color-accent-contrast);
-  }
-
-  /* Orange is the brand mark only (logo, "+"/add affordances) — the actual primary action
-     color in real Postman is blue (Send, and anything analogous to it). Conflating the two
-     was the biggest color mismatch against the reference. */
-  .btn-primary {
-    background: var(--color-primary);
-    border-color: var(--color-primary);
-    color: var(--color-primary-contrast);
-    font-weight: 600;
-  }
-
-  .btn-primary:hover {
-    background: var(--color-primary-hover);
-    border-color: var(--color-primary-hover);
-  }
-
-  .btn-save {
-    font-size: var(--text-sm);
-    color: var(--color-text-tertiary);
-    background: transparent;
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    white-space: nowrap;
-  }
-
-  .btn-save:hover {
-    color: var(--color-text);
-    border-color: var(--color-text-tertiary);
-  }
-
-  /* Matches the tab pill's dirty treatment (background wash + warn color) so "this has unsaved
-     edits" reads the same way in both places instead of two different visual languages. */
-  .btn-save.is-unsaved {
-    color: var(--color-warn);
-    border-color: var(--color-warn);
-    background: color-mix(in srgb, var(--color-warn) 10%, transparent);
-  }
-
-  .btn-save.is-error {
-    color: var(--color-danger);
-    border-color: var(--color-danger);
-  }
-
-  /* Send gets its own blue, independent of --color-accent — real Postman reserves its brand
-     mark (orange, here --color-primary/--color-accent) for the logo and "+"/add affordances, and
-     uses blue only for Send and its close relatives. No theme below defines --color-send, so
-     this fallback is the actual color everywhere until a theme opts in with its own. */
-  .btn-send {
-    background: var(--color-send, #4c86f9);
-    border-color: var(--color-send, #4c86f9);
-    color: var(--color-send-contrast, #ffffff);
-    font-weight: 600;
-  }
-
-  .btn-send:hover {
-    background: var(--color-send-hover, #2f6fe0);
-    border-color: var(--color-send-hover, #2f6fe0);
-  }
-
-  /* Postman-style split button: Send stays one click, the attached caret reveals "Send and
-     Download" — a shared border between the two halves reads as one control, not two buttons. */
-  .btn-send-group {
-    display: flex;
-  }
-
-  .btn-send-group .btn-send {
-    border-start-end-radius: 0;
-    border-end-end-radius: 0;
-    border-inline-end: none;
-  }
-
-  .btn-send-caret {
-    display: flex;
-    align-items: center;
-    padding: 0 0.4rem;
-    background: var(--color-send, #4c86f9);
-    border: 1px solid var(--color-send, #4c86f9);
-    border-inline-start: 1px solid color-mix(in srgb, var(--color-send-contrast, #ffffff) 30%, transparent);
-    border-start-start-radius: 0;
-    border-end-start-radius: 0;
-    color: var(--color-send-contrast, #ffffff);
-    height: 100%;
-  }
-
-  .btn-send-caret:hover {
-    background: var(--color-send-hover, #2f6fe0);
-    border-color: var(--color-send-hover, #2f6fe0);
-  }
-
-  .btn-cancel {
-    background: var(--color-danger);
-    border-color: var(--color-danger);
-    color: #fff;
-    font-weight: 600;
-  }
-
-  .btn-icon-add {
-    background: var(--color-primary);
-    border-color: var(--color-primary);
-    color: #fff;
-    font-weight: 700;
-    padding: 0.35rem 0.6rem;
-    flex-shrink: 0;
-  }
-
-  .icon-btn {
-    background: transparent;
-    border: none;
-    padding: 0.2rem 0.35rem;
-    color: var(--color-text-tertiary);
-    border-radius: var(--radius-sm);
-  }
-
-  .icon-btn:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-text);
-  }
-
-  .icon-btn.active {
-    color: var(--color-accent);
-  }
-
-  .btn-code-toggle {
-    font-family: var(--font-mono);
-    font-weight: 700;
-  }
-
-  .icon-btn-ghost {
-    display: none;
-  }
-
-  /* ---------- Banners ---------- */
-  .success-banner,
-  .error-banner,
-  .warn-banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    padding: 0.45rem 0.9rem;
-    font-size: var(--text-base);
-    flex-shrink: 0;
-  }
-
-  /* A severity icon reads faster than the message text — success/error/warn each get a distinct
-     glyph (check / X / triangle) rather than relying on background tint alone to say what kind
-     of thing this is. Wrapped so it stays one flex item alongside the dismiss button. */
-  .banner-message {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .banner-message .icon {
-    flex-shrink: 0;
-  }
-
-  .success-banner {
-    background: var(--color-success-bg);
-    color: var(--color-success);
-  }
-
-  .error-banner {
-    background: var(--color-danger-bg);
-    color: var(--color-danger);
-  }
-
-  .warn-banner {
-    background: var(--color-warn-bg);
-    color: var(--color-warn);
-    border-radius: var(--radius-sm);
-    margin: 0.5rem 0.9rem 0;
-  }
-
-  .missing-vars-banner {
-    justify-content: flex-start;
-    flex-wrap: wrap;
-  }
-
-  .missing-var-chip {
-    display: inline-block;
-    cursor: default;
-    border-bottom: 1px dotted var(--color-warn);
-  }
-
-  /* A plain CSS :hover popover nested inside either the banner or the (overflow-clipped) URL
-     bar would get clipped by an ancestor eventually — the URL bar's overlay in particular
-     needs real overflow-x clipping for long URLs, and CSS has no "clip X, don't clip Y" (a
-     non-"visible" axis paired with "visible" silently becomes "auto", which still clips). So
-     this is a single shared, JS-positioned, fixed-position portal instead — see
-     showMissingVarPopover/scheduleHideMissingVarPopover — rendered once at the bottom of the
-     request editor and reused by both the banner chips and the URL bar tokens.  */
-  .missing-var-popover-portal {
-    display: flex;
-    position: fixed;
-    background: var(--color-bg);
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    padding: var(--space-2);
-    gap: 4px;
-    z-index: 1000;
-    color: var(--color-text);
-  }
-
-  .missing-var-popover-portal input {
-    font-size: var(--text-base);
-  }
-
-  .var-popover-scope {
-    align-self: center;
-    font-size: var(--text-2xs);
-    color: var(--color-text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    white-space: nowrap;
-  }
-
-  /* Shared inline autocomplete dropdown (LP-1401) — {{variable}} suggestions and pm/console API
-     script suggestions both render through this one fixed-position portal, positioned at the
-     caret via caretScreenPosition() rather than the field's own bounding box. */
-  .autocomplete-portal {
-    position: fixed;
-    z-index: 1000;
-    margin: 0;
-    padding: 4px;
-    list-style: none;
-    min-width: 200px;
-    max-width: 360px;
-    max-height: 240px;
-    overflow-y: auto;
-    background: var(--color-bg);
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-md);
-  }
-
-  .autocomplete-item {
-    display: flex;
-    width: 100%;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 6px 8px;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--color-text);
-    font-size: var(--text-sm);
-    font-family: var(--font-mono);
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .autocomplete-item.active,
-  .autocomplete-item:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .autocomplete-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .autocomplete-detail {
-    flex-shrink: 0;
-    font-family: var(--font-sans);
-    font-size: var(--text-2xs);
-    color: var(--color-text-tertiary);
-    white-space: nowrap;
-  }
-
-  /* Highlights {{variables}} directly inside the URL bar, in place, instead of only in the
-     warning banner below — an invisible-text "ghost" input sits on top of a styled overlay
-     that renders the same string with each {{var}} as its own token; the overlay is
-     pointer-events:none everywhere except on a missing token, so typing/clicking still goes
-     to the real input underneath except when hovering a token that needs a value. */
-  .url-input-shell {
-    position: relative;
-    flex: 1;
-    display: flex;
-    align-items: stretch;
-    min-width: 0;
-  }
-
-  .url-token-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    white-space: pre;
-    overflow: hidden;
-    pointer-events: none;
-    padding: 0.35rem 0.55rem;
-    font-family: var(--font-mono);
-    font-size: var(--text-base);
-    color: var(--color-text);
-  }
-
-  .url-token-text {
-    white-space: pre;
-  }
-
-  .url-token-var {
-    white-space: pre;
-    color: var(--color-accent);
-  }
-
-  .url-token-var.missing {
-    pointer-events: auto;
-    color: var(--color-warn);
-    border-bottom: 1px dotted var(--color-warn);
-    cursor: default;
-  }
-
-  .url-input-ghost {
-    position: relative;
-    z-index: 1;
-    color: transparent;
-    caret-color: var(--color-text);
-  }
-
-  .dismiss-btn {
-    background: none;
-    border: none;
-    color: inherit;
-    padding: 0 0.3rem;
-  }
-
-  .warn-inline {
-    color: var(--color-warn);
-    font-size: var(--text-sm);
-  }
-
-  .hint {
-    color: var(--color-text-tertiary);
-    font-size: var(--text-base);
-    padding: 0.2rem 0;
-  }
-
-  .error {
-    color: var(--color-danger);
-    font-size: var(--text-base);
-  }
-
-  /* ---------- Workspace layout ---------- */
-  .workspace {
-    display: flex;
-    flex: 1;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .sidebar {
-    width: 300px;
-    flex-shrink: 0;
-    background: var(--color-sidebar-bg);
-    border-right: 1px solid var(--color-border);
-    display: flex;
-    flex-direction: column;
-    overflow-y: auto;
-  }
-
-  .sidebar-resize-handle {
-    width: 5px;
-    flex-shrink: 0;
-    margin-left: -3px;
-    cursor: col-resize;
-    z-index: 1;
-    background: transparent;
-  }
-
-  .sidebar-resize-handle:hover,
-  .sidebar-resize-handle.resizing {
-    background: var(--color-accent);
-  }
-
-  .sidebar-header {
-    padding: 0.7rem 0.9rem 0.3rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .sidebar-workspace-row {
-    padding: 0.6rem 0.9rem 0;
-  }
-
-  .sidebar-workspace-menu {
-    display: block;
-  }
-
-  .workspace-switcher-btn {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.4rem;
-    font-weight: 600;
-  }
-
-  .workspace-switcher-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .workspace-picker-menu {
-    min-width: 100%;
-    inset-inline-start: 0;
-    inset-inline-end: auto;
-  }
-
-  .workspace-picker-item {
-    padding: 0;
-  }
-
-  .workspace-picker-item-btn {
-    flex: 1;
-    background: none;
-    border: none;
-    text-align: left;
-    padding: 0.4rem 0.5rem;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .sidebar-expand-btn {
-    flex: none;
-    width: 18px;
-    align-self: flex-start;
-    margin-top: 6px;
-    background: transparent;
-    border: none;
-    border-right: 1px solid var(--color-border);
-    color: var(--color-text-tertiary);
-    cursor: pointer;
-    font-size: var(--text-xs);
-  }
-
-  .sidebar-expand-btn:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-text);
-  }
-
-  .sidebar-title {
-    font-size: var(--text-xs);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--color-text-tertiary);
-  }
-
-  .sidebar-header-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .project-list {
-    flex: 1;
-    overflow-y: auto;
-    padding-bottom: 1rem;
-  }
-
-  .project-node {
-    border-bottom: 1px solid transparent;
-  }
-
-  /* A draggable row gets a grab cursor only once Custom order is active — otherwise it stays
-     the default cursor (attempting to drag does nothing, and the title tooltip from the
-     markup explains why). */
-  .project-node[draggable="true"] {
-    cursor: grab;
-  }
-  .project-node[draggable="true"]:active {
-    cursor: grabbing;
-  }
-
-  .project-row {
-    display: flex;
-    align-items: center;
-    gap: 0.2rem;
-    padding: 0.1rem 0.5rem 0.1rem 0.7rem;
-    /* Flat, not rounded — a dense project/folder/request tree reads as a list, not a stack of
-       cards, even under the Softline theme's generally-rounded language. */
-    border-radius: 0;
-    margin: 0 0.4rem;
-  }
-
-  .project-row:hover {
-    background: var(--color-bg-hover);
-  }
-
-  /* Accent bar (inset box-shadow, not a border, so it never shifts the row's content by its own
-     width) plus an accent-tinted fill — a clearer selected-state than a flat neutral tint alone. */
-  .project-row.active {
-    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-    box-shadow: inset 3px 0 0 var(--color-accent);
-  }
-
-  .project-row.active .folder-icon {
-    color: var(--color-accent);
-  }
-
-  .project-link {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 0.55rem;
-    background: none;
-    border: none;
-    text-align: left;
-    padding: 0.6rem 0.1rem;
-    font-weight: 500;
-    color: var(--color-text);
-    min-width: 0;
-  }
-
-  .project-link:hover {
-    background: none;
-  }
-
-  .folder-icon {
-    flex-shrink: 0;
-  }
-
-  /* Top-level projects get a bigger mark than nested folders/requests — the list you scan
-     first should read as the most prominent tier, not the same weight as what's inside it. */
-  .project-link .folder-icon {
-    font-size: 1.3em;
-    color: var(--color-text-tertiary);
-  }
-
-  .project-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--text-md);
-  }
-
-  .project-row-actions {
-    display: none;
-    gap: 0.1rem;
-    flex-shrink: 0;
-  }
-
-  .project-row:hover .project-row-actions,
-  .project-row:focus-within .project-row-actions,
-  .project-row-actions.force-visible {
-    display: flex;
-  }
-
-  .project-requests {
-    padding: 0.3rem 0.5rem 0.6rem 1.3rem;
-    border-left: 2px solid var(--color-border);
-    margin: 0 0.9rem 0.4rem 1.1rem;
-  }
-
-  /* A non-active project kept open just for browsing — dashed rather than solid so its tree
-     visibly reads as "peek", distinct from the one project you're actively editing. */
-  .project-requests-secondary {
-    border-left-style: dashed;
-    opacity: 0.82;
-  }
-
-  .project-search-box {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex: none;
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .project-search-input {
-    flex: 1;
-    width: 100%;
-  }
-
-  /* Reuses the palette's scope-pill look (.palette-scope-row/.palette-scope-btn) so the same
-     All/Projects/APIs control reads as one pattern in both places; only the outer spacing
-     differs since this sits inline in the sidebar instead of under a modal's input. */
-  .sidebar-scope-row {
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .sidebar-api-results {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    max-height: 40vh;
-    overflow-y: auto;
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .sidebar-api-results .empty {
-    padding: var(--space-2) var(--space-3);
-    color: var(--color-text-tertiary);
-    font-size: var(--text-sm);
-  }
-
-  .sidebar-api-result-item {
-    border-left: none;
-    border-right: none;
-  }
-
-  .request-search-box {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    margin-bottom: 0.4rem;
-  }
-
-  .request-search-input {
-    flex: 1;
-    width: 100%;
-  }
-
-  .menu-wrap {
-    position: relative;
-    flex: none;
-  }
-
-  .dropdown-backdrop {
-    position: fixed;
-    inset: 0;
-    background: transparent;
-    border: none;
-    padding: 0;
-    z-index: 55;
-    cursor: default;
-  }
-
-  .dropdown-menu {
-    position: absolute;
-    top: calc(100% + 0.2rem);
-    inset-inline-end: 0;
-    z-index: 56;
-    min-width: 10rem;
-    background: var(--color-bg);
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    border-radius: var(--radius-md);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-    display: flex;
-    flex-direction: column;
-    padding: 0.25rem;
-  }
-
-  .dropdown-menu-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    background: none;
-    border: none;
-    text-align: left;
-    padding: 0.4rem 0.5rem;
-    font-size: var(--text-base);
-    color: var(--color-text);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-
-  .dropdown-menu-item:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .dropdown-menu-item.active {
-    font-weight: 700;
-    color: var(--color-accent);
-  }
-
-  .sort-dir-indicator {
-    flex: none;
-  }
-
-  .request-count-badge {
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-    white-space: nowrap;
-  }
-
-  .request-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .request-item {
-    display: flex;
-    align-items: center;
-    border-radius: 0;
-  }
-
-  .folder-node {
-    margin-bottom: 2px;
-  }
-
-  .request-item-wrapper[draggable="true"],
-  .folder-row[draggable="true"] {
-    cursor: grab;
-  }
-  .request-item-wrapper[draggable="true"]:active,
-  .folder-row[draggable="true"]:active {
-    cursor: grabbing;
-  }
-
-  .folder-row {
-    display: flex;
-    align-items: center;
-    gap: 0.2rem;
-    border-radius: 0;
-  }
-
-  .folder-row:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .folder-row:hover .project-row-actions,
-  .folder-row:focus-within .project-row-actions {
-    display: flex;
-  }
-
-  .folder-link {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    background: none;
-    border: none;
-    text-align: left;
-    padding: 0.3rem 0.1rem;
-    font-size: var(--text-base);
-    font-weight: 500;
-    color: var(--color-text);
-    cursor: pointer;
-  }
-
-  .folder-children {
-    padding: 0.1rem 0 0.2rem 1.1rem;
-    border-left: 2px solid var(--color-border);
-    margin-left: 0.5rem;
-  }
-
-  .request-item:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .request-item.active {
-    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-    box-shadow: inset 3px 0 0 var(--color-accent);
-    font-weight: 600;
-  }
-
-  .request-link {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    background: none;
-    border: none;
-    text-align: left;
-    padding: 0.3rem 0.2rem;
-    min-width: 0;
-    color: var(--color-text);
-  }
-
-  .request-link:hover {
-    background: none;
-  }
-
-  .request-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--text-base);
-  }
-
-  .request-item:hover .icon-btn-ghost,
-  .request-item:focus-within .icon-btn-ghost {
-    display: inline-block;
-  }
-
-  .request-item-wrapper {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .tree-expand-btn {
-    flex: none;
-    width: 1rem;
-    background: none;
-    border: none;
-    color: var(--color-text-tertiary);
-    cursor: pointer;
-    font-size: var(--text-2xs);
-  }
-
-  .sample-tree-list {
-    list-style: none;
-    margin: 0;
-    padding: 0.1rem 0 0.2rem 1.6rem;
-    border-left: 2px solid var(--color-border);
-    margin-left: 0.9rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .sample-tree-item {
-    display: flex;
-    align-items: center;
-    border-radius: var(--radius-sm);
-  }
-
-  .sample-tree-item:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .sample-tree-item:hover .icon-btn-ghost,
-  .sample-tree-item:focus-within .icon-btn-ghost {
-    display: inline-block;
-  }
-
-  .sample-tree-link {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    background: none;
-    border: none;
-    text-align: left;
-    padding: 0.3rem 0.2rem;
-    min-width: 0;
-    color: var(--color-text);
-  }
-
-  .sample-tree-link:hover {
-    background: none;
-  }
-
-  .status-chip {
-    flex: none;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    font-weight: 700;
-  }
-
-  .sample-tree-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--text-sm);
-  }
-
-  .request-pagination {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    margin-top: 0.4rem;
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-  }
-
-  .empty {
-    color: var(--color-text-tertiary);
-    font-size: var(--text-base);
-    padding: 0.3rem 0.9rem;
-    list-style: none;
-  }
-
-  /* ---------- Method badges (Postman color language) ---------- */
-  .method-badge,
-  .tab-method-badge,
-  .method,
-  .method-select {
-    font-weight: 700;
-    font-size: var(--text-xs);
-    letter-spacing: 0.02em;
-  }
-
-  /* Method shown as a tinted pill in the sidebar tree — the Softline system's chip treatment.
-     `currentColor` picks up whichever .method-* color class is paired on the same element, so
-     the tint always matches without an separate background rule per method. */
-  .method-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 2.8rem;
-    flex-shrink: 0;
-    border-radius: 999px;
-    padding: 0.1rem 0;
-    background: color-mix(in srgb, currentColor 14%, transparent);
-  }
-
-  .tab-method-badge {
-    display: inline-block;
-    width: auto;
-    text-align: left;
-    flex-shrink: 0;
-    background: none;
-  }
-
-  .method-select {
-    width: 6.5rem;
-    flex-shrink: 0;
-    font-weight: 700;
-    background: var(--color-bg);
-  }
-
-  .method-get { color: var(--method-get); }
-  .method-post { color: var(--method-post); }
-  .method-put { color: var(--method-put); }
-  .method-patch { color: var(--method-patch); }
-  .method-delete { color: var(--method-delete); }
-  .method-head { color: var(--method-head); }
-  .method-options { color: var(--method-options); }
-  .method-trace { color: var(--method-trace); }
-
-  /* ---------- Main content ---------- */
-  .main {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    overflow-y: auto;
-    background: var(--color-bg);
-  }
-
-  .empty-state {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    color: var(--color-text-tertiary);
-  }
-
-  .empty-icon {
-    font-size: var(--text-3xl);
-    opacity: 0.5;
-  }
-
-  .detail {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-
-  /* ---------- Request tabs bar ---------- */
-  /* Wraps the scrollable tab strip plus the fixed "N tabs" overflow trigger, so the trigger
-     stays reachable once there are more open tabs than fit — a plain horizontal scrollbar alone
-     doesn't hold up once a workspace has 100+ open tabs. */
-  .request-tabs-row {
-    display: flex;
-    align-items: stretch;
-    background: var(--color-sidebar-bg);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .request-tabs-bar {
-    display: flex;
-    flex: 1;
-    min-width: 0;
-    gap: 0;
-    padding: 0 0.4rem;
-    overflow-x: auto;
-  }
-
-  .tab-overflow-menu {
-    flex: none;
-    position: relative;
-    border-left: 1px solid var(--color-border);
-  }
-
-  .tab-overflow-trigger {
-    display: flex;
-    align-items: center;
-    gap: 0.2rem;
-    height: 100%;
-    padding: 0 0.6rem;
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    list-style: none;
-    user-select: none;
-  }
-
-  .tab-overflow-trigger::-webkit-details-marker {
-    display: none;
-  }
-
-  .tab-overflow-trigger:hover {
-    color: var(--color-text);
-    background: var(--color-bg-hover);
-  }
-
-  .tab-overflow-menu[open] .tab-overflow-trigger {
-    color: var(--color-text);
-  }
-
-  .tab-overflow-list {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    z-index: 20;
-    min-width: 240px;
-    max-width: 320px;
-    max-height: 420px;
-    overflow-y: auto;
-    background: var(--color-panel-bg);
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    box-shadow: var(--shadow-md);
-    display: flex;
-    flex-direction: column;
-    padding: var(--space-1);
-  }
-
-  .tab-overflow-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    width: 100%;
-    text-align: left;
-    background: none;
-    border: none;
-    padding: 0.35rem 0.5rem;
-    font-size: var(--text-sm);
-    color: var(--color-text);
-    white-space: nowrap;
-    overflow: hidden;
-  }
-
-  .tab-overflow-item .request-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .tab-overflow-item:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .tab-overflow-item.active {
-    background: var(--color-bg-hover);
-    font-weight: 600;
-  }
-
-  .request-tab-pill {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    background: transparent;
-    border: none;
-    border-right: 1px solid var(--color-border);
-    border-top: 2px solid transparent;
-    padding: 0 0.15rem 0 0.6rem;
-    max-width: 200px;
-  }
-
-  .request-tab-pill.active {
-    background: var(--color-bg);
-    border-top-color: var(--color-accent);
-  }
-
-  /* Unsaved-edits state is a second, independent signal from "active" (top border) — a warm
-     wash across the whole pill plus a bottom accent bar, not just the small dot, so a dirty tab
-     reads at a glance in a long tab strip instead of requiring you to spot one bullet character.
-     Uses --color-warn rather than --color-accent so it never reads as "this is the open tab". */
-  .request-tab-pill.dirty {
-    background: color-mix(in srgb, var(--color-warn) 10%, transparent);
-    box-shadow: inset 0 -2px 0 var(--color-warn);
-  }
-
-  .request-tab-pill.dirty.active {
-    background: color-mix(in srgb, var(--color-warn) 14%, var(--color-bg));
-  }
-
-  .tab-pill-btn {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    background: none;
-    border: none;
-    padding: 0.45rem 0.2rem;
-    min-width: 0;
-    color: var(--color-text-secondary);
-  }
-
-  .request-tab-pill.active .tab-pill-btn {
-    color: var(--color-text);
-  }
-
-  .tab-pill-btn:hover {
-    background: none;
-    color: var(--color-text);
-  }
-
-  .tab-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--text-sm);
-    max-width: 110px;
-  }
-
-  .dirty-dot {
-    color: var(--color-warn);
-    font-size: var(--text-lg);
-    font-weight: 700;
-    line-height: 0;
-  }
-
-  .tab-close-btn {
-    background: none;
-    border: none;
-    padding: 0.15rem 0.35rem;
-    color: var(--color-text-tertiary);
-    font-size: var(--text-2xs);
-    opacity: 0;
-  }
-
-  .request-tab-pill:hover .tab-close-btn {
-    opacity: 1;
-  }
-
-  .tab-close-btn:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-danger);
-  }
-
-  /* ---------- Request bar ---------- */
-  .breadcrumb-row {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.5rem 0.9rem 0;
-    font-size: var(--text-sm);
-    color: var(--color-text-tertiary);
-    min-width: 0;
-  }
-
-  .breadcrumb-icon {
-    opacity: 0.7;
-    flex-shrink: 0;
-  }
-
-  .breadcrumb-sep {
-    color: var(--color-text-tertiary);
-    flex-shrink: 0;
-  }
-
-  /* A request nested several folders deep (real Postman collections routinely name a folder a
-     full sentence, see the reference screenshots) would otherwise force the whole breadcrumb row
-     wider than the panel instead of just eliding the one segment that's too long. */
-  .breadcrumb-folder {
-    max-width: 12rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex-shrink: 1;
-  }
-
-  .breadcrumb-current {
-    color: var(--color-text);
-    font-weight: 600;
-  }
-
-  .breadcrumb-current-btn {
-    background: transparent;
-    border: none;
-    padding: 2px 4px;
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .breadcrumb-current-btn:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .breadcrumb-edit-hint {
-    opacity: 0;
-    font-size: var(--text-xs);
-  }
-
-  .breadcrumb-current-btn:hover .breadcrumb-edit-hint {
-    opacity: 0.6;
-  }
-
-  /* Flush, full-bleed strip (not a floating card) — matches the reference's request bar, which
-     sits directly in the panel with no margin/shadow/rounded card around it. */
-  .request-bar {
-    padding: 0.6rem 0.9rem 0.5rem;
-    background: var(--color-panel-bg);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .request-bar-row {
-    display: flex;
-    gap: 0.5rem;
-    margin-bottom: 0.4rem;
-  }
-
-  .request-bar-row.secondary {
-    align-items: center;
-  }
-
-  /* One seamless pill (method + url), like the reference — not two separate boxed
-     controls sitting side by side. */
-  .url-pill {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    background: var(--color-panel-bg);
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    border-radius: var(--radius-md);
-    /* No overflow:hidden — the method-select/url-input children paint no background of their
-       own (they sit transparent on this pill's fill), so there's nothing to corner-clip, and
-       hiding overflow would clip the missing-variable popover that hangs below the URL bar. */
-  }
-
-  .url-pill:focus-within {
-    border-color: var(--color-focus);
-  }
-
-  .url-pill-divider {
-    width: 1px;
-    align-self: stretch;
-    background: var(--color-border);
-    margin: 0.4rem 0;
-  }
-
-  .url-pill .method-select {
-    border: none;
-    background: transparent;
-    border-radius: 0;
-  }
-
-  .url-pill .url-input {
-    border: none;
-    background: transparent;
-    border-radius: 0;
-  }
-
-  .url-pill .url-input:focus {
-    outline: none;
-  }
-
-  .url-input {
-    flex: 1;
-    font-family: var(--font-mono);
-    font-size: var(--text-base);
-  }
-
-  .send-action {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .url-preview-bar {
-    padding: 0.3rem 0.9rem;
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-    background: var(--color-bg-secondary);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .preview-label {
-    color: var(--color-text-tertiary);
-  }
-
-  code {
-    font-family: var(--font-mono);
-    background: var(--color-bg-hover);
-    padding: 0.05rem 0.3rem;
-    border-radius: var(--radius-sm);
-    font-size: var(--text-base);
-  }
-
-  /* ---------- Editor tab strip ---------- */
-  .editor-tabs {
-    display: flex;
-    gap: 1rem;
-    padding: 0 0.9rem;
-    border-bottom: 1px solid var(--color-border);
-    overflow-x: auto;
-  }
-
-  /* Shared "panel tab" grammar (.editor-tab and .response-subtab) — one consistent
-     treatment for tabs that switch a sub-view within an already-bounded panel, distinct from
-     .request-tab-pill's document-tab treatment (top border + background fill, for open
-     requests). Active state stays neutral text + a colored underline, not accent-tinted text —
-     matches how DevTools' own panel tabs (Elements/Console/Network) behave. */
-  .editor-tab,
-  .response-subtab {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    padding: 0.5rem 0.7rem;
-    font-size: var(--text-base);
-    color: var(--color-text-secondary);
-    font-weight: 500;
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    white-space: nowrap;
-  }
-
-  .editor-tab.active,
-  .response-subtab.active {
-    color: var(--color-text);
-    border-bottom-color: var(--color-accent);
-    font-weight: 600;
-  }
-
-  .editor-tab:hover,
-  .response-subtab:hover {
-    background: none;
-    color: var(--color-text);
-  }
-
-  .tab-badge {
-    background: var(--color-bg-hover);
-    color: var(--color-text-secondary);
-    font-size: var(--text-2xs);
-    font-weight: 700;
-    border-radius: 999px;
-    padding: 0.05rem 0.4rem;
-  }
-
-  .tab-badge-warn {
-    background: var(--color-warn-bg);
-    color: var(--color-warn);
-    font-size: var(--text-2xs);
-    font-weight: 700;
-    border-radius: 999px;
-    padding: 0.05rem 0.4rem;
-  }
-
-  .tab-dot {
-    color: var(--color-primary);
-  }
-
-  .tab-content {
-    padding: 0.8rem 0.9rem;
-  }
-
-  /* Request editor (top) and docked response (bottom), stacked with a draggable divider —
-     each scrolls independently instead of the old single-column layout where the response
-     was just one more thing you scrolled past below a potentially long params/headers list. */
-  .editor-body-row {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .editor-pane {
-    flex: 1 1 auto;
-    min-height: 80px;
-    overflow-y: auto;
-  }
-
-  .response-pane-resize-handle {
-    flex: none;
-    height: 7px;
-    margin: -3px 0;
-    background: transparent;
-    cursor: row-resize;
-    position: relative;
-    z-index: 1;
-  }
-
-  .response-pane-resize-handle::before {
-    content: "";
-    position: absolute;
-    top: 3px;
-    left: 0;
-    right: 0;
-    height: 1px;
-    background: var(--color-border);
-  }
-
-  .response-pane-resize-handle:hover::before,
-  .response-pane-resize-handle.resizing::before {
-    top: 2px;
-    height: 3px;
-    background: var(--color-accent);
-  }
-
-  .response-pane-resize-handle:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-  }
-
-  /* Same floating-card treatment as .request-bar (see comment there) — margin is horizontal
-     and bottom only, so the JS-driven `responsePaneHeight` (an explicit height, not flex-grow)
-     still governs the box's actual height without the margin skewing that math. */
-  .response-pane {
-    flex: none;
-    min-height: 160px;
-    max-height: calc(100% - 80px);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    margin: 0 0.9rem 0.9rem;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
-    background: var(--color-panel-bg);
-  }
-
-  .response-pane.collapsed {
-    min-height: 0;
-  }
-
-  .response-pane-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex: none;
-    padding: 0.3rem 0.6rem;
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .response-pane.collapsed .response-pane-bar {
-    border-bottom: none;
-  }
-
-  .response-pane-bar-label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: var(--text-sm);
-    font-weight: 500;
-    color: var(--color-text-secondary);
-  }
-
-  .response-pane .response-loading,
-  .response-pane .response-empty-state {
-    flex: 1;
-  }
-
-  .response-pane .response {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-
-  .response-pane .response-subtab-content {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
-  .response-pane .body-view {
-    height: 100%;
-    max-height: none;
-  }
-
-  .response-preview-frame {
-    width: 100%;
-    height: 100%;
-    min-height: 260px;
-    background: #fff;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-  }
-
-  /* Docked to the right edge of the whole window (sibling of <main>, not nested in the
-     scrollable response pane) — stays visible regardless of which editor tab is open or how
-     far the request/response area is scrolled. Mirrors the left project sidebar's treatment,
-     including being resizable (width comes from the inline style, driven by
-     rightSidebarWidth) — at 340px fixed this crowded the request editor's own tabs/body-mode
-     row into needing their own horizontal scrollbar on anything short of a very wide window. */
-  .right-sidebar {
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    border-left: var(--border-strong-width) solid var(--color-border-strong);
-    background: var(--color-bg);
-    overflow: hidden;
-  }
-
-  .right-sidebar-resize-handle {
-    width: 5px;
-    flex-shrink: 0;
-    margin-right: -3px;
-    cursor: col-resize;
-    z-index: 1;
-    background: transparent;
-  }
-
-  .right-sidebar-resize-handle:hover,
-  .right-sidebar-resize-handle.resizing {
-    background: var(--color-accent);
-  }
-
-  .right-sidebar-header {
-    display: flex;
-    align-items: center;
-    gap: 0.15rem;
-    flex: none;
-    padding: var(--space-2) var(--space-2);
-    border-bottom: var(--border-strong-width) solid var(--color-border-strong);
-  }
-
-  /* Code is the sidebar's one real feature now (Info is a small icon toggle beside it, not an
-     equal-weight tab) — a static label reads better here than a tab control with only one
-     meaningful state. */
-  .right-sidebar-title {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.35rem 0.6rem;
-    color: var(--color-text);
-    font-size: var(--text-base);
-    font-weight: 700;
-    white-space: nowrap;
-  }
-
-  .bottom-panel {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: var(--space-4);
-    background: var(--color-panel-bg);
-  }
-
-  .bottom-panel .params-row {
-    flex-wrap: wrap;
-  }
-
-  .bottom-panel-code {
-    max-height: none;
-  }
-
-  .info-list-grid {
-    grid-template-columns: max-content 1fr;
-    column-gap: var(--space-4);
-  }
-
-  .info-list {
-    display: grid;
-    grid-template-columns: auto;
-    row-gap: 0.5rem;
-    margin: 0;
-    font-size: var(--text-base);
-  }
-
-  .info-list dt {
-    color: var(--color-text-tertiary);
-    text-transform: uppercase;
-    font-size: var(--text-xs);
-    letter-spacing: 0.03em;
-    margin-bottom: 0.1rem;
-  }
-
-  .info-list dd {
-    color: var(--color-text);
-    margin: 0 0 0.4rem;
-    word-break: break-all;
-  }
-
-  /* Defensive default: any bare heading dropped into the detail/response area (e.g. new
-     feature sections not yet given their own class) inherits the same muted label style
-     as the rest of the system instead of a jarring browser-default heading. */
-  .detail h3 {
-    font-size: var(--text-base);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--color-text-tertiary);
-    margin: 1rem 0.9rem 0.4rem;
-    font-weight: 700;
-  }
-
-
-  /* ---------- Params/headers tables ---------- */
-  .params-table {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .params-row {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-
-  .params-row-spacer {
-    display: inline-block;
-    width: 14px;
-    flex: none;
-  }
-
-  .params-row input:not([type="checkbox"]) {
-    flex: 1;
-    min-width: 80px;
-  }
-
-  .radio-label,
-  .checkbox-label {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-size: var(--text-base);
-    white-space: nowrap;
-  }
-
-  .radio-row {
-    display: flex;
-    gap: 1rem;
-  }
-
-  .body-input {
-    width: 100%;
-    font-family: var(--font-mono);
-    font-size: var(--text-base);
-    resize: vertical;
-  }
-
-  /* Wraps instead of forcing a horizontal scrollbar on the whole editor pane (the old behavior —
-     .editor-pane's overflow-y:auto makes overflow-x compute as auto too per spec, so unwrapped
-     content here silently grew a horizontal scrollbar affecting the entire tab body, not just
-     this row) — same pattern the Developer Console toolbar already uses for the same reason:
-     with a narrowed center pane (right sidebar open, project tree widened, etc.) five body-type
-     radios + a type select + three buttons just don't reliably fit on one line. */
-  .body-mode-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.9rem;
-    flex-wrap: wrap;
-  }
-
-  .raw-type-select {
-    max-width: 140px;
-  }
-
-  .graphql-editor h4,
-  .params-table h4 {
-    font-size: var(--text-sm);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--color-text-tertiary);
-    margin: 0.3rem 0 0.1rem;
-  }
-
-  .settings-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(200px, 1fr));
-    gap: 0.7rem;
-  }
-
-  .settings-row {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: var(--text-base);
-  }
-
-  .settings-row span {
-    color: var(--color-text-secondary);
-    font-size: var(--text-sm);
-  }
-
-  .var-key {
-    font-weight: 600;
-    min-width: 100px;
-  }
-
-  .var-val {
-    flex: 1;
-    color: var(--color-text-secondary);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .badge {
-    font-size: var(--text-2xs);
-    background: var(--color-bg-hover);
-    color: var(--color-text-secondary);
-    border-radius: 999px;
-    padding: 0.05rem 0.4rem;
-  }
-
-  .badge-local {
-    background: color-mix(in srgb, var(--method-put) 16%, transparent);
-    color: var(--method-put);
-  }
-
-  .badge-warn {
-    background: var(--color-warn-bg);
-    color: var(--color-warn);
-  }
-
-  /* ---------- Response panel ---------- */
-  .response {
-    padding: 0.7rem 0.9rem 1rem;
-  }
-
-  .response-loading {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 1rem 0.9rem;
-    color: var(--color-text-secondary);
-    font-size: var(--text-base);
-  }
-
-  .response-empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 0.4rem;
-    padding: 2rem 0.9rem;
-    color: var(--color-text-tertiary);
-  }
-
-  .spinner {
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
-    border: var(--border-strong-width) solid var(--color-border-strong);
-    border-top-color: var(--color-accent);
-    animation: spin 0.7s linear infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  .response-stat-row {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    padding-bottom: 0.6rem;
-  }
-
-  .response-stat-status {
-    font-weight: 700;
-    font-size: var(--text-md);
-  }
-
-  .response-stat-item {
-    font-size: var(--text-base);
-    color: var(--color-text-secondary);
-  }
-
-  .response-stat-label {
-    color: var(--color-text-tertiary);
-    text-transform: uppercase;
-    font-size: var(--text-2xs);
-    letter-spacing: 0.03em;
-    margin-right: 0.2rem;
-  }
-
-  .response-stat-spacer {
-    flex: 1;
-  }
-
-  .status-ok { color: var(--color-success); }
-  .status-err { color: var(--color-danger); }
-
-  .response-subtabs {
-    display: flex;
-    align-items: center;
-    gap: 0.1rem;
-    border-bottom: 1px solid var(--color-border);
-    overflow-x: auto;
-  }
-
-  .response-subtab,
-  .response-format-toggle {
-    flex-shrink: 0;
-  }
-
-  /* .response-subtab base + hover + active styles live with .editor-tab above (shared panel-tab
-     grammar). */
-
-  .response-subtab-content {
-    padding-top: 0.6rem;
-  }
-
-  .response-format-toggle {
-    display: flex;
-    gap: 2px;
-    background: var(--color-bg-hover);
-    border-radius: var(--radius-sm);
-    padding: 2px;
-    margin-left: auto;
-  }
-
-  .btn-toggle {
-    border: none;
-    background: none;
-    padding: 0.2rem 0.6rem;
-    font-size: var(--text-xs);
-    border-radius: var(--radius-sm);
-  }
-
-  .btn-toggle.active {
-    background: var(--color-bg);
-    box-shadow: var(--shadow-sm);
-    font-weight: 600;
-  }
-
-  .test-results-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-
-  .test-result-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    font-size: var(--text-base);
-    padding: 0.25rem 0;
-  }
-
-  .test-result-icon {
-    font-weight: 700;
-    width: 1rem;
-    flex-shrink: 0;
-  }
-
-  .test-pass .test-result-icon { color: var(--color-success); }
-  .test-fail .test-result-icon { color: var(--color-danger); }
-
-  .test-result-name {
-    color: var(--color-text);
-  }
-
-  .test-result-error {
-    color: var(--color-danger);
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-  }
-
-  .headers-list {
-    padding: 0.3rem 0 0.3rem 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-
-  .header-line {
-    font-size: var(--text-sm);
-    font-family: var(--font-mono);
-    display: flex;
-    gap: 0.4rem;
-    align-items: center;
-  }
-
-  .body-view {
-    background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 0.7rem;
-    font-family: var(--font-mono);
-    font-size: var(--text-base);
-    max-height: 420px;
-    overflow: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    margin: 0;
-  }
-
-  .json-key { color: var(--json-key); }
-  .json-string { color: var(--json-string); }
-  .json-number { color: var(--json-number); }
-  .json-boolean { color: var(--json-boolean); }
-  .json-null { color: var(--json-null); font-style: italic; }
-
-  .response-history-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-  }
-
-  .response-history-row {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    background: none;
-    border: none;
-    text-align: left;
-    padding: 0.35rem 0.2rem;
-    color: var(--color-text);
-    font-size: var(--text-base);
-    cursor: pointer;
-  }
-
-  .response-history-row:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .response-history-duration { font-weight: 500; }
-  .response-history-time { color: var(--color-text-tertiary); }
-
-  /* ---------- Console drawer ---------- */
-  .console-drawer {
-    flex-shrink: 0;
-    border-top: 1px solid var(--color-border);
-    background: var(--color-bg-secondary);
-    display: flex;
-    flex-direction: column;
-    min-height: 120px;
-  }
-
-  .console-resize-handle {
-    flex: none;
-    height: 7px;
-    margin: -3px 0;
-    background: transparent;
-    cursor: row-resize;
-    position: relative;
-    z-index: 1;
-  }
-
-  .console-resize-handle::before {
-    content: "";
-    position: absolute;
-    top: 3px;
-    left: 0;
-    right: 0;
-    height: 1px;
-    background: var(--color-border);
-  }
-
-  .console-resize-handle:hover::before,
-  .console-resize-handle.resizing::before {
-    top: 2px;
-    height: 3px;
-    background: var(--color-accent);
-  }
-
-  .console-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    padding: 0.4rem 0.7rem;
-    border-bottom: 1px solid var(--color-border);
-    flex-wrap: wrap;
-  }
-
-  .console-title-group {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .console-title {
-    font-weight: 700;
-    font-size: var(--text-base);
-  }
-
-  .console-count-badge {
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-  }
-
-  .console-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-  }
-
-  .console-select,
-  .console-search {
-    font-size: var(--text-xs);
-    padding: 0.25rem 0.4rem;
-  }
-
-  .console-check-label {
-    display: flex;
-    align-items: center;
-    gap: 0.25rem;
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    white-space: nowrap;
-  }
-
-  .console-btn,
-  .console-close-btn {
-    font-size: var(--text-xs);
-    padding: 0.25rem 0.5rem;
-  }
-
-  .console-body {
-    flex: 1;
-    overflow-y: auto;
-    font-family: var(--font-mono);
-  }
-
-  .console-empty {
-    padding: 1rem;
-    color: var(--color-text-tertiary);
-    font-size: var(--text-base);
-    font-family: var(--font-sans);
-  }
-
-  .console-events-list {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .console-row {
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .console-row.error-row { background: var(--color-danger-bg); }
-  .console-row.warn-row { background: var(--color-warn-bg); }
-
-  .console-row-summary {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.25rem 0.7rem;
-    font-size: var(--text-sm);
-    cursor: pointer;
-  }
-
-  .evt-expander {
-    width: 0.9rem;
-    color: var(--color-text-tertiary);
-  }
-
-  .evt-time {
-    color: var(--color-text-tertiary);
-    flex-shrink: 0;
-  }
-
-  .evt-level {
-    font-weight: 700;
-    padding: 0 0.3rem;
-    border-radius: var(--radius-sm);
-    flex-shrink: 0;
-  }
-
-  .level-info { color: var(--method-put); }
-  .level-warn { color: var(--color-warn); }
-  .level-error { color: var(--color-danger); }
-  .level-debug { color: var(--color-text-tertiary); }
-
-  .evt-type {
-    color: var(--color-text-secondary);
-    flex-shrink: 0;
-  }
-
-  .evt-cid {
-    color: var(--color-text-tertiary);
-    flex-shrink: 0;
-  }
-
-  .evt-msg {
-    color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .console-row-details {
-    padding: 0.4rem 0.7rem 0.7rem 2.1rem;
-  }
-
-  .details-actions {
-    margin-bottom: 0.3rem;
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .detail-kv-grid {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 0.75rem;
-    row-gap: 0.2rem;
-    margin-bottom: 0.5rem;
-    font-size: var(--text-xs);
-  }
-
-  .detail-k {
-    color: var(--color-text-tertiary);
-    text-align: right;
-  }
-
-  .detail-v {
-    color: var(--color-text);
-    font-family: var(--font-mono);
-    word-break: break-word;
-  }
-
-  .detail-v-wrap {
-    white-space: pre-wrap;
-  }
-
-  .detail-header-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 0.5rem;
-    font-size: var(--text-xs);
-    font-family: var(--font-mono);
-  }
-
-  .detail-header-table th {
-    text-align: left;
-    color: var(--color-text-tertiary);
-    font-weight: 500;
-    padding: 0.15rem 0.5rem 0.15rem 0;
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .detail-header-table td {
-    padding: 0.15rem 0.5rem 0.15rem 0;
-    border-bottom: 1px solid var(--color-border);
-    color: var(--color-text);
-  }
-
-  .detail-header-table tr.disabled-row td {
-    color: var(--color-text-tertiary);
-    text-decoration: line-through;
-  }
-
-  .detail-list-label {
-    margin: 0 0 0.2rem;
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-  }
-
-  .detail-plain-list {
-    margin: 0 0 0.5rem;
-    padding-left: 1.1rem;
-    font-size: var(--text-xs);
-    font-family: var(--font-mono);
-  }
-
-  .console-mini-btn {
-    font-size: var(--text-xs);
-    padding: 0.15rem 0.4rem;
-  }
-
-  .console-json-view {
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    padding: 0.5rem;
-    font-size: var(--text-xs);
-    max-height: 200px;
-    overflow: auto;
-    margin: 0;
-  }
-
-  /* ---------- Footer status bar ---------- */
-  .app-status-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.25rem 0.9rem;
-    background: var(--color-bg-secondary);
-    border-top: 1px solid var(--color-border);
-    flex-shrink: 0;
-    font-size: var(--text-xs);
-  }
-
-  .console-toggle-btn {
-    background: none;
-    border: none;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.15rem 0.4rem;
-    color: var(--color-text-secondary);
-    font-size: var(--text-xs);
-  }
-
-  .console-toggle-btn.active {
-    color: var(--color-primary);
-    font-weight: 600;
-  }
-
-  .status-badge-error {
-    background: var(--color-danger);
-    color: #fff;
-    border-radius: 999px;
-    padding: 0 0.35rem;
-    font-size: var(--text-2xs);
-  }
-
-  .status-badge-warn {
-    background: var(--color-warn);
-    color: #fff;
-    border-radius: 999px;
-    padding: 0 0.35rem;
-    font-size: var(--text-2xs);
-  }
-
-  .status-right {
-    display: flex;
-    gap: 1rem;
-    color: var(--color-text-tertiary);
-  }
-
-  /* ---------- Modals ---------- */
-  .modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(20, 20, 25, 0.45);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 50;
-    padding: 2rem;
-  }
-
-  .modal {
-    background: var(--color-bg);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-md);
-    padding: 1rem 1.2rem 1.2rem;
-    width: 520px;
-    max-width: 100%;
-    max-height: 85vh;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .modal-wide {
-    width: 720px;
-  }
-
-  .modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.2rem;
-  }
-
-  .modal-header h3 {
-    margin: 0;
-    font-size: var(--text-md);
-  }
-
-  .file-dropzone {
-    border: 1px dashed var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 0.6rem;
-    text-align: center;
-  }
-
-  .file-label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    cursor: pointer;
-    font-size: var(--text-base);
-    color: var(--color-text-secondary);
-  }
-
-  .import-report-card {
-    background: var(--color-success-bg);
-    border-radius: var(--radius-md);
-    padding: 0.6rem 0.8rem;
-    font-size: var(--text-base);
-  }
-
-  .import-report-card h4 {
-    margin: 0 0 0.3rem;
-  }
-
-  .warnings-box {
-    margin-top: 0.4rem;
-    font-size: var(--text-sm);
-  }
-
-  .warnings-box h5 {
-    margin: 0.2rem 0;
-  }
-
-  .request-form {
-    display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-
-  /* ---------- Modal system (backdrop / container / tabs / body / footer) ---------- */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(20, 20, 25, 0.45);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 50;
-    padding: 2rem;
-  }
-
-  .modal-container {
-    background: var(--color-bg);
-    border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-md);
-    padding: 1rem 1.2rem 1.2rem;
-    width: 560px;
-    max-width: 100%;
-    max-height: 85vh;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .modal-container.modal-wide {
-    width: 760px;
-  }
-
-  .modal-title-wrap {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-  }
-
-  .modal-sub {
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-    font-weight: 400;
-  }
-
-  .modal-close-btn {
-    background: none;
-    border: none;
-    color: var(--color-text-tertiary);
-    font-size: var(--text-md);
-    padding: 0.15rem 0.4rem;
-    border-radius: var(--radius-sm);
-  }
-
-  .modal-close-btn:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-danger);
-  }
-
-  .modal-tabs {
-    display: flex;
-    gap: 1rem;
-    border-bottom: 1px solid var(--color-border);
-    margin: 0.2rem 0 0.4rem;
-    overflow-x: auto;
-  }
-
-  .modal-tab-btn {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    padding: 0.5rem 0.1rem;
-    color: var(--color-text-secondary);
-    font-weight: 500;
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    white-space: nowrap;
-  }
-
-  .modal-tab-btn:hover {
-    background: none;
-    color: var(--color-text);
-  }
-
-  .modal-tab-btn.active {
-    color: var(--color-primary);
-    border-bottom-color: var(--color-primary);
-    font-weight: 700;
-  }
-
-  .tab-badge-alert {
-    background: var(--color-danger);
-    color: #fff;
-    font-size: var(--text-2xs);
-    font-weight: 700;
-    border-radius: 999px;
-    padding: 0.05rem 0.4rem;
-  }
-
-  .modal-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-
-  .modal-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.4rem;
-    padding-top: 0.5rem;
-    border-top: 1px solid var(--color-border);
-  }
-
-  .action-alert {
-    padding: 0.4rem 0.7rem;
-    border-radius: var(--radius-md);
-    font-size: var(--text-base);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-  }
-
-  .action-alert.success {
-    background: var(--color-success-bg);
-    color: var(--color-success);
-  }
-
-  .action-alert.error {
-    background: var(--color-danger-bg);
-    color: var(--color-danger);
-  }
-
-  .action-alert.warning {
-    background: var(--color-warn-bg);
-    color: var(--color-warn);
-  }
-
-  .action-alert .btn-xs {
-    flex-shrink: 0;
-  }
-
-  /* ---------- Git status pill (footer) ---------- */
-  .git-status-pill {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    background: var(--color-bg-hover);
-    border: 1px solid var(--color-border);
-    border-radius: 999px;
-    padding: 0.1rem 0.6rem;
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-  }
-
-  .git-status-pill:hover {
-    background: var(--color-bg);
-  }
-
-  .git-status-pill.git-has-conflict {
-    border-color: var(--color-danger);
-    color: var(--color-danger);
-  }
-
-  .git-status-pill.git-kind-ahead,
-  .git-status-pill.git-kind-behind,
-  .git-status-pill.git-kind-modified {
-    border-color: var(--color-warn);
-    color: var(--color-warn);
-  }
-
-  .git-status-pill.git-kind-clean {
-    border-color: var(--color-success);
-    color: var(--color-success);
-  }
-
-  .git-icon {
-    font-weight: 700;
-  }
-
-  .git-alert {
-    color: var(--color-danger);
-    font-weight: 600;
-  }
-
-  .git-ahead,
-  .git-behind {
-    font-weight: 600;
-  }
-
-  /* ---------- Git panel content ---------- */
-  .git-panel-section {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .git-panel-section h4 {
-    margin: 0.2rem 0 0;
-    font-size: var(--text-base);
-  }
-
-  .git-panel-section h5 {
-    margin: 0.2rem 0;
-    font-size: var(--text-base);
-  }
-
-  .legacy-git-banner {
-    padding: 0.7rem 0.9rem;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    background: var(--color-bg-tertiary);
-  }
-
-  .legacy-git-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .legacy-git-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    padding: 0.4rem 0.6rem;
-    background: var(--color-panel-bg);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-  }
-
-  .legacy-git-row-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-    min-width: 0;
-  }
-
-  .form-row-stacked {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-  }
-
-  .form-row-stacked label {
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-  }
-
-  .input-with-actions {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .path-input {
-    flex: 1;
-    font-family: var(--font-mono);
-  }
-
-  .alert-box-warning {
-    background: var(--color-warn-bg);
-    color: var(--color-warn);
-    border-radius: var(--radius-md);
-    padding: 0.6rem 0.8rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    font-size: var(--text-base);
-  }
-
-  .git-status-card {
-    background: var(--color-bg-secondary);
-    border-radius: var(--radius-md);
-    padding: 0.6rem 0.8rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .status-summary-row {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: var(--text-base);
-    flex-wrap: wrap;
-  }
-
-  .status-label {
-    color: var(--color-text-tertiary);
-    font-size: var(--text-sm);
-  }
-
-  .status-sep {
-    color: var(--color-border);
-  }
-
-  .git-badge-kind {
-    font-size: var(--text-xs);
-    font-weight: 700;
-    padding: 0.05rem 0.4rem;
-    border-radius: var(--radius-sm);
-    background: var(--color-bg-hover);
-  }
-
-  .git-badge-kind.kind-clean { color: var(--color-success); }
-  .git-badge-kind.kind-ahead,
-  .git-badge-kind.kind-behind,
-  .git-badge-kind.kind-modified { color: var(--color-warn); }
-  .git-badge-kind.kind-conflict { color: var(--color-danger); }
-
-  .badge-ahead,
-  .badge-behind {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-warn);
-    background: var(--color-warn-bg);
-    border-radius: var(--radius-sm);
-    padding: 0.05rem 0.4rem;
-  }
-
-  .files-changed-summary {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-
-  .file-category {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-  }
-
-  .working-tree-clean {
-    margin: 0;
-    color: var(--color-success);
-    font-size: var(--text-base);
-  }
-
-  .git-commit-box {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .commit-input-row {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .commit-input-row input {
-    flex: 1;
-  }
-
-  .quick-git-actions {
-    display: flex;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-  }
-
-  .icon-btn-text {
-    background: none;
-    border: none;
-    color: var(--color-text-secondary);
-    font-size: var(--text-sm);
-    padding: 0.2rem 0.3rem;
-  }
-
-  .icon-btn-text:hover {
-    background: var(--color-bg-hover);
-    color: var(--color-text);
-  }
-
-  .auto-sync-box {
-    background: var(--color-bg-secondary);
-    border-radius: var(--radius-md);
-    padding: 0.5rem 0.7rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-  }
-
-  .clean-box {
-    background: var(--color-success-bg);
-    color: var(--color-success);
-    border-radius: var(--radius-md);
-    padding: 0.5rem 0.7rem;
-  }
-
-  .clean-box p { margin: 0; }
-
-  .conflict-alert-box {
-    background: var(--color-danger-bg);
-    color: var(--color-danger);
-    border-radius: var(--radius-md);
-    padding: 0.5rem 0.7rem;
-    font-size: var(--text-base);
-  }
-
-  .conflict-alert-box p { margin: 0; }
-
-  .conflicts-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .conflict-item-card {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 0.5rem 0.7rem;
-  }
-
-  .conflict-item-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .conflict-filename {
-    font-family: var(--font-mono);
-    font-size: var(--text-base);
-    font-weight: 600;
-  }
-
-  .conflict-choices {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .btn-choice {
-    font-size: var(--text-xs);
-  }
-
-  .btn-choice.local {
-    border-color: var(--method-put);
-    color: var(--method-put);
-  }
-
-  .btn-choice.remote {
-    border-color: var(--method-get);
-    color: var(--method-get);
-  }
-
-  .github-profile-card {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    background: var(--color-bg-secondary);
-    border-radius: var(--radius-md);
-    padding: 0.5rem 0.7rem;
-  }
-
-  .github-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-  }
-
-  .github-profile-info {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    gap: 0.05rem;
-  }
-
-  .badge-success {
-    background: var(--color-success-bg);
-    color: var(--color-success);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    border-radius: 999px;
-    padding: 0.1rem 0.5rem;
-  }
-
-  .repo-permissions-card {
-    background: var(--color-bg-secondary);
-    border-radius: var(--radius-md);
-    padding: 0.5rem 0.7rem;
-  }
-
-  .perm-badges {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-    margin: 0.3rem 0;
-  }
-
-  .perm-badge {
-    font-size: var(--text-xs);
-    padding: 0.1rem 0.5rem;
-    border-radius: 999px;
-    background: var(--color-danger-bg);
-    color: var(--color-danger);
-  }
-
-  .perm-badge.perm-granted {
-    background: var(--color-success-bg);
-    color: var(--color-success);
-  }
-
-  .projectfile-options {
-    display: flex;
-    align-items: center;
-    gap: 0.8rem;
-  }
-
-  .json-preview-box {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-
-  .json-preview-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-  }
-
-  .toolbar-actions {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .code-area,
-  .diff-viewer {
-    width: 100%;
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-  }
-
-  .diff-viewer {
-    background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 0.7rem;
-    max-height: 420px;
-    overflow: auto;
-    white-space: pre-wrap;
-    word-break: break-word;
-    margin: 0;
-  }
-
-  .history-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    max-height: 420px;
-    overflow-y: auto;
-  }
-
-  .history-item {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 0.4rem 0.6rem;
-  }
-
-  .commit-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: var(--text-sm);
-  }
-
-  .commit-hash {
-    color: var(--color-primary);
-    font-weight: 700;
-  }
-
-  .commit-author {
-    color: var(--color-text-secondary);
-  }
-
-  .commit-date {
-    color: var(--color-text-tertiary);
-  }
-
-  .commit-msg {
-    margin: 0.2rem 0 0;
-    font-size: var(--text-base);
-  }
-
-  /* ---------- Phase 08: AI & Source Intelligence Styles ---------- */
-  .field-header-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
-    margin-bottom: 0.2rem;
-  }
-
-  .field-header-row h4 {
-    margin: 0;
-  }
-
-  .field-header-row .hint {
-    margin: 0;
-  }
-
-  /* — Scripts tab: Pre/Post side selector instead of two long-labeled stacked textareas. — */
-  .scripts-layout {
-    display: flex;
-    gap: var(--space-4);
-    min-height: 0;
-  }
-
-  .scripts-side {
-    flex: none;
-    width: 100px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    border-right: var(--border-strong-width) solid var(--color-border-strong);
-    padding-right: var(--space-3);
-  }
-
-  .scripts-side-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: transparent;
-    border: none;
-    border-left: 3px solid transparent;
-    padding: var(--space-2) var(--space-2);
-    font-size: var(--text-base);
-    font-weight: 600;
-    color: var(--color-text-secondary);
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .scripts-side-item:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .scripts-side-item.active {
-    color: var(--color-text);
-    border-left-color: var(--color-accent);
-    background: var(--color-bg-hover);
-  }
-
-  .scripts-main {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .scripts-textarea {
-    flex: 1;
-    min-height: 280px;
-  }
-
-  .action-feedback-inline {
-    font-size: var(--text-sm);
-    color: var(--color-primary);
-    margin: 0.2rem 0;
-    font-weight: 500;
-  }
-
-  .text-success {
-    color: var(--color-success, #22c55e) !important;
-  }
-
-  .sample-responses-section {
-    border-top: 1px solid var(--color-border);
-    padding: 0.8rem 0.9rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .sample-responses-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .sample-response-card {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    background: var(--color-bg-subtle, rgba(255, 255, 255, 0.02));
-    overflow: hidden;
-  }
-
-  .sample-response-summary {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    padding: 0.4rem 0.6rem;
-    cursor: pointer;
-    user-select: none;
-    font-size: var(--text-base);
-  }
-
-  .sample-name {
-    font-weight: 600;
-    flex: 1;
-  }
-
-  .badge-sample {
-    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
-    color: var(--color-primary);
-    font-size: var(--text-2xs);
-    font-weight: 700;
-    padding: 0.1rem 0.4rem;
-    border-radius: 999px;
-  }
-
-  .badge-framework {
-    background: color-mix(in srgb, #3b82f6 20%, transparent);
-    color: #3b82f6;
-    font-size: var(--text-xs);
-    font-weight: 600;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-  }
-
-  .badge-openapi {
-    background: color-mix(in srgb, #10b981 20%, transparent);
-    color: #10b981;
-    font-size: var(--text-xs);
-    font-weight: 600;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-  }
-
-  .badge-auth {
-    background: color-mix(in srgb, #f59e0b 20%, transparent);
-    color: #f59e0b;
-    font-size: var(--text-xs);
-    padding: 0.1rem 0.35rem;
-    border-radius: 999px;
-  }
-
-  .btn-delete-icon {
-    background: none;
-    border: none;
-    color: var(--color-text-tertiary);
-    cursor: pointer;
-    padding: 0.1rem 0.3rem;
-    border-radius: var(--radius-sm);
-    font-size: var(--text-sm);
-  }
-
-  .btn-delete-icon:hover {
-    color: var(--color-danger);
-    background: var(--color-bg-hover);
-  }
-
-  .ai-context-options {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1rem;
-    background: var(--color-bg-subtle, rgba(255, 255, 255, 0.02));
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 0.5rem 0.8rem;
-  }
-
-  .ai-prompt-form {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .ai-preview-card {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 0.8rem;
-    background: var(--color-bg-subtle, rgba(255, 255, 255, 0.03));
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .preview-title-row {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-  }
-
-  .preview-name {
-    font-weight: 700;
-    font-size: var(--text-md);
-  }
-
-  .preview-url {
-    font-family: monospace;
-    font-size: var(--text-base);
-    color: var(--color-text-secondary);
-  }
-
-  .preview-desc {
-    margin: 0;
-  }
-
-  .preview-meta-row {
-    display: flex;
-    gap: 1rem;
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-  }
-
-  .preview-body-pre {
-    max-height: 180px;
-    overflow: auto;
-    font-size: var(--text-sm);
-    padding: 0.5rem;
-    background: var(--color-bg);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-  }
-
-  .source-scan-bar {
-    display: flex;
-    gap: 0.5rem;
-  }
-
-  .source-summary-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-
-  .source-badges-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-  }
-
-  .source-filter-row input {
-    width: 100%;
-  }
-
-  .discovered-endpoints-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    max-height: 380px;
-    overflow-y: auto;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: 0.4rem;
-  }
-
-  .discovered-endpoint-card {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    padding: 0.4rem 0.6rem;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    background: var(--color-bg);
-  }
-
-  .discovered-endpoint-card:hover {
-    background: var(--color-bg-hover);
-  }
-
-  .ep-info {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    min-width: 0;
-  }
-
-  .ep-path {
-    font-family: monospace;
-    font-size: var(--text-base);
-    font-weight: 600;
-  }
-
-  .ep-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 0.1rem;
-    font-size: var(--text-xs);
-    color: var(--color-text-tertiary);
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .ep-file {
-    font-family: monospace;
-  }
-
-  .ep-summary {
-    color: var(--color-text-secondary);
-  }
-
-  .btn-xs-primary {
-    padding: 0.15rem 0.45rem;
-    font-size: var(--text-xs);
-    font-weight: 600;
-    background: var(--color-primary);
-    color: white;
-    border: none;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .btn-xs-primary:hover:not(:disabled) {
-    opacity: 0.9;
-  }
-
-  .ai-settings-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.8rem;
-  }
-
-  .settings-field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-  }
-
-  .password-input-row {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .password-input-row input {
-    flex: 1;
-  }
-
-  .link-btn {
-    background: none;
-    border: none;
-    color: var(--color-primary);
-    cursor: pointer;
-    text-decoration: underline;
-    padding: 0;
-    font: inherit;
-  }
-</style>
